@@ -2,6 +2,8 @@
 //! Communicates via stdio JSON-RPC (MCP protocol).
 //!
 //! Tools: filesystem_read, filesystem_write, filesystem_list, filesystem_search, filesystem_info,
+//! filesystem_grep (recursive regex content search), filesystem_str_replace, filesystem_insert,
+//! filesystem_apply_patch (precise, reviewable file-edit primitives)
 //! filesystem_grep (recursive regex content search)
 //!
 //! SANDBOX: only WRITE operations are confined to the configured
@@ -275,6 +277,335 @@ fn handle_write(args: Value, cfg: &Config) -> Result<(String, bool)> {
             false,
         ))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tool: file-edit primitives (filesystem_str_replace / filesystem_insert /
+// filesystem_apply_patch)
+//
+// R4: precise, reviewable edits instead of whole-file rewrites. Edits are
+// WRITES: the target path must pass the same sandbox as filesystem_write, and
+// the file must already exist (create files with filesystem_write first).
+// ---------------------------------------------------------------------------
+
+/// Load an existing file for editing: resolve the write sandbox, require the
+/// file to exist, then read its UTF-8 content.
+fn load_file_for_edit(path: &str, cfg: &Config) -> Result<(String, String), String> {
+    let safe_path_str = restrict_write_path(path, cfg)?;
+    let safe_path = Path::new(&safe_path_str);
+    if !safe_path.is_file() {
+        return Err(format!(
+            "cannot edit '{}': file does not exist (create it with filesystem_write first)",
+            safe_path_str
+        ));
+    }
+    let content = fs::read_to_string(safe_path)
+        .map_err(|e| format!("Failed to read file '{}': {}", safe_path_str, e))?;
+    Ok((content, safe_path_str))
+}
+
+/// Snapshot the write-relevant config for an edit-handler closure (same
+/// pattern as the filesystem_write handler).
+fn snapshot_write_cfg(cfg: &Config) -> Config {
+    Config {
+        workspace_dir: cfg.workspace_dir.clone(),
+        omni_dir: cfg.omni_dir.clone(),
+        write_profiles: cfg.write_profiles,
+        write_data: cfg.write_data,
+        write_plugins: cfg.write_plugins,
+        write_omni_all: cfg.write_omni_all,
+    }
+}
+
+/// Number of (non-overlapping) occurrences of `needle` in `haystack`.
+fn count_occurrences(haystack: &str, needle: &str) -> usize {
+    let mut count = 0;
+    let mut start = 0;
+    while let Some(rel) = haystack[start..].find(needle) {
+        count += 1;
+        start += rel + needle.len();
+    }
+    count
+}
+
+/// Byte index of the `n`th (1-based) occurrence of `needle`, if any.
+fn nth_occurrence(haystack: &str, needle: &str, n: usize) -> Option<usize> {
+    let mut start = 0;
+    let mut found = 0;
+    while let Some(rel) = haystack[start..].find(needle) {
+        let abs = start + rel;
+        found += 1;
+        if found == n {
+            return Some(abs);
+        }
+        start = abs + needle.len();
+    }
+    None
+}
+
+/// 1-based line number ('\n'-separated) containing the byte offset `pos`.
+fn line_of_offset(text: &str, pos: usize) -> usize {
+    text[..pos.min(text.len())]
+        .bytes()
+        .filter(|&b| b == b'\n')
+        .count()
+        + 1
+}
+
+/// 1-based start offsets of every line in `text`. A trailing newline does not
+/// open an extra empty line ("a\nb\n" has lines "a" and "b"). Empty text has
+/// zero lines.
+fn line_starts(text: &str) -> Vec<usize> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let mut starts = vec![0usize];
+    let bytes = text.as_bytes();
+    for i in 0..bytes.len() {
+        if bytes[i] == b'\n' && i + 1 < bytes.len() {
+            starts.push(i + 1);
+        }
+    }
+    starts
+}
+
+/// Render a possibly-multiline snippet as one short preview line.
+fn one_line(s: &str, max: usize) -> String {
+    let flat = s.replace('\n', "\\n");
+    if flat.chars().count() > max {
+        let cut: String = flat.chars().take(max).collect();
+        format!("{}...", cut)
+    } else {
+        flat
+    }
+}
+
+/// Replace, in `buf`, the `target`th (1-based) occurrence of `old_string` with
+/// `new_string`. `occurrence` 0 means "must be unique". Returns a short
+/// confirmation string describing the change.
+fn do_replace(
+    buf: &mut String,
+    old_string: &str,
+    new_string: &str,
+    occurrence: usize,
+) -> Result<String, String> {
+    if old_string.is_empty() {
+        return Err("'old_string' must not be empty".to_string());
+    }
+    let count = count_occurrences(buf, old_string);
+    if count == 0 {
+        return Err(format!(
+            "old_string not found in the current content ({} bytes). Read the file and copy the exact text to replace.",
+            buf.len()
+        ));
+    }
+    let target = if occurrence == 0 {
+        if count > 1 {
+            return Err(format!(
+                "old_string occurs {} times in the current content. Make old_string unique by including surrounding context, or pass occurrence=N (1-based) to replace exactly the Nth match.",
+                count
+            ));
+        }
+        1
+    } else if occurrence <= count {
+        occurrence
+    } else {
+        return Err(format!(
+            "occurrence {} out of range: old_string occurs {} time(s) in the current content.",
+            occurrence, count
+        ));
+    };
+    let idx = nth_occurrence(buf, old_string, target)
+        .ok_or_else(|| "internal error: nth_occurrence failed after count check".to_string())?;
+    let line = line_of_offset(buf, idx);
+    buf.replace_range(idx..idx + old_string.len(), new_string);
+    Ok(format!(
+        "replaced at line {} (occurrence {}/{}): '{}' -> '{}'",
+        line,
+        target,
+        count,
+        one_line(old_string, 80),
+        one_line(new_string, 80)
+    ))
+}
+
+/// Insert `content` before 1-based `line` of `buf` (last_line + 1 appends at
+/// the end of the file). The inserted content always occupies its own whole
+/// lines. Returns a short confirmation string.
+fn do_insert(buf: &mut String, line: usize, content: &str) -> Result<String, String> {
+    if content.is_empty() {
+        return Err("'content' must not be empty".to_string());
+    }
+    if line == 0 {
+        return Err("'line' must be >= 1".to_string());
+    }
+    let starts = line_starts(buf);
+    let total = starts.len();
+    if line > total + 1 {
+        return Err(format!(
+            "'line' {} out of range: the file has {} line(s); valid insert lines are 1..={}",
+            line,
+            total,
+            total + 1
+        ));
+    }
+    let at_end = line == total + 1;
+    let pos = if at_end { buf.len() } else { starts[line - 1] };
+    let mut insert = content.to_string();
+    // Appending after a last line that has no trailing newline: open the line
+    // so the inserted content starts on its own line.
+    if at_end && !buf.is_empty() && !buf.ends_with('\n') {
+        insert.insert(0, '\n');
+    }
+    // Mid-file insert: close the inserted content's last line so the text that
+    // follows stays on its own line.
+    if pos < buf.len() && !insert.ends_with('\n') {
+        insert.push('\n');
+    }
+    buf.insert_str(pos, &insert);
+    Ok(format!(
+        "inserted {} line(s) starting at line {}",
+        content.lines().count(),
+        line
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Tool: filesystem_str_replace
+// ---------------------------------------------------------------------------
+
+fn handle_str_replace(args: Value, cfg: &Config) -> Result<(String, bool)> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
+    let old_string = args["old_string"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing 'old_string' argument"))?;
+    let new_string = args["new_string"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing 'new_string' argument"))?;
+    let occurrence = args["occurrence"].as_u64().unwrap_or(0) as usize;
+    let (mut content, safe_path_str) =
+        load_file_for_edit(path, cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let old_len = content.len();
+    let confirmation =
+        do_replace(&mut content, old_string, new_string, occurrence).map_err(anyhow::Error::msg)?;
+    fs::write(&safe_path_str, &content)
+        .map_err(|e| anyhow::anyhow!("Failed to write file '{}': {}", safe_path_str, e))?;
+    Ok((
+        format!(
+            "Successfully replaced old_string in '{}':\n  {}\nFile size: {} -> {} bytes.",
+            safe_path_str,
+            confirmation,
+            old_len,
+            content.len()
+        ),
+        false,
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Tool: filesystem_insert
+// ---------------------------------------------------------------------------
+
+fn handle_insert(args: Value, cfg: &Config) -> Result<(String, bool)> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
+    let line = args["line"]
+        .as_u64()
+        .ok_or_else(|| anyhow::anyhow!("Missing 'line' argument"))? as usize;
+    let content = args["content"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing 'content' argument"))?;
+    let (mut buf, safe_path_str) =
+        load_file_for_edit(path, cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let old_len = buf.len();
+    let confirmation = do_insert(&mut buf, line, content).map_err(anyhow::Error::msg)?;
+    fs::write(&safe_path_str, &buf)
+        .map_err(|e| anyhow::anyhow!("Failed to write file '{}': {}", safe_path_str, e))?;
+    let total_now = line_starts(&buf).len();
+    Ok((
+        format!(
+            "Successfully inserted content into '{}':\n  {}\nFile size: {} -> {} bytes ({} line(s) now).",
+            safe_path_str, confirmation, old_len, buf.len(), total_now
+        ),
+        false,
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Tool: filesystem_apply_patch
+// ---------------------------------------------------------------------------
+
+fn handle_apply_patch(args: Value, cfg: &Config) -> Result<(String, bool)> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
+    let edits = args["edits"].as_array().cloned().unwrap_or_default();
+    if edits.is_empty() {
+        return Err(anyhow::anyhow!(
+            "'edits' must be a non-empty array of edit operations, e.g. [{{\"op\": \"replace\", \"old_string\": \"...\", \"new_string\": \"...\"}}]"
+        ));
+    }
+    let (mut buf, safe_path_str) =
+        load_file_for_edit(path, cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let old_len = buf.len();
+    let mut confirmations: Vec<String> = Vec::with_capacity(edits.len());
+    for (i, edit) in edits.iter().enumerate() {
+        let op = edit.get("op").and_then(|v| v.as_str()).unwrap_or("");
+        let result = match op {
+            "replace" => {
+                let old_string =
+                    edit.get("old_string")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("edits[{}]: replace op needs 'old_string'", i)
+                        })?;
+                let new_string = edit
+                    .get("new_string")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let occurrence =
+                    edit.get("occurrence").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                do_replace(&mut buf, old_string, new_string, occurrence)
+            }
+            "insert" => {
+                let line = edit.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let content = edit
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("edits[{}]: insert op needs 'content'", i))?;
+                do_insert(&mut buf, line, content)
+            }
+            "" => Err(format!(
+                "edits[{}]: missing 'op' (use \"replace\" or \"insert\")",
+                i
+            )),
+            other => Err(format!(
+                "edits[{}]: unknown op '{}' (use \"replace\" or \"insert\")",
+                i, other
+            )),
+        };
+        let confirmation = result
+            .map_err(|e| anyhow::anyhow!("edits[{}] failed: {}; no changes were written", i, e))?;
+        confirmations.push(format!("  {}/{} {}", i + 1, edits.len(), confirmation));
+    }
+    // Every edit validated and applied to the in-memory copy - write once.
+    fs::write(&safe_path_str, &buf)
+        .map_err(|e| anyhow::anyhow!("Failed to write file '{}': {}", safe_path_str, e))?;
+    Ok((
+        format!(
+            "Successfully applied {} edit(s) to '{}':\n{}\nFile size: {} -> {} bytes ({} line(s) now).",
+            edits.len(),
+            safe_path_str,
+            confirmations.join("\n"),
+            old_len,
+            buf.len(),
+            line_starts(&buf).len()
+        ),
+        false,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -735,6 +1066,24 @@ async fn main() -> Result<()> {
         handle_grep(args, &wd)
     });
 
+    let c7 = config.clone();
+    let str_replace_handler = soft_error(move |args: Value| {
+        let write_cfg = snapshot_write_cfg(&c7.lock());
+        handle_str_replace(args, &write_cfg)
+    });
+
+    let c8 = config.clone();
+    let insert_handler = soft_error(move |args: Value| {
+        let write_cfg = snapshot_write_cfg(&c8.lock());
+        handle_insert(args, &write_cfg)
+    });
+
+    let c9 = config.clone();
+    let apply_patch_handler = soft_error(move |args: Value| {
+        let write_cfg = snapshot_write_cfg(&c9.lock());
+        handle_apply_patch(args, &write_cfg)
+    });
+
     let tools = vec![
         McpToolEntry {
             def: McpToolDef {
@@ -900,6 +1249,91 @@ async fn main() -> Result<()> {
                 }),
             },
             handler: grep_handler,
+        },
+
+        McpToolEntry {
+            def: McpToolDef {
+                name: "filesystem_str_replace".to_string(),
+                description:
+                    "REPLACE AN EXACT STRING INSIDE A FILE (surgical edit). Use for precise, reviewable edits instead of rewriting the whole file with filesystem_write: only the matched text changes, the rest of the file is untouched. 'old_string' must appear in the file - when it appears several times the call fails unless you pass occurrence=N (1-based) to pick the Nth match or extend old_string with surrounding context to make it unique. Pass new_string = \"\" (empty string) to delete the matched text. The file must already exist, and the path must be inside the same write sandbox as filesystem_write (workspace dir or enabled OMNI_DIR subdirs). Returns a confirmation with the affected line number, occurrence, previews and the new file size."
+                        .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute path to the existing file to edit (same write sandbox as filesystem_write)"
+                        },
+                        "old_string": {
+                            "type": "string",
+                            "description": "Exact text to replace. Must appear in the file; if it appears several times, include surrounding context to make it unique or pass occurrence=N."
+                        },
+                        "new_string": {
+                            "type": "string",
+                            "description": "Replacement text. Pass an empty string to delete the matched text."
+                        },
+                        "occurrence": {
+                            "type": "integer",
+                            "description": "Optional 1-based index of the match to replace when old_string occurs several times (omit when the match is unique)"
+                        }
+                    },
+                    "required": ["path", "old_string", "new_string"]
+                }),
+            },
+            handler: str_replace_handler,
+        },
+        McpToolEntry {
+            def: McpToolDef {
+                name: "filesystem_insert".to_string(),
+                description:
+                    "INSERT LINES INTO AN EXISTING FILE at a 1-based line number (surgical edit). 'content' is inserted BEFORE 'line': line 1 inserts at the top of the file, line = last_line+1 appends at the end. The inserted content always occupies its own whole lines (newlines are added automatically where needed). Use for precise, reviewable edits instead of rewriting the whole file with filesystem_write. The file must already exist, and the path must be inside the same write sandbox as filesystem_write. Returns a confirmation with the inserted position/line count and the new file size."
+                        .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute path to the existing file to edit (same write sandbox as filesystem_write)"
+                        },
+                        "line": {
+                            "type": "integer",
+                            "description": "1-based line number before which content is inserted (last_line + 1 appends at the end of the file)"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Lines to insert (may be multi-line; newline handling is automatic)"
+                        }
+                    },
+                    "required": ["path", "line", "content"]
+                }),
+            },
+            handler: insert_handler,
+        },
+        McpToolEntry {
+            def: McpToolDef {
+                name: "filesystem_apply_patch".to_string(),
+                description:
+                    "APPLY A BATCH OF PRECISE EDITS TO A FILE, ATOMICALLY. 'edits' is an array of operations applied in order to an in-memory copy: if ANY operation fails to match, NOTHING is written and the file is left exactly as it was. Each operation: {\"op\": \"replace\", \"old_string\": ..., \"new_string\": ..., \"occurrence\": N?} replaces an exact string (new_string omitted or \"\" deletes; occurrence is an optional 1-based index for repeated matches), or {\"op\": \"insert\", \"line\": N, \"content\": ...} inserts content before the 1-based line N. Use apply_patch for multi-hunk edits in one reviewable call instead of several whole-file rewrites. Same rules as filesystem_str_replace/filesystem_insert: the file must exist and the path must be inside the write sandbox."
+                        .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute path to the existing file to edit (same write sandbox as filesystem_write)"
+                        },
+                        "edits": {
+                            "type": "array",
+                            "items": {
+                                "type": "object"
+                            },
+                            "description": "Non-empty array of edit operations applied in order and atomically. replace: {\"op\":\"replace\",\"old_string\":...,\"new_string\":...(\"\" or omitted deletes),\"occurrence\":N?} | insert: {\"op\":\"insert\",\"line\":N,\"content\":...}"
+                        }
+                    },
+                    "required": ["path", "edits"]
+                }),
+            },
+            handler: apply_patch_handler,
         },
     ];
 
@@ -1176,6 +1610,381 @@ mod tests {
         .expect_err("invalid regex must be rejected by the handler");
         assert!(err.to_string().contains("Invalid regex"), "err: {err}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Test helper: throwaway temp dir + file with `content`, and a Config
+    /// whose workspace is that dir so file-edit tools are allowed to write.
+    fn tmp_edit_env(name: &str, content: &str) -> (std::path::PathBuf, Config) {
+        let dir = std::env::temp_dir().join(format!("fs-edit-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("file.txt");
+        fs::write(&p, content).unwrap();
+        let cfg = Config {
+            workspace_dir: dir.to_string_lossy().to_string(),
+            ..Config::default()
+        };
+        (p, cfg)
+    }
+
+    #[test]
+    fn str_replace_unique_single_match() {
+        let (p, cfg) = tmp_edit_env(
+            "sr-unique",
+            "fn main() {\n    let x = 1;\n    let y = 2;\n}\n",
+        );
+        let (msg, is_error) = handle_str_replace(
+            serde_json::json!({
+                "path": p.to_string_lossy(),
+                "old_string": "let x = 1;",
+                "new_string": "let x = 10;"
+            }),
+            &cfg,
+        )
+        .expect("replace must succeed");
+        assert!(!is_error, "msg: {msg}");
+        let content = fs::read_to_string(&p).unwrap();
+        assert!(content.contains("let x = 10;"), "content: {content}");
+        assert!(!content.contains("let x = 1;"), "content: {content}");
+        assert!(content.contains("let y = 2;"), "content: {content}");
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn str_replace_not_found_is_an_error() {
+        let (p, cfg) = tmp_edit_env("sr-notfound", "hello world\n");
+        let err = handle_str_replace(
+            serde_json::json!({
+                "path": p.to_string_lossy(),
+                "old_string": "does not exist",
+                "new_string": "x"
+            }),
+            &cfg,
+        )
+        .expect_err("missing old_string must be rejected");
+        assert!(err.to_string().contains("not found"), "err: {err}");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "hello world\n");
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn str_replace_multiple_occurrences_need_disambiguation() {
+        let (p, cfg) = tmp_edit_env("sr-multi", "a\nb\na\n");
+        let err = handle_str_replace(
+            serde_json::json!({"path": p.to_string_lossy(), "old_string": "a", "new_string": "X"}),
+            &cfg,
+        )
+        .expect_err("ambiguous old_string must be rejected");
+        assert!(err.to_string().contains("occurs 2 times"), "err: {err}");
+        // occurrence=N picks exactly the Nth match.
+        let (msg, is_error) = handle_str_replace(
+            serde_json::json!({
+                "path": p.to_string_lossy(),
+                "old_string": "a",
+                "new_string": "X",
+                "occurrence": 2
+            }),
+            &cfg,
+        )
+        .expect("occurrence must succeed");
+        assert!(!is_error, "msg: {msg}");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "a\nb\nX\n");
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn str_replace_out_of_range_occurrence_errors() {
+        let (p, cfg) = tmp_edit_env("sr-oob", "only-one\n");
+        let err = handle_str_replace(
+            serde_json::json!({
+                "path": p.to_string_lossy(),
+                "old_string": "only-one",
+                "new_string": "x",
+                "occurrence": 3
+            }),
+            &cfg,
+        )
+        .expect_err("occurrence beyond count must be rejected");
+        assert!(err.to_string().contains("out of range"), "err: {err}");
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn str_replace_empty_new_string_deletes() {
+        let (p, cfg) = tmp_edit_env("sr-del", "keep me, DELETE please\n");
+        let (msg, is_error) = handle_str_replace(
+            serde_json::json!({
+                "path": p.to_string_lossy(),
+                "old_string": "DELETE",
+                "new_string": ""
+            }),
+            &cfg,
+        )
+        .expect("delete must succeed");
+        assert!(!is_error, "msg: {msg}");
+        let content = fs::read_to_string(&p).unwrap();
+        assert!(!content.contains("DELETE"), "content: {content}");
+        assert!(content.contains("keep me"), "content: {content}");
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn str_replace_multiline_match() {
+        let (p, cfg) = tmp_edit_env("sr-ml", "fn main() {\n    let x = 1;\n    let y = 2;\n}\n");
+        let (msg, is_error) = handle_str_replace(
+            serde_json::json!({
+                "path": p.to_string_lossy(),
+                "old_string": "    let x = 1;\n    let y = 2;",
+                "new_string": "    let x = 1;\n    let y = 2;\n    let z = 3;"
+            }),
+            &cfg,
+        )
+        .expect("multiline replace must succeed");
+        assert!(!is_error, "msg: {msg}");
+        let content = fs::read_to_string(&p).unwrap();
+        assert!(content.contains("let z = 3;"), "content: {content}");
+        assert_eq!(
+            content,
+            "fn main() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n}\n"
+        );
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn str_replace_outside_sandbox_rejected() {
+        let cfg = Config {
+            workspace_dir: "/opt/workspace".to_string(),
+            ..Config::default()
+        };
+        let err = handle_str_replace(
+            serde_json::json!({
+                "path": "/etc/hostname",
+                "old_string": "x",
+                "new_string": "y"
+            }),
+            &cfg,
+        )
+        .expect_err("edit outside sandbox must be rejected");
+        assert!(
+            err.to_string().contains("allowed write roots"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn str_replace_missing_file_errors() {
+        let dir = std::env::temp_dir().join(format!("fs-edit-missing-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let cfg = Config {
+            workspace_dir: dir.to_string_lossy().to_string(),
+            ..Config::default()
+        };
+        let err = handle_str_replace(
+            serde_json::json!({
+                "path": dir.join("nope.txt").to_string_lossy(),
+                "old_string": "x",
+                "new_string": "y"
+            }),
+            &cfg,
+        )
+        .expect_err("editing a missing file must be rejected");
+        assert!(err.to_string().contains("does not exist"), "err: {err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn insert_before_line_mid_file() {
+        let (p, cfg) = tmp_edit_env("ins-mid", "line1\nline3\n");
+        let (msg, is_error) = handle_insert(
+            serde_json::json!({
+                "path": p.to_string_lossy(),
+                "line": 2,
+                "content": "line2"
+            }),
+            &cfg,
+        )
+        .expect("insert must succeed");
+        assert!(!is_error, "msg: {msg}");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "line1\nline2\nline3\n");
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn insert_at_top_and_multiline() {
+        let (p, cfg) = tmp_edit_env("ins-top", "b\nc\n");
+        let (msg, is_error) = handle_insert(
+            serde_json::json!({
+                "path": p.to_string_lossy(),
+                "line": 1,
+                "content": "x\ny"
+            }),
+            &cfg,
+        )
+        .expect("insert must succeed");
+        assert!(!is_error, "msg: {msg}");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "x\ny\nb\nc\n");
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn insert_appends_at_end_of_file() {
+        // File with a trailing newline: appending adds a new last line.
+        let (p, cfg) = tmp_edit_env("ins-end-nl", "x\ny\n");
+        let (msg, is_error) = handle_insert(
+            serde_json::json!({"path": p.to_string_lossy(), "line": 3, "content": "z"}),
+            &cfg,
+        )
+        .expect("insert must succeed");
+        assert!(!is_error, "msg: {msg}");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "x\ny\nz");
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+
+        // File WITHOUT a trailing newline: appending must still start a new line.
+        let (p2, cfg2) = tmp_edit_env("ins-end-nonl", "x\ny");
+        let (msg2, is_error2) = handle_insert(
+            serde_json::json!({"path": p2.to_string_lossy(), "line": 3, "content": "z"}),
+            &cfg2,
+        )
+        .expect("insert must succeed");
+        assert!(!is_error2, "msg: {msg2}");
+        assert_eq!(fs::read_to_string(&p2).unwrap(), "x\ny\nz");
+        let _ = fs::remove_dir_all(p2.parent().unwrap());
+    }
+
+    #[test]
+    fn insert_into_empty_file() {
+        let (p, cfg) = tmp_edit_env("ins-empty", "");
+        let (msg, is_error) = handle_insert(
+            serde_json::json!({"path": p.to_string_lossy(), "line": 1, "content": "hello"}),
+            &cfg,
+        )
+        .expect("insert into empty file must succeed");
+        assert!(!is_error, "msg: {msg}");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "hello");
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn insert_invalid_line_errors() {
+        let (p, cfg) = tmp_edit_env("ins-bad", "a\nb\n");
+        let err = handle_insert(
+            serde_json::json!({"path": p.to_string_lossy(), "line": 5, "content": "z"}),
+            &cfg,
+        )
+        .expect_err("line beyond last+1 must be rejected");
+        assert!(err.to_string().contains("out of range"), "err: {err}");
+        let err0 = handle_insert(
+            serde_json::json!({"path": p.to_string_lossy(), "line": 0, "content": "z"}),
+            &cfg,
+        )
+        .expect_err("line 0 must be rejected");
+        assert!(err0.to_string().contains(">= 1"), "err: {err0}");
+        let errempty = handle_insert(
+            serde_json::json!({"path": p.to_string_lossy(), "line": 1, "content": ""}),
+            &cfg,
+        )
+        .expect_err("empty content must be rejected");
+        assert!(
+            errempty.to_string().contains("not be empty"),
+            "err: {errempty}"
+        );
+        assert_eq!(fs::read_to_string(&p).unwrap(), "a\nb\n");
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn apply_patch_applies_ops_in_order() {
+        let (p, cfg) = tmp_edit_env("ap-ok", "fn main() {\n    let a = 1;\n    let b = 2;\n}\n");
+        let (msg, is_error) = handle_apply_patch(
+            serde_json::json!({
+                "path": p.to_string_lossy(),
+                "edits": [
+                    {"op": "replace", "old_string": "let a = 1;", "new_string": "let a = 10;"},
+                    {"op": "replace", "old_string": "let b = 2;", "new_string": "let b = 20;"},
+                    {"op": "insert", "line": 4, "content": "    println!(\"hi\");"}
+                ]
+            }),
+            &cfg,
+        )
+        .expect("apply_patch must succeed");
+        assert!(!is_error, "msg: {msg}");
+        assert!(msg.contains("3 edit(s)"), "msg: {msg}");
+        assert_eq!(
+            fs::read_to_string(&p).unwrap(),
+            "fn main() {\n    let a = 10;\n    let b = 20;\n    println!(\"hi\");\n}\n"
+        );
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn apply_patch_delete_op_and_occurrence() {
+        let (p, cfg) = tmp_edit_env("ap-del", "keep this\nDROP\nkeep that\nDROP\n");
+        let (msg, is_error) = handle_apply_patch(
+            serde_json::json!({
+                "path": p.to_string_lossy(),
+                "edits": [
+                    {"op": "replace", "old_string": "DROP", "occurrence": 2},
+                    {"op": "replace", "old_string": "this", "new_string": "THIS"}
+                ]
+            }),
+            &cfg,
+        )
+        .expect("apply_patch with occurrence/delete must succeed");
+        assert!(!is_error, "msg: {msg}");
+        assert_eq!(
+            fs::read_to_string(&p).unwrap(),
+            "keep THIS\nDROP\nkeep that\n\n"
+        );
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn apply_patch_failure_is_atomic_file_unchanged() {
+        let (p, cfg) = tmp_edit_env("ap-atomic", "keep me\noriginal\n");
+        let err = handle_apply_patch(
+            serde_json::json!({
+                "path": p.to_string_lossy(),
+                "edits": [
+                    {"op": "replace", "old_string": "original", "new_string": "changed"},
+                    {"op": "replace", "old_string": "not present anywhere", "new_string": "x"}
+                ]
+            }),
+            &cfg,
+        )
+        .expect_err("a failing op must abort the whole patch");
+        assert!(err.to_string().contains("edits[1] failed"), "err: {err}");
+        assert!(
+            err.to_string().contains("no changes were written"),
+            "err: {err}"
+        );
+        assert_eq!(fs::read_to_string(&p).unwrap(), "keep me\noriginal\n");
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn apply_patch_bad_inputs_error() {
+        let (p, cfg) = tmp_edit_env("ap-bad", "content\n");
+        let err_empty = handle_apply_patch(
+            serde_json::json!({"path": p.to_string_lossy(), "edits": []}),
+            &cfg,
+        )
+        .expect_err("empty edits must be rejected");
+        assert!(
+            err_empty.to_string().contains("non-empty"),
+            "err: {err_empty}"
+        );
+        let err_op = handle_apply_patch(
+            serde_json::json!({
+                "path": p.to_string_lossy(),
+                "edits": [{"op": "frobnicate", "old_string": "content", "new_string": "x"}]
+            }),
+            &cfg,
+        )
+        .expect_err("unknown op must be rejected");
+        assert!(err_op.to_string().contains("unknown op"), "err: {err_op}");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "content\n");
+        let _ = fs::remove_dir_all(p.parent().unwrap());
     }
 
     #[test]
