@@ -103,10 +103,10 @@ fn handle_create_skill(args: Value, config: &Config, profile_name: &str) -> Resu
         )
     })?;
 
-    // Write the file - Hermes-compatible SKILL.md with rich frontmatter:
+    // Write the file - SKILL.md with rich frontmatter:
     // description follows the "Use when <trigger>..." convention (prepended
     // when missing) so the prompt block renders an actionable trigger; license
-    // MIT; optional metadata.hermes tags / related_skills from args.
+    // MIT; optional metadata.omni tags / related_skills from args.
     let use_when = if description.trim().to_lowercase().starts_with("use when") {
         description.trim().to_string()
     } else {
@@ -128,7 +128,7 @@ fn handle_create_skill(args: Value, config: &Config, profile_name: &str) -> Resu
         .filter(|t| !t.is_empty())
         .collect();
     if !tag_list.is_empty() || !related_list.is_empty() {
-        frontmatter.push_str("metadata:\n  hermes:\n");
+        frontmatter.push_str("metadata:\n  omni:\n");
         if !tag_list.is_empty() {
             frontmatter.push_str("    tags:\n");
             for tag in &tag_list {
@@ -718,7 +718,7 @@ async fn main() -> Result<()> {
             def: McpToolDef {
                 name: "create_skill".to_string(),
                 description:
-                    "Create a new skill (SKILL.md file) for reusable procedures. Skills allow the agent to automate recurring task patterns. The skill is saved to the ACTIVE PROFILE's skills dir in the Hermes layout (<data_dir>/profiles/<profile>/skills/<category>/<name>/SKILL.md) so it shows up in the agent's own 'Available skills' prompt; with no active profile it falls back to <data_dir>/skills/<category>/<name>/SKILL.md. Frontmatter follows Hermes conventions: description (max 1024 chars) is prefixed with 'Use when ' when missing, license is MIT, and optional comma-separated tags / related_skills land under metadata.hermes. It will be available for future sessions."
+                    "Create a new skill (SKILL.md file) for reusable procedures. Skills allow the agent to automate recurring task patterns. The skill is saved to the ACTIVE PROFILE's skills dir in the categorized layout (<data_dir>/profiles/<profile>/skills/<category>/<name>/SKILL.md) so it shows up in the agent's own 'Available skills' prompt; with no active profile it falls back to <data_dir>/skills/<category>/<name>/SKILL.md. Frontmatter follows omniagent conventions: description (max 1024 chars) is prefixed with 'Use when ' when missing, license is MIT, and optional comma-separated tags / related_skills land under metadata.omni. It will be available for future sessions."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -741,11 +741,11 @@ async fn main() -> Result<()> {
                         },
                         "tags": {
                             "type": "string",
-                            "description": "Optional comma-separated tags for the skill (stored under metadata.hermes.tags)"
+                            "description": "Optional comma-separated tags for the skill (stored under metadata.omni.tags)"
                         },
                         "related_skills": {
                             "type": "string",
-                            "description": "Optional comma-separated names of related skills (stored under metadata.hermes.related_skills)"
+                            "description": "Optional comma-separated names of related skills (stored under metadata.omni.related_skills)"
                         }
                     },
                     "required": ["name", "description", "content"]
@@ -1026,7 +1026,7 @@ mod tests {
     }
 
     #[test]
-    fn create_skill_writes_hermes_dir_layout_with_frontmatter() {
+    fn create_skill_writes_dir_layout_with_frontmatter() {
         let (cfg, dir) = test_config();
         let (msg, is_error) = handle_create_skill(
             serde_json::json!({

@@ -392,7 +392,7 @@ async fn self_restart_guard_block(args_json: &str) -> Option<String> {
     if guard_blocks(verb, self_project.as_deref(), target_project.as_deref()) {
         Some(format!(
             "Blocked: docker_compose '{verb}' targets compose project '{target}' - the project this agent runs inside (self project '{self_name}'). \
-             Tearing down your own container kills this thread. Only Hermes may restart the stack. \
+             Tearing down your own container kills this thread. Only the operator may restart the stack. \
              You may manage OTHER compose projects (e.g. the omnidev dev stack) freely; `up` is never blocked.",
             target = target_project.as_deref().unwrap_or("?"),
             self_name = self_project.as_deref().unwrap_or("?"),

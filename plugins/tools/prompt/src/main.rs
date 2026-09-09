@@ -1251,8 +1251,7 @@ fn extract_frontmatter_field(content: &str, field: &str) -> Option<String> {
     None
 }
 
-/// Display name for a skill: the frontmatter `name:` when present (tool- and
-/// Hermes-created skills), otherwise the file stem / directory name.
+/// Display name for a skill: the frontmatter `name:` when present (tool-created skills), otherwise the file stem / directory name.
 fn skill_display_name(content: &str, fallback: &str) -> String {
     extract_frontmatter_field(content, "name")
         .filter(|n| !n.trim().is_empty())
@@ -1264,7 +1263,7 @@ fn skill_display_name(content: &str, fallback: &str) -> String {
 ///
 /// Both storage layouts are supported:
 ///   - flat `<skills>/<name>.md` (hand-written skills; name = file stem)
-///   - Hermes-style `<skills>/<category>/<name>/SKILL.md` (name = dir name, or
+///   - categorized `<skills>/<category>/<name>/SKILL.md` (name = dir name, or
 ///     the frontmatter `name:` when present)
 ///
 /// Descriptions come from the frontmatter `description:` field when present,
@@ -1287,7 +1286,7 @@ fn get_skills(data_dir: &str, profile_name: &str) -> Vec<String> {
                     skills.push(format!("- {}: {}", name, desc));
                 }
             }
-            // Pattern B: Hermes directory layout <category>/<name>/SKILL.md.
+            // Pattern B: categorized directory layout <category>/<name>/SKILL.md.
             if path.is_dir() {
                 if let Ok(cat_entries) = std::fs::read_dir(&path) {
                     for cat_entry in cat_entries.flatten() {
@@ -3207,15 +3206,15 @@ mod skills_block_tests {
             "# Handwritten Skill\n\nBody text.\n",
         )
         .unwrap();
-        // Hermes dir layout: <skills>/<category>/<name>/SKILL.md.
-        let hermes = skills_dir
+        // Categorized dir layout: <skills>/<category>/<name>/SKILL.md.
+        let categorized = skills_dir
             .join("devops")
-            .join("hermes-style")
+            .join("categorized-style")
             .join("SKILL.md");
-        fs::create_dir_all(hermes.parent().unwrap()).unwrap();
+        fs::create_dir_all(categorized.parent().unwrap()).unwrap();
         fs::write(
-            hermes,
-            "---\nname: hermes-style\ndescription: \"Use when following Hermes conventions\"\n---\n\n# Hermes Style\n\nBody.\n",
+            categorized,
+            "---\nname: categorized-style\ndescription: \"Use when following the categorized directory layout\"\n---\n\n# Categorized Style\n\nBody.\n",
         )
         .unwrap();
         dir
@@ -3256,16 +3255,16 @@ mod skills_block_tests {
     }
 
     #[test]
-    fn get_skills_lists_hermes_dir_layout() {
+    fn get_skills_lists_categorized_dir_layout() {
         let dir = skill_test_dir();
         let skills = get_skills(dir.to_str().unwrap(), "omni");
-        let hermes = skills
+        let categorized = skills
             .iter()
-            .find(|s| s.starts_with("- hermes-style:"))
+            .find(|s| s.starts_with("- categorized-style:"))
             .expect("dir-layout skill listed");
         assert!(
-            hermes.contains("Use when following Hermes conventions"),
-            "dir-layout description must come from frontmatter: {hermes}"
+            categorized.contains("Use when following the categorized directory layout"),
+            "dir-layout description must come from frontmatter: {categorized}"
         );
         assert_eq!(skills.len(), 3, "all three layouts listed: {skills:?}");
         let _ = fs::remove_dir_all(&dir);

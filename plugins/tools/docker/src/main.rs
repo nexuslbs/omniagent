@@ -520,7 +520,7 @@ fn build_compose_command(
 /// Detect a host port allocation conflict in docker compose stderr and build a
 /// helpful message naming the port and suggesting a fix.
 ///
-/// Docker-on-Docker (this Hermes container) has NO host port mapping, so agent
+/// Docker-on-Docker (this omniagent container) has NO host port mapping, so agent
 /// projects commonly collide with other containers that DO publish ports
 /// (movie-db backend hit "Bind for 0.0.0.0:8080 failed: port is already
 /// allocated"). When the error contains the classic Docker message, extract the
