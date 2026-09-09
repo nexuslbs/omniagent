@@ -2,9 +2,9 @@
 //! Communicates via stdio JSON-RPC (MCP protocol).
 //!
 //! Tools: filesystem_read, filesystem_write, filesystem_list, filesystem_search, filesystem_info,
-//! filesystem_grep (recursive regex content search), filesystem_str_replace, filesystem_insert,
-//! filesystem_apply_patch (precise, reviewable file-edit primitives)
-//! filesystem_grep (recursive regex content search)
+//! filesystem_grep (ripgrep-backed recursive content search, caps + spill to file),
+//! filesystem_str_replace, filesystem_insert, filesystem_apply_patch (precise, reviewable
+//! file-edit primitives)
 //!
 //! SANDBOX: only WRITE operations are confined to the configured
 //! `workspace_dir` (default `/opt/workspace`) and its subdirectories.
@@ -14,6 +14,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use ignore::WalkBuilder;
 use mcp_server_util::*;
 use parking_lot::Mutex;
 use regex::RegexBuilder;
@@ -804,17 +805,155 @@ fn handle_info(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
 // Tool: filesystem_grep (recursive regex content search)
 // ---------------------------------------------------------------------------
 
-fn handle_grep(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
+// ---------------------------------------------------------------------------
+// Tool: filesystem_grep - RIPGREP-BACKED recursive content search (R5)
+//
+// Directory traversal uses ignore::WalkBuilder, the same engine ripgrep is
+// built on (cycle-safe, no symlink following, opt-in hidden/.gitignore
+// filtering). Content matching stays per-line regex (case-insensitive by
+// default). Inline results are capped at max_results; when the cap is
+// exceeded the FULL result list is spilled verbatim to a file whose path is
+// reported, so no match is ever silently dropped.
+// ---------------------------------------------------------------------------
+
+const GREP_MAX_SPILL_BYTES: u64 = 64 * 1024 * 1024; // stop spilling past 64 MiB
+
+/// Preferred spill root honoring the write sandbox: platform-style
+/// {OMNI_DIR}/data/spill when OMNI_DIR/data writes are enabled (default),
+/// else {workspace}/.grep-spill (the workspace root is always writable).
+fn grep_spill_root(cfg: &Config) -> std::path::PathBuf {
+    let ws = resolve_workspace_dir(&cfg.workspace_dir);
+    let omni = resolve_omni_dir(&cfg.omni_dir);
+    if cfg.write_omni_all || cfg.write_data {
+        std::path::PathBuf::from(omni).join("data").join("spill")
+    } else {
+        std::path::PathBuf::from(ws).join(".grep-spill")
+    }
+}
+
+/// Keep only `[A-Za-z0-9._-]` (max 64 chars) so a base path can never inject
+/// separators or metacharacters into a spill file name.
+fn sanitize_spill_segment(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() || out == "." || out == ".." {
+        return "grep".to_string();
+    }
+    if out.chars().count() > 64 {
+        out = out.chars().take(64).collect();
+    }
+    out
+}
+
+/// Streaming sink for spilled grep results. Created lazily the first time the
+/// inline cap is exceeded; every match (including the inline head) is written
+/// so the spill file is a complete record of the hit list.
+struct GrepSpill {
+    writer: std::io::BufWriter<std::fs::File>,
+    path: std::path::PathBuf,
+    bytes: u64,
+    stopped: bool, // hit the byte cap or a write error
+}
+
+impl GrepSpill {
+    fn create(cfg: &Config, base_tag: &str) -> std::io::Result<GrepSpill> {
+        let root = grep_spill_root(cfg);
+        fs::create_dir_all(&root)?;
+        let tag = sanitize_spill_segment(base_tag);
+        for nonce in 0..100u32 {
+            let name = format!(
+                "filesystem_grep-{}-{}-{}.txt",
+                tag,
+                std::process::id(),
+                nonce
+            );
+            let path = root.join(name);
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(f) => {
+                    return Ok(GrepSpill {
+                        writer: std::io::BufWriter::new(f),
+                        path,
+                        bytes: 0,
+                        stopped: false,
+                    })
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not allocate a unique grep spill file",
+        ))
+    }
+
+    /// Append one formatted hit line. After the byte cap or a write error the
+    /// sink stops accepting lines but the caller keeps counting matches.
+    fn push(&mut self, line: &str) {
+        use std::io::Write;
+        if self.stopped {
+            return;
+        }
+        let mut buf = String::with_capacity(line.len() + 1);
+        buf.push_str(line);
+        buf.push('\n');
+        self.bytes += buf.len() as u64;
+        if self.bytes > GREP_MAX_SPILL_BYTES {
+            self.stopped = true;
+            return;
+        }
+        if self.writer.write_all(buf.as_bytes()).is_err() {
+            self.stopped = true;
+        }
+    }
+
+    /// Flush buffered lines so the spill file is complete before the caller
+    /// reports its path.
+    fn finish(&mut self) {
+        use std::io::Write;
+        let _ = self.writer.flush();
+    }
+}
+
+fn handle_grep(args: Value, cfg: &Config) -> Result<(String, bool)> {
     let pattern = args["pattern"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing 'pattern' argument"))?;
+    let workspace_dir = resolve_workspace_dir(&cfg.workspace_dir);
     // Default the base to the workspace root, but searches may point
     // anywhere - searching is a read.
-    let base_path = args["path"].as_str().unwrap_or(workspace_dir);
-    let safe_base = resolve_read_path(base_path, workspace_dir);
-    let glob_filter = args["glob"].as_str().map(|s| s.to_string());
+    let base_path = args["path"].as_str().unwrap_or(&workspace_dir);
+    let safe_base = resolve_read_path(base_path, &workspace_dir);
     let case_sensitive = args["case_sensitive"].as_bool().unwrap_or(false);
+    // hidden and git_ignore default to the tool's historical broad search;
+    // set hidden=false / git_ignore=true for ripgrep's own defaults.
+    let hidden = args["hidden"].as_bool().unwrap_or(true);
+    let git_ignore = args["git_ignore"].as_bool().unwrap_or(false);
     let max_results = args["max_results"].as_u64().unwrap_or(200).min(1000) as usize;
+
+    // Optional file-name filter: validated ONCE up front. A glob containing a
+    // path separator matches the full path; one without it matches the file
+    // name at any depth (rg semantics, e.g. '*.rs' finds src/main.rs too).
+    let glob_pat = match args["glob"].as_str() {
+        Some(g) => Some(
+            glob::Pattern::new(g).map_err(|e| anyhow::anyhow!("Invalid glob '{}': {}", g, e))?,
+        ),
+        None => None,
+    };
+    let glob_is_full_path = args["glob"]
+        .as_str()
+        .map(|g| g.contains('/'))
+        .unwrap_or(false);
 
     // Case-insensitive by default (like grep -i). The regex itself carries
     // the flag - never lowercase the input line, which would corrupt
@@ -824,127 +963,195 @@ fn handle_grep(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
         .build()
         .map_err(|e| anyhow::anyhow!("Invalid regex pattern '{}': {}", pattern, e))?;
 
-    // Iterative recursive walk (no recursion depth issues). Skips .git,
-    // target and node_modules to avoid noise. The walk is HARD-BOUNDED
-    // (dirs visited, files read, per-file size, elapsed time, results) so a
-    // grep over a huge tree (e.g. "/") can never run unbounded and wedge
-    // the whole plugin server (Sep 2026 outage: filesystem read/write/list
-    // down for whole threads after an unbounded recursive search).
+    // Hard walk bounds so a grep over a huge tree (e.g. "/") can never run
+    // unbounded and wedge the whole plugin server (Sep 2026 outage class:
+    // filesystem read/write/list down after an unbounded recursive search).
     const MAX_DIRS: usize = 50_000;
     const MAX_FILES: usize = 100_000;
     const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024; // 16 MiB per file
     const MAX_WALK_MILLIS: u128 = 10_000;
+    const MAX_LINE_CHARS: usize = 200;
+
+    // Ripgrep-backed traversal: ignore::WalkBuilder is the engine ripgrep is
+    // built on. hidden/git_ignore are opt-in flags; .git, target and
+    // node_modules are always pruned; follow_links is off so symlink cycles
+    // are impossible.
+    let mut builder = WalkBuilder::new(std::path::PathBuf::from(&safe_base));
+    builder
+        .hidden(!hidden)
+        .ignore(git_ignore)
+        .git_ignore(git_ignore)
+        .git_global(false)
+        .git_exclude(git_ignore)
+        .parents(false)
+        .follow_links(false)
+        .filter_entry(|entry| {
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name == ".git" || name == "target" || name == "node_modules" {
+                        return false;
+                    }
+                }
+            }
+            true
+        });
+    let walk = builder.build();
 
     let walk_start = std::time::Instant::now();
-    let mut results: Vec<String> = Vec::new();
-    let mut files_seen: usize = 0;
+    let mut inline: Vec<String> = Vec::new();
+    let mut spill: Option<GrepSpill> = None;
+    let mut spill_attempted = false;
+    let mut total_matches: usize = 0;
+    let mut files_checked: usize = 0;
     let mut dirs_visited: usize = 0;
     let mut budget_exhausted = false;
-    let mut stack: Vec<std::path::PathBuf> = vec![std::path::PathBuf::from(&safe_base)];
-    while let Some(dir) = stack.pop() {
+
+    for entry in walk {
         dirs_visited += 1;
         if dirs_visited > MAX_DIRS || walk_start.elapsed().as_millis() > MAX_WALK_MILLIS {
             budget_exhausted = true;
             break;
         }
-        let Ok(entries) = fs::read_dir(&dir) else {
+        let Ok(entry) = entry else { continue };
+        let Some(ft) = entry.file_type() else {
             continue;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(ft) = entry.file_type() else { continue };
-            if ft.is_dir() {
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if name == ".git" || name == "target" || name == "node_modules" {
-                    continue;
-                }
-                stack.push(path);
-                continue;
-            }
-            if !ft.is_file() {
-                continue;
-            }
-            // Optional file-name filter (glob matched against the full path).
-            if let Some(g) = &glob_filter {
-                let ok = glob::Pattern::new(g)
-                    .map(|p| p.matches_path(&path))
-                    .unwrap_or(false);
-                if !ok {
-                    continue;
-                }
-            }
-            // Skip oversized files entirely: reading them fully is both slow
-            // and a memory hazard (multi-GB logs, virtual files under /proc).
-            if let Ok(md) = fs::metadata(&path) {
-                if md.len() > MAX_FILE_BYTES {
-                    continue;
-                }
-            }
-            // Skip binary files: sniff for a NUL byte in the first 8 KiB.
-            let Ok(bytes) = fs::read(&path) else { continue };
-            let head = &bytes[..bytes.len().min(8192)];
-            if head.contains(&0) {
-                continue;
-            }
-            let Ok(content) = String::from_utf8(bytes) else {
-                continue;
+        if ft.is_dir() || !ft.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        // Optional file-name filter, applied BEFORE reading so non-matching
+        // files cost nothing.
+        if let Some(pat) = &glob_pat {
+            let matched = if glob_is_full_path {
+                pat.matches_path(path)
+            } else {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| pat.matches(n))
+                    .unwrap_or(false)
             };
-            files_seen += 1;
-            if files_seen > MAX_FILES {
-                budget_exhausted = true;
-                break;
-            }
-            for (i, line) in content.lines().enumerate() {
-                if results.len() >= max_results {
-                    budget_exhausted = true;
-                    break;
-                }
-                if re.is_match(line) {
-                    let line_num = i + 1;
-                    let display = if line.chars().count() > 200 {
-                        let trunc = line
-                            .char_indices()
-                            .nth(200)
-                            .map(|(idx, _)| idx)
-                            .unwrap_or(line.len());
-                        format!("{}...", &line[..trunc])
-                    } else {
-                        line.to_string()
-                    };
-                    results.push(format!("{}:{}:{}", path.display(), line_num, display));
-                }
-            }
-            if budget_exhausted {
-                break;
+            if !matched {
+                continue;
             }
         }
-        if budget_exhausted {
+        // Skip oversized files entirely: reading them fully is both slow and
+        // a memory hazard (multi-GB logs, virtual files under /proc).
+        if let Ok(md) = fs::metadata(path) {
+            if md.len() > MAX_FILE_BYTES {
+                continue;
+            }
+        }
+        // Skip binary files: sniff for a NUL byte in the first 8 KiB.
+        let Ok(bytes) = fs::read(path) else { continue };
+        let head = &bytes[..bytes.len().min(8192)];
+        if head.contains(&0) {
+            continue;
+        }
+        let Ok(content) = String::from_utf8(bytes) else {
+            continue;
+        };
+        files_checked += 1;
+        if files_checked > MAX_FILES {
+            budget_exhausted = true;
             break;
         }
+        for (i, line) in content.lines().enumerate() {
+            if !re.is_match(line) {
+                continue;
+            }
+            total_matches += 1;
+            let line_num = i + 1;
+            let display = if line.chars().count() > MAX_LINE_CHARS {
+                let trunc = line
+                    .char_indices()
+                    .nth(MAX_LINE_CHARS)
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(line.len());
+                format!("{}...", &line[..trunc])
+            } else {
+                line.to_string()
+            };
+            let hit = format!("{}:{}:{}", path.display(), line_num, display);
+            if total_matches <= max_results {
+                inline.push(hit);
+            } else {
+                // CAP HIT: lazily open the spill sink once and stream every
+                // hit (including the inline head) so the spill is complete.
+                if !spill_attempted {
+                    spill_attempted = true;
+                    match GrepSpill::create(cfg, path.to_str().unwrap_or("grep")) {
+                        Ok(mut s) => {
+                            for acc in &inline {
+                                s.push(acc);
+                            }
+                            s.push(&hit);
+                            spill = Some(s);
+                        }
+                        Err(_) => {
+                            // Spill unavailable: keep counting matches and
+                            // drop the overflow (reported in the response).
+                        }
+                    }
+                } else if let Some(s) = spill.as_mut() {
+                    s.push(&hit);
+                }
+            }
+        }
     }
+    if let Some(s) = spill.as_mut() {
+        s.finish();
+    }
+    let spill_path = spill.as_ref().map(|s| s.path.display().to_string());
+    let spill_stopped = spill.as_ref().map(|s| s.stopped).unwrap_or(false);
+    let inline_n = inline.len();
 
-    let output = if results.is_empty() && budget_exhausted {
+    let output = if total_matches == 0 && budget_exhausted {
         format!(
             "No matches for pattern '{}' in {} ({} files checked, grep budget exhausted)",
-            pattern, safe_base, files_seen
+            pattern, safe_base, files_checked
         )
-    } else if results.is_empty() {
+    } else if total_matches == 0 {
         format!(
             "No matches for pattern '{}' in {} ({} files checked)",
-            pattern, safe_base, files_seen
+            pattern, safe_base, files_checked
         )
     } else {
         let mut out = format!(
             "Found {} match(es) for pattern '{}' in {} ({} files checked):\n",
-            results.len(),
-            pattern,
-            safe_base,
-            files_seen
+            total_matches, pattern, safe_base, files_checked
         );
-        if results.len() >= max_results || budget_exhausted {
-            out.push_str(&format!("[... capped at {} results ...]\n", max_results));
+        out.push_str(&inline.join("\n"));
+        let mut notes: Vec<String> = Vec::new();
+        if let Some(spath) = spill_path {
+            notes.push(format!(
+                "{} more match(es) beyond the {} shown inline - FULL result list written to {}",
+                total_matches - inline_n,
+                inline_n,
+                spath
+            ));
+            if spill_stopped {
+                notes.push(
+                    "spill file truncated at the 64 MiB cap - matches beyond it were not recorded"
+                        .to_string(),
+                );
+            }
+        } else if total_matches > inline_n {
+            notes.push(format!(
+                "{} more match(es) exist beyond the {} shown inline but the spill file could not be created - results truncated",
+                total_matches - inline_n,
+                inline_n
+            ));
         }
-        out.push_str(&results.join("\n"));
+        if budget_exhausted {
+            notes.push(
+                "grep budget exhausted (dir/file/time walk bounds) - result set may be incomplete"
+                    .to_string(),
+            );
+        }
+        if !notes.is_empty() {
+            out.push_str(&format!("\n[{}]", notes.join(" | ")));
+        }
         out
     };
 
@@ -1061,9 +1268,8 @@ async fn main() -> Result<()> {
 
     let c6 = config.clone();
     let grep_handler = soft_error(move |args: Value| {
-        let cfg = c6.lock();
-        let wd = resolve_workspace_dir(&cfg.workspace_dir);
-        handle_grep(args, &wd)
+        let write_cfg = snapshot_write_cfg(&c6.lock());
+        handle_grep(args, &write_cfg)
     });
 
     let c7 = config.clone();
@@ -1209,15 +1415,20 @@ async fn main() -> Result<()> {
         },
         McpToolEntry {
             def: McpToolDef {
-                name: "filesystem_grep".to_string(),
+                                name: "filesystem_grep".to_string(),
                 description:
                     "SEARCH FILE CONTENTS recursively for lines matching a REGEX pattern (like grep -rn). \
                     Use this to find where a symbol, string or pattern appears in code or configs. \
+                    The recursive walk is RIPGREP-BACKED (ignore::WalkBuilder, the same traversal engine \
+                    ripgrep is built on), so large trees are searched cheaply and safely under hard caps; \
+                    dotfile and .gitignore handling are opt-in flags. \
                     SEARCHES ARE UNRESTRICTED: any base path can be searched (defaults to the workspace root; \
                     only WRITES are confined to the workspace dir). \
                     Returns 'path:line: content' matches, capped at max_results (default 200). \
-                    Prefer this over filesystem_search (names only): discovery belongs in
-                    filesystem_search / filesystem_grep."
+                    CAPS + SPILL: when more than max_results matches exist the FULL result list is spilled \
+                    verbatim to a file under OMNI_DIR/data/spill (or the workspace) and its path is reported \
+                    in the response - read that file with filesystem_read for the remaining hits, nothing is lost. \
+                    Prefer this over filesystem_search (names only): content discovery belongs in filesystem_grep."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -1232,23 +1443,33 @@ async fn main() -> Result<()> {
                         },
                         "glob": {
                             "type": "string",
-                            "description": "Optional file-name filter (glob, e.g. '*.rs', '*.md')"
+                            "description": "Optional file-name filter (rg-style: without '/' it matches the file name at any depth, e.g. '*.rs'; with '/' it matches the full path, e.g. '**/tests/*.rs')"
                         },
                         "case_sensitive": {
                             "type": "boolean",
                             "description": "Match case-sensitively (default false)",
                             "default": false
                         },
+                        "hidden": {
+                            "type": "boolean",
+                            "description": "Include hidden files and dot-directories in the walk (default true; false = ripgrep default of skipping hidden)",
+                            "default": true
+                        },
+                        "git_ignore": {
+                            "type": "boolean",
+                            "description": "Respect .gitignore/.ignore files like ripgrep (default false: everything is searched except .git/target/node_modules)",
+                            "default": false
+                        },
                         "max_results": {
                             "type": "integer",
-                            "description": "Max matches to return (default 200, max 1000)",
+                            "description": "Max matches returned inline (default 200, max 1000); overflow is spilled in full to a spill file",
                             "default": 200
                         }
                     },
                     "required": ["pattern"]
                 }),
             },
-            handler: grep_handler,
+handler: grep_handler,
         },
 
         McpToolEntry {
@@ -1562,19 +1783,20 @@ mod tests {
 
     #[test]
     fn grep_matches_lines_recursively() {
-        let dir = std::env::temp_dir().join("fs-grep-test");
+        let dir = std::env::temp_dir().join(format!("fs-grep-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("sub")).unwrap();
         fs::write(dir.join("a.rs"), "fn alpha() {\n    let x = 1;\n}\n").unwrap();
         fs::write(dir.join("sub/b.txt"), "hello world\nalpha beta\n").unwrap();
         fs::write(dir.join("sub/c.md"), "nothing here\n").unwrap();
+        let cfg = tmp_grep_cfg(&dir);
         let (msg, is_error) = handle_grep(
             serde_json::json!({
                 "pattern": "alpha",
                 "path": dir.to_string_lossy(),
                 "glob": "*.rs",
             }),
-            "/opt/workspace",
+            &cfg,
         )
         .expect("grep must succeed");
         assert!(!is_error, "msg: {msg}");
@@ -1588,28 +1810,54 @@ mod tests {
                 "pattern": "ALPHA",
                 "path": dir.to_string_lossy(),
             }),
-            "/opt/workspace",
+            &cfg,
         )
         .expect("case-insensitive grep must succeed");
         assert!(
             msg2.contains("alpha beta"),
             "case-insensitive match: {msg2}"
         );
+        // case_sensitive=true must NOT match lowercase content.
+        let (msg3, _) = handle_grep(
+            serde_json::json!({
+                "pattern": "ALPHA",
+                "path": dir.to_string_lossy(),
+                "case_sensitive": true,
+            }),
+            &cfg,
+        )
+        .expect("case-sensitive grep must succeed");
+        assert!(
+            msg3.starts_with("No matches"),
+            "case-sensitive search must not match lowercase: {msg3}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn grep_invalid_regex_is_soft_error() {
-        let dir = std::env::temp_dir().join("fs-grep-bad-regex");
+        let dir = std::env::temp_dir().join(format!("fs-grep-bad-regex-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
+        let cfg = tmp_grep_cfg(&dir);
         let err = handle_grep(
             serde_json::json!({"pattern": "[", "path": dir.to_string_lossy()}),
-            "/opt/workspace",
+            &cfg,
         )
         .expect_err("invalid regex must be rejected by the handler");
         assert!(err.to_string().contains("Invalid regex"), "err: {err}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Test helper: Config whose workspace AND omni root point at a throwaway
+    /// temp dir, so grep spill files land under {dir}/data/spill and never
+    /// touch real OMNI_DIR paths.
+    fn tmp_grep_cfg(dir: &std::path::Path) -> Config {
+        Config {
+            workspace_dir: dir.to_string_lossy().to_string(),
+            omni_dir: dir.to_string_lossy().to_string(),
+            ..Config::default()
+        }
     }
 
     /// Test helper: throwaway temp dir + file with `content`, and a Config
@@ -1996,5 +2244,97 @@ mod tests {
         )
         .expect("search outside workspace must succeed");
         assert!(!is_error, "msg: {}", msg);
+    }
+
+    #[test]
+    fn grep_hidden_and_git_ignore_flags() {
+        let dir = std::env::temp_dir().join(format!("fs-grep-flags-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".hidden")).unwrap();
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::create_dir_all(dir.join("target")).unwrap();
+        fs::write(dir.join("top.txt"), "needle in top\n").unwrap();
+        fs::write(dir.join(".hidden/h.txt"), "needle hidden\n").unwrap();
+        fs::write(dir.join(".git/config"), "needle git\n").unwrap();
+        fs::write(dir.join("target/out.txt"), "needle target\n").unwrap();
+        let cfg = tmp_grep_cfg(&dir);
+        // Default (hidden=true): dot directories ARE searched; .git/target are
+        // always pruned regardless of flags.
+        let (msg, _) = handle_grep(
+            serde_json::json!({"pattern": "needle", "path": dir.to_string_lossy()}),
+            &cfg,
+        )
+        .expect("grep must succeed");
+        assert!(
+            msg.contains("h.txt"),
+            "hidden must be searched by default: {msg}"
+        );
+        assert!(!msg.contains(".git"), ".git must always be pruned: {msg}");
+        assert!(
+            !msg.contains("target"),
+            "target must always be pruned: {msg}"
+        );
+        assert!(msg.contains("top.txt"), "msg: {msg}");
+        // hidden=false: dot entries skipped.
+        let (msg2, _) = handle_grep(
+            serde_json::json!({"pattern": "needle", "path": dir.to_string_lossy(), "hidden": false}),
+            &cfg,
+        )
+        .expect("grep must succeed");
+        assert!(
+            !msg2.contains("h.txt"),
+            "hidden=false must skip dotfiles: {msg2}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn grep_spills_overflow_to_file() {
+        let dir = std::env::temp_dir().join(format!("fs-grep-spill-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // 300 matching lines in one file (plus a header line that must not match).
+        let mut content = String::from("no match here\n");
+        for i in 0..300 {
+            content.push_str(&format!("match line number {}\n", i));
+        }
+        fs::write(dir.join("big.txt"), &content).unwrap();
+        let cfg = tmp_grep_cfg(&dir);
+        let (msg, is_error) = handle_grep(
+            serde_json::json!({
+                "pattern": "^match line number",
+                "path": dir.to_string_lossy(),
+                "max_results": 50,
+            }),
+            &cfg,
+        )
+        .expect("grep must succeed");
+        assert!(!is_error, "msg: {msg}");
+        assert!(msg.starts_with("Found 300 match(es)"), "msg: {msg}");
+        assert!(
+            msg.contains("50 shown inline"),
+            "cap note must mention the inline count: {msg}"
+        );
+        assert!(
+            msg.contains("written to"),
+            "spill path must be reported: {msg}"
+        );
+        // The spill file under {dir}/data/spill must hold ALL 300 hits verbatim.
+        let spill_dir = dir.join("data").join("spill");
+        let entries: Vec<_> = fs::read_dir(&spill_dir)
+            .expect("spill dir must exist")
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(entries.len(), 1, "exactly one spill file expected");
+        let spill_content = fs::read_to_string(&entries[0]).unwrap();
+        let hits = spill_content
+            .lines()
+            .filter(|l| l.contains("match line number"))
+            .count();
+        assert_eq!(
+            hits, 300,
+            "spill must contain ALL 300 hits, not just overflow"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }
