@@ -135,9 +135,15 @@ async fn tick(
             // the scheduler tick (or, for manual runs, the HTTP request).
             // The outcome is recorded in schedule_runs and is queryable via
             // GET /schedule/{id}/runs (status + exit code + output tail).
-            if let Err(e) =
-                start_action_run(pool, data_dir, plugin_manager, app_context, job.clone(), "cron")
-                    .await
+            if let Err(e) = start_action_run(
+                pool,
+                data_dir,
+                plugin_manager,
+                app_context,
+                job.clone(),
+                "cron",
+            )
+            .await
             {
                 error!(
                     "[cron-scheduler] Failed to start action run for schedule '{}': {:?}",
@@ -829,7 +835,11 @@ async fn start_action_run(
         let outcome = execute_action_mode(ctx).await;
 
         let finished = Utc::now();
-        let status = if outcome.is_error { "failed" } else { "success" };
+        let status = if outcome.is_error {
+            "failed"
+        } else {
+            "success"
+        };
         let exit_code = exit_code_for(outcome.is_error, &outcome.output);
         let output = tail_output(&outcome.output, 4000);
 
@@ -1021,8 +1031,8 @@ pub async fn fire_cron_job_by_id(
     if job.mode.as_deref() == Some("action") {
         // Action runs are executed asynchronously: return a run handle now,
         // poll `GET /schedule/{id}/runs` for the outcome.
-        let run_id = start_action_run(pool, data_dir, plugin_manager, app_context, job, "manual")
-            .await?;
+        let run_id =
+            start_action_run(pool, data_dir, plugin_manager, app_context, job, "manual").await?;
         return Ok(FireOutcome {
             thread_id: None,
             run_id: Some(run_id),
