@@ -26,6 +26,14 @@ paths = [
 ]
 # Documented PUBLIC RFC 6238 TOTP test vector (not a credential), used by the
 # external-tool robustness harness and printed in public RFCs.
+#
+# regexTarget = "match" is REQUIRED here. By default gitleaks tests allowlist
+# regexes against the finding's extracted Secret. The x7-totp-base32-secret
+# rule contains a capture group, so the extracted Secret is only the keyword
+# ("TOTP") and a regex for the 32-char vector could never match - the entry
+# would be dead code and the repo's own committed fixture would make the CI
+# `gitleaks detect` step exit 1. Matching the full match text makes it work.
+regexTarget = "match"
 regexes = [
   '''GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ''',
 ]
