@@ -23,6 +23,7 @@ use cron::Schedule;
 use sqlx::FromRow;
 use sqlx::PgPool;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
@@ -30,7 +31,7 @@ use tracing::{error, info, warn};
 use crate::db::types as queries;
 use crate::mcp::{AppContext, McpToolCall};
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, Clone, FromRow)]
 struct CronJobDueRow {
     id: String,
     name: Option<String>,
@@ -130,20 +131,19 @@ async fn tick(
         let is_silent = job.silent.unwrap_or(false);
 
         if is_action {
-            // Action mode: execute the MCP tool directly via the registry.
-            // Non-silent: creates a system thread with the result message.
-            // Silent: executes silently, only creates a thread on failure.
-            handle_action_mode(ActionModeCtx {
-                pool,
-                data_dir,
-                plugin_manager,
-                app_context,
-                job: &job,
-                display_name,
-                now: &now,
-                cause: "system",
-            })
-            .await;
+            // Action mode: run asynchronously so a long action never blocks
+            // the scheduler tick (or, for manual runs, the HTTP request).
+            // The outcome is recorded in schedule_runs and is queryable via
+            // GET /schedule/{id}/runs (status + exit code + output tail).
+            if let Err(e) =
+                start_action_run(pool, data_dir, plugin_manager, app_context, job.clone(), "cron")
+                    .await
+            {
+                error!(
+                    "[cron-scheduler] Failed to start action run for schedule '{}': {:?}",
+                    display_name, e
+                );
+            }
             continue;
         }
 
@@ -431,17 +431,33 @@ struct ActionModeCtx<'a> {
 /// For non-silent jobs: executes the tool and creates a system thread
 /// with the result. For silent jobs: executes silently, only creates
 /// a thread on failure. Returns the thread_id if one was created.
-async fn handle_action_mode(ctx: ActionModeCtx<'_>) -> Option<i64> {
+/// Outcome of one action-mode execution (tool run + result thread creation).
+struct ActionRunOutcome {
+    thread_id: Option<i64>,
+    is_error: bool,
+    output: String,
+}
+
+/// Execute one action-mode run: resolve the action, execute the MCP tool and
+/// (unless silent-success) create the result thread. Always returns an
+/// outcome so the caller can persist it in `schedule_runs` and log a
+/// terminal line - never a silent failure.
+async fn execute_action_mode(ctx: ActionModeCtx<'_>) -> ActionRunOutcome {
     let is_silent = ctx.job.silent.unwrap_or(false);
 
     let action_id = match ctx.job.action_id {
         Some(ref id) => id.clone(),
         None => {
-            error!(
-                "[cron-action] Schedule '{}' has mode=action but no action_id set, skipping",
+            let msg = format!(
+                "Schedule '{}' has mode=action but no action_id set",
                 ctx.display_name
             );
-            return None;
+            error!("[cron-action] {}", msg);
+            return ActionRunOutcome {
+                thread_id: None,
+                is_error: true,
+                output: msg,
+            };
         }
     };
 
@@ -449,11 +465,28 @@ async fn handle_action_mode(ctx: ActionModeCtx<'_>) -> Option<i64> {
     let tool_call = match resolve_action(ctx.data_dir, &action_id) {
         Ok(tc) => tc,
         Err(e) => {
-            error!(
-                "[cron-action] Failed to resolve action '{}' for schedule '{}': {}",
+            let msg = format!(
+                "Failed to resolve action '{}' for schedule '{}': {}",
                 action_id, ctx.display_name, e
             );
-            return None;
+            error!("[cron-action] {}", msg);
+            let thread_id = create_action_thread(ActionThreadCtx {
+                pool: ctx.pool,
+                data_dir: ctx.data_dir,
+                job: ctx.job,
+                now: ctx.now,
+                display_name: ctx.display_name,
+                result_content: &msg,
+                is_error: true,
+                cause: ctx.cause,
+            })
+            .await
+            .ok();
+            return ActionRunOutcome {
+                thread_id,
+                is_error: true,
+                output: msg,
+            };
         }
     };
 
@@ -478,15 +511,10 @@ async fn handle_action_mode(ctx: ActionModeCtx<'_>) -> Option<i64> {
                     "[cron-action] Action schedule '{}' (action_id={}) returned error: {}",
                     ctx.display_name, action_id, result.content
                 );
-            } else if !is_silent {
-                info!(
-                    "[cron-action] Action schedule '{}' (action_id={}) completed successfully",
-                    ctx.display_name, action_id
-                );
             }
 
             // Create thread if non-silent (always) OR silent with error
-            if !is_silent || is_error {
+            let thread_id = if !is_silent || is_error {
                 match create_action_thread(ActionThreadCtx {
                     pool: ctx.pool,
                     data_dir: ctx.data_dir,
@@ -511,6 +539,12 @@ async fn handle_action_mode(ctx: ActionModeCtx<'_>) -> Option<i64> {
             } else {
                 // Silent success: no thread, no messages
                 None
+            };
+
+            ActionRunOutcome {
+                thread_id,
+                is_error,
+                output: result.content,
             }
         }
         Err(e) => {
@@ -521,7 +555,7 @@ async fn handle_action_mode(ctx: ActionModeCtx<'_>) -> Option<i64> {
 
             // Always create a failure thread for visible error trail
             let err_content = format!("Action execution failed: {}", e);
-            match create_action_thread(ActionThreadCtx {
+            let thread_id = match create_action_thread(ActionThreadCtx {
                 pool: ctx.pool,
                 data_dir: ctx.data_dir,
                 job: ctx.job,
@@ -541,11 +575,16 @@ async fn handle_action_mode(ctx: ActionModeCtx<'_>) -> Option<i64> {
                     );
                     None
                 }
+            };
+
+            ActionRunOutcome {
+                thread_id,
+                is_error: true,
+                output: err_content,
             }
         }
     }
 }
-
 /// Context for `create_action_thread`: groups 8 params to stay under clippy's 7-arg limit.
 struct ActionThreadCtx<'a> {
     pool: &'a PgPool,
@@ -676,6 +715,166 @@ async fn create_action_thread(ctx: ActionThreadCtx<'_>) -> AppResult<i64> {
     Ok(thread.id)
 }
 
+// ─── Action run records (schedule_runs) ─────────────────────────────────────
+
+/// Monotonic suffix keeping run ids unique inside the same millisecond.
+static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Generate a unique run id: `<task_key>-<millis>-<seq>`.
+fn new_run_id(task_key: &str) -> String {
+    let seq = RUN_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{}-{}", task_key, Utc::now().timestamp_millis(), seq)
+}
+
+/// Keep at most `max` chars of a tool output (tail), for the run record.
+fn tail_output(s: &str, max: usize) -> String {
+    let total = s.chars().count();
+    if total <= max {
+        s.to_string()
+    } else {
+        let skipped = total - max;
+        let tail: String = s.chars().skip(skipped).collect();
+        format!("[... {} chars truncated ...]\n{}", skipped, tail)
+    }
+}
+
+/// Derive an exit code from a tool result: a numeric `"exit_code": N` /
+/// `exit code N` / `exit_code=N` in the output wins when present; otherwise
+/// 0 for success and 1 for an error result.
+fn exit_code_for(is_error: bool, output: &str) -> i32 {
+    for marker in ["exit_code\":", "exit code ", "exit_code="] {
+        if let Some(pos) = output.find(marker) {
+            let rest = &output[pos + marker.len()..];
+            let digits: String = rest
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '-')
+                .collect();
+            if let Ok(code) = digits.parse::<i32>() {
+                return code;
+            }
+        }
+    }
+    if is_error {
+        1
+    } else {
+        0
+    }
+}
+
+/// Outcome handle of a schedule trigger.
+#[derive(Debug, Clone)]
+pub struct FireOutcome {
+    /// Thread created synchronously (agentic runs); None for async action runs.
+    pub thread_id: Option<i64>,
+    /// Run handle for action runs: poll `GET /schedule/{id}/runs`.
+    pub run_id: Option<String>,
+}
+
+/// Start an action-mode run ASYNCHRONOUSLY: insert a `running` row in
+/// `schedule_runs` and return its run id immediately; the tool executes in a
+/// spawned task that updates the row and logs a terminal line when done.
+/// This keeps `/schedule/{id}/run` prompt even when the action takes minutes
+/// (e.g. the daily backup), and makes the outcome observable via the API.
+async fn start_action_run(
+    pool: &PgPool,
+    data_dir: &str,
+    plugin_manager: &Arc<dyn crate::agent::plugin_manager::PluginManager>,
+    app_context: &AppContext,
+    job: CronJobDueRow,
+    trigger: &str,
+) -> AppResult<String> {
+    let run_id = new_run_id(&job.id);
+    let started = Utc::now();
+    let display_name = job.name.clone().unwrap_or_else(|| job.id.clone());
+    let cause = if trigger == "cron" { "system" } else { "user" };
+
+    sqlx::query(
+        "INSERT INTO schedule_runs (run_id, task_key, trigger, status, started_at) \
+         VALUES ($1, $2, $3, 'running', $4)",
+    )
+    .bind(&run_id)
+    .bind(&job.id)
+    .bind(trigger)
+    .bind(started)
+    .execute(pool)
+    .await?;
+
+    info!(
+        "[cron-action] Started action run {} for schedule '{}' (trigger: {}, action_id: {})",
+        run_id,
+        display_name,
+        trigger,
+        job.action_id.as_deref().unwrap_or("")
+    );
+
+    let pool = pool.clone();
+    let data_dir = data_dir.to_string();
+    let plugin_manager = plugin_manager.clone();
+    let app_context = app_context.clone();
+    let run_id_task = run_id.clone();
+    let display_name_task = display_name.clone();
+
+    tokio::spawn(async move {
+        let ctx = ActionModeCtx {
+            pool: &pool,
+            data_dir: &data_dir,
+            plugin_manager: &plugin_manager,
+            app_context: &app_context,
+            job: &job,
+            display_name: &display_name_task,
+            now: &started,
+            cause,
+        };
+        let outcome = execute_action_mode(ctx).await;
+
+        let finished = Utc::now();
+        let status = if outcome.is_error { "failed" } else { "success" };
+        let exit_code = exit_code_for(outcome.is_error, &outcome.output);
+        let output = tail_output(&outcome.output, 4000);
+
+        if let Err(e) = sqlx::query(
+            "UPDATE schedule_runs SET status = $1, finished_at = $2, exit_code = $3, \
+             output = $4, thread_id = $5, error = $6 WHERE run_id = $7",
+        )
+        .bind(status)
+        .bind(finished)
+        .bind(exit_code)
+        .bind(&output)
+        .bind(outcome.thread_id)
+        .bind(if outcome.is_error {
+            Some(output.clone())
+        } else {
+            None
+        })
+        .bind(&run_id_task)
+        .execute(&pool)
+        .await
+        {
+            error!(
+                "[cron-action] run {}: failed to record outcome: {:?}",
+                run_id_task, e
+            );
+        }
+
+        // Terminal line: ALWAYS emitted (also for silent jobs), so a run is
+        // diagnosable from the logs alone.
+        if outcome.is_error {
+            error!(
+                "[cron-action] run {} for schedule '{}' failed (exit code {})",
+                run_id_task, display_name_task, exit_code
+            );
+        } else {
+            info!(
+                "[cron-action] run {} for schedule '{}' completed (exit code {}, thread {:?})",
+                run_id_task, display_name_task, exit_code, outcome.thread_id
+            );
+        }
+    });
+
+    Ok(run_id)
+}
+
 // ─── Resolved thread config ───
 
 /// Resolved profile, provider, and model for thread creation.
@@ -790,7 +989,7 @@ pub async fn fire_cron_job_by_id(
     app_context: &AppContext,
     schedule_id: &str,
     force: bool,
-) -> AppResult<Option<i64>> {
+) -> AppResult<FireOutcome> {
     let tasks = tasks_yaml::load_tasks(data_dir)?;
     let def = tasks
         .schedules
@@ -820,18 +1019,14 @@ pub async fn fire_cron_job_by_id(
 
     // ── Handle mode='action' ──
     if job.mode.as_deref() == Some("action") {
-        let tid = handle_action_mode(ActionModeCtx {
-            pool,
-            data_dir,
-            plugin_manager,
-            app_context,
-            job: &job,
-            display_name,
-            now: &now,
-            cause: "user",
-        })
-        .await;
-        return Ok(tid);
+        // Action runs are executed asynchronously: return a run handle now,
+        // poll `GET /schedule/{id}/runs` for the outcome.
+        let run_id = start_action_run(pool, data_dir, plugin_manager, app_context, job, "manual")
+            .await?;
+        return Ok(FireOutcome {
+            thread_id: None,
+            run_id: Some(run_id),
+        });
     }
 
     let is_silent = job.silent.unwrap_or(false);
@@ -841,7 +1036,10 @@ pub async fn fire_cron_job_by_id(
             "[cron-run] Silent job '{}' fired (no thread created for non-action silent job)",
             display_name
         );
-        return Ok(None);
+        return Ok(FireOutcome {
+            thread_id: None,
+            run_id: None,
+        });
     }
 
     // Standard agentic mode: same logic as the scheduler tick
@@ -935,7 +1133,10 @@ pub async fn fire_cron_job_by_id(
         thread.id, display_name
     );
 
-    Ok(Some(thread.id))
+    Ok(FireOutcome {
+        thread_id: Some(thread.id),
+        run_id: None,
+    })
 }
 
 #[cfg(test)]

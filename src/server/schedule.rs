@@ -47,6 +47,7 @@ pub fn schedule_router() -> Router<Arc<AppState>> {
         .route("/schedule/{id}/toggle", patch(toggle_schedule_handler))
         .route("/schedule/{id}", delete(delete_schedule_handler))
         .route("/schedule/{id}/threads", get(schedule_threads_handler))
+        .route("/schedule/{id}/runs", get(schedule_runs_handler))
         .route("/schedule/{id}/subtasks", get(schedule_subtasks_handler))
         .route("/schedule/{id}/run", post(run_schedule_handler))
 }
@@ -74,6 +75,8 @@ pub struct JobEntry {
     pub next_run: Option<String>,
     pub last_run_at: Option<String>,
     pub next_run_at: Option<String>,
+    pub last_run_status: Option<String>,
+    pub last_run_exit_code: Option<i32>,
     pub created_at: String,
     pub status: String,
     pub silent: bool,
@@ -123,6 +126,41 @@ pub struct SubtaskEntry {
 #[derive(Debug, Serialize)]
 pub struct SubtasksResponse {
     pub subtasks: Vec<SubtaskEntry>,
+}
+
+/// One recorded schedule run (schedule_runs row): start/end, status, exit
+/// code and a truncated output tail.
+#[derive(Debug, Serialize)]
+pub struct ScheduleRun {
+    pub run_id: String,
+    pub task_key: String,
+    pub trigger: String,
+    pub status: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub exit_code: Option<i32>,
+    pub output: Option<String>,
+    pub thread_id: Option<i64>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ScheduleRunsResponse {
+    pub rows: Vec<ScheduleRun>,
+}
+
+#[derive(FromRow)]
+struct ScheduleRunRow {
+    run_id: String,
+    task_key: String,
+    trigger: String,
+    status: String,
+    started_at: Option<chrono::DateTime<chrono::Utc>>,
+    finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    exit_code: Option<i32>,
+    output: Option<String>,
+    thread_id: Option<i64>,
+    error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +262,11 @@ pub struct RunScheduleRequest {
     pub force: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RunsQueryParams {
+    pub limit: Option<i64>,
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -314,6 +357,24 @@ async fn schedule_to_entry(
             .get(a)
             .and_then(|act| act.description.clone())
     });
+    // Latest recorded run (schedule_runs): makes the outcome of a manual or
+    // scheduled action run visible on the job response, so a trigger is
+    // never indistinguishable from silence.
+    let latest_run: Option<(chrono::DateTime<chrono::Utc>, String, Option<i32>)> =
+        sqlx::query_as(
+            "SELECT started_at, status, exit_code FROM schedule_runs \
+             WHERE task_key = $1 ORDER BY started_at DESC LIMIT 1",
+        )
+        .bind(key)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+    let (last_run_at, last_run_status, last_run_exit_code) = match latest_run {
+        Some((ts, status, exit_code)) => (Some(fmt_ts(&ts)), Some(status), exit_code),
+        None => (None, None, None),
+    };
+
     JobEntry {
         id: key.to_string(),
         name: key.to_string(),
@@ -330,8 +391,10 @@ async fn schedule_to_entry(
         profile: def.profile.clone(),
         last_run: None,
         next_run: None,
-        last_run_at: None,
+        last_run_at,
         next_run_at: None,
+        last_run_status,
+        last_run_exit_code,
         created_at: String::new(),
         status: if enabled {
             "active".to_string()
@@ -823,6 +886,53 @@ async fn schedule_subtasks_handler(
     ok_json(SubtasksResponse { subtasks: entries })
 }
 
+/// GET /schedule/{id}/runs: recorded runs for a schedule, newest first
+/// (status + exit code + truncated output tail). This is how a caller polls
+/// the outcome of an asynchronous action trigger.
+async fn schedule_runs_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(params): Query<RunsQueryParams>,
+) -> impl IntoResponse {
+    let limit = params.limit.unwrap_or(20).clamp(1, 200);
+    // Runtime query (not sql_forge): keeps `schedule_runs` compilable without
+    // a compile-time DB connection, so CI's offline build is unaffected.
+    let rows = match sqlx::query_as::<_, ScheduleRunRow>(
+        "SELECT run_id, task_key, trigger, status, started_at, finished_at, \
+         exit_code, output, thread_id, error FROM schedule_runs \
+         WHERE task_key = $1 ORDER BY started_at DESC LIMIT $2",
+    )
+    .bind(&id)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!("[schedule/{}/runs] query failed: {:?}", id, e);
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch runs");
+        }
+    };
+
+    let entries: Vec<ScheduleRun> = rows
+        .into_iter()
+        .map(|r| ScheduleRun {
+            run_id: r.run_id,
+            task_key: r.task_key,
+            trigger: r.trigger,
+            status: r.status,
+            started_at: r.started_at.map(|t| fmt_ts(&t)),
+            finished_at: r.finished_at.map(|t| fmt_ts(&t)),
+            exit_code: r.exit_code,
+            output: r.output,
+            thread_id: r.thread_id,
+            error: r.error,
+        })
+        .collect();
+
+    ok_json(ScheduleRunsResponse { rows: entries })
+}
+
 /// DELETE /schedule/{id}: remove a schedule from tasks.yml.
 async fn delete_schedule_handler(
     State(state): State<Arc<AppState>>,
@@ -875,14 +985,32 @@ async fn run_schedule_handler(
     )
     .await
     {
-        Ok(thread_id) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "ok",
-                "schedule_id": id,
-                "thread_id": thread_id,
-            })),
-        ),
+        Ok(outcome) => {
+            // Action runs return a run handle immediately (202); the caller
+            // polls GET /schedule/{id}/runs for the outcome. Agentic runs
+            // still return the created thread synchronously.
+            let (status, body) = match outcome.run_id {
+                Some(run_id) => (
+                    StatusCode::ACCEPTED,
+                    serde_json::json!({
+                        "status": "accepted",
+                        "schedule_id": id,
+                        "mode": "action",
+                        "run_id": run_id,
+                        "poll": format!("/schedule/{}/runs", id),
+                    }),
+                ),
+                None => (
+                    StatusCode::OK,
+                    serde_json::json!({
+                        "status": "ok",
+                        "schedule_id": id,
+                        "thread_id": outcome.thread_id,
+                    }),
+                ),
+            };
+            (status, Json(body))
+        }
         Err(e) => {
             let msg = e.to_string();
             error!("[schedule/{}/run] Failed: {}", id, msg);

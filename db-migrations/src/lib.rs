@@ -299,6 +299,36 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await
     .ok();
 
+    // schedule_runs: one row per schedule FIRE (manual or cron) with its
+    // terminal outcome (status/exit_code/output tail). Forced runs stay
+    // observable through the API even when the action takes minutes: the
+    // HTTP trigger returns immediately and the outcome lands here.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS schedule_runs (
+            run_id      TEXT PRIMARY KEY,
+            task_key    TEXT NOT NULL,
+            trigger     TEXT NOT NULL DEFAULT 'manual',
+            status      TEXT NOT NULL DEFAULT 'running',
+            started_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            finished_at TIMESTAMPTZ,
+            exit_code   INT,
+            output      TEXT,
+            thread_id   BIGINT,
+            error       TEXT
+        );
+        "#,
+    )
+    .execute(pool)
+    .await
+    .ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_schedule_runs_task_key ON schedule_runs (task_key, started_at DESC)",
+    )
+    .execute(pool)
+    .await
+    .ok();
+
     // All messages store the time it took to produce (LLM call time for
     // assistant messages, tool execution time for tool results) and the
     // token usage from the LLM response that produced it.

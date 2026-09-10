@@ -1445,12 +1445,13 @@ async fn run_cron_handler(
     )
     .await
     {
-        Ok(thread_id) => (
+        Ok(outcome) => (
             StatusCode::OK,
             Json(serde_json::json!({
                 "status": "ok",
                 "schedule_id": schedule_id,
-                "thread_id": thread_id,
+                "thread_id": outcome.thread_id,
+                "run_id": outcome.run_id,
             })),
         ),
         Err(e) => {
