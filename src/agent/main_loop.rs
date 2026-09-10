@@ -200,7 +200,7 @@ mod plan_extract_tests {
 // and the target project (`docker compose ... config --format json` →
 // `.name`, the exact resolution compose itself performs) - and blocks a
 // destructive verb ONLY when the two names are EQUAL. `up` is NEVER blocked
-// for any project, and other projects (e.g. the omnidev dev stack) are
+// for any project, and other, unrelated compose projects are
 // always manageable. Resolution is DELEGATED to docker/compose; compose's
 // precedence chain (name:, COMPOSE_PROJECT_NAME, --project-name, multiple
 // -f files, project-directory) is never reimplemented here.
@@ -361,6 +361,23 @@ async fn resolve_target_project(
     None
 }
 
+/// Build the user-facing refusal message for a blocked self-restart
+/// `docker_compose` call. Deliberately GENERIC: it must never name a
+/// concrete deployment or stack of a specific operator installation.
+fn self_restart_block_message(
+    verb: &str,
+    target_project: Option<&str>,
+    self_project: Option<&str>,
+) -> String {
+    format!(
+        "Blocked: docker_compose '{verb}' targets compose project '{target}' - the stack that hosts this agent (self project '{self_name}'). \
+         Tearing down the hosting stack kills this thread. Only the operator may restart it. \
+         You may manage OTHER, unrelated compose projects freely; `up` is never blocked.",
+        target = target_project.unwrap_or("?"),
+        self_name = self_project.unwrap_or("?"),
+    )
+}
+
 /// Evaluate the Phase 1.5 guard for one docker_compose tool call. Returns the
 /// block message when the call would tear down the agent's own project.
 async fn self_restart_guard_block(args_json: &str) -> Option<String> {
@@ -390,12 +407,10 @@ async fn self_restart_guard_block(args_json: &str) -> Option<String> {
     let self_project = resolve_self_project().await;
     let target_project = resolve_target_project(project_dir, &compose_files, env_file).await;
     if guard_blocks(verb, self_project.as_deref(), target_project.as_deref()) {
-        Some(format!(
-            "Blocked: docker_compose '{verb}' targets compose project '{target}' - the project this agent runs inside (self project '{self_name}'). \
-             Tearing down your own container kills this thread. Only the operator may restart the stack. \
-             You may manage OTHER compose projects (e.g. the omnidev dev stack) freely; `up` is never blocked.",
-            target = target_project.as_deref().unwrap_or("?"),
-            self_name = self_project.as_deref().unwrap_or("?"),
+        Some(self_restart_block_message(
+            verb,
+            target_project.as_deref(),
+            self_project.as_deref(),
         ))
     } else {
         None
@@ -417,6 +432,18 @@ mod self_restart_guard_tests {
         assert!(guard_blocks("stop", Some("omnistable"), Some("omnistable")));
         assert!(guard_blocks("rm", Some("omnistable"), Some("omnistable")));
         assert!(guard_blocks("kill", Some("omnistable"), Some("omnistable")));
+    }
+    #[test]
+    fn refusal_message_is_generic() {
+        // The user-facing refusal text must not name the operator's concrete
+        // deployment/stack (audit V-14): only a generic description.
+        let msg = self_restart_block_message("down", Some("some-project"), Some("some-project"));
+        assert!(msg.contains("the stack that hosts this agent"));
+        assert!(msg.contains("docker_compose 'down'"));
+        assert!(msg.contains("some-project"));
+        assert!(msg.contains("`up` is never blocked"));
+        assert!(!msg.contains("omnidev"));
+        assert!(!msg.contains("omnistable"));
     }
 
     #[test]
@@ -2368,7 +2395,7 @@ Previous plan:\n{}",
             // both sides (self: docker-inspect label; target: `docker compose
             // config --format json` -> `.name`) and blocks a destructive verb
             // ONLY when the two names are EQUAL. `up` is NEVER blocked for
-            // any project; other projects (e.g. the omnidev dev stack) are
+            // any project; other, unrelated compose projects are
             // always manageable.
             let mut self_restart_block: Option<String> = None;
             if tool_name == "docker_compose" {
