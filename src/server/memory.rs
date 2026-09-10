@@ -171,8 +171,9 @@ async fn stats_handler(
     let profile = params.profile.unwrap_or_default();
     let channel_id = params.channel.unwrap_or_default();
 
-    // ── Threads count (all statuses) ──
-    let threads = match sql_forge!(
+    // The five counts below are INDEPENDENT (no result feeds another query),
+    // so they are issued CONCURRENTLY: the handler pays max(query), not the sum.
+    let threads_fut = sql_forge!(
         CountRow,
         r#"
         SELECT COUNT(*) as cnt
@@ -184,18 +185,9 @@ async fn stats_handler(
         ( :profile = &profile,
           :channel_id = channel_id.as_str() )
     )
-    .fetch_one(&state.pool)
-    .await
-    {
-        Ok(row) => row.cnt.unwrap_or(0),
-        Err(e) => {
-            error!("[memory/stats] threads count failed: {:?}", e);
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to count threads");
-        }
-    };
+    .fetch_one(&state.pool);
 
-    // ── Completed threads ──
-    let threads_completed = match sql_forge!(
+    let completed_fut = sql_forge!(
         CountRow,
         r#"
         SELECT COUNT(*) as cnt
@@ -208,21 +200,9 @@ async fn stats_handler(
         ( :profile = &profile,
           :channel_id = channel_id.as_str() )
     )
-    .fetch_one(&state.pool)
-    .await
-    {
-        Ok(row) => row.cnt.unwrap_or(0),
-        Err(e) => {
-            error!("[memory/stats] completed threads count failed: {:?}", e);
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to count completed threads",
-            );
-        }
-    };
+    .fetch_one(&state.pool);
 
-    // ── Failed threads ──
-    let threads_failed = match sql_forge!(
+    let failed_fut = sql_forge!(
         CountRow,
         r#"
         SELECT COUNT(*) as cnt
@@ -235,21 +215,9 @@ async fn stats_handler(
         ( :profile = &profile,
           :channel_id = channel_id.as_str() )
     )
-    .fetch_one(&state.pool)
-    .await
-    {
-        Ok(row) => row.cnt.unwrap_or(0),
-        Err(e) => {
-            error!("[memory/stats] failed threads count failed: {:?}", e);
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to count failed threads",
-            );
-        }
-    };
+    .fetch_one(&state.pool);
 
-    // ── Messages count (via thread_id IN subquery) ──
-    let messages = match sql_forge!(
+    let messages_fut = sql_forge!(
         CountRow,
         r#"
         SELECT COUNT(*) as cnt
@@ -264,21 +232,9 @@ async fn stats_handler(
         ( :profile = &profile,
           :channel_id = channel_id.as_str() )
     )
-    .fetch_one(&state.pool)
-    .await
-    {
-        Ok(row) => row.cnt.unwrap_or(0),
-        Err(e) => {
-            error!("[memory/stats] messages count failed: {:?}", e);
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to count messages",
-            );
-        }
-    };
+    .fetch_one(&state.pool);
 
-    // ── Vectors count (messages with non-empty embedding) ──
-    let vectors = match sql_forge!(
+    let vectors_fut = sql_forge!(
         CountRow,
         r#"
         SELECT COUNT(*) as cnt
@@ -294,9 +250,58 @@ async fn stats_handler(
         ( :profile = &profile,
           :channel_id = channel_id.as_str() )
     )
-    .fetch_one(&state.pool)
-    .await
-    {
+    .fetch_one(&state.pool);
+
+    let (threads_res, completed_res, failed_res, messages_res, vectors_res) = tokio::join!(
+        threads_fut,
+        completed_fut,
+        failed_fut,
+        messages_fut,
+        vectors_fut
+    );
+
+    let threads = match threads_res {
+        Ok(row) => row.cnt.unwrap_or(0),
+        Err(e) => {
+            error!("[memory/stats] threads count failed: {:?}", e);
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to count threads");
+        }
+    };
+
+    let threads_completed = match completed_res {
+        Ok(row) => row.cnt.unwrap_or(0),
+        Err(e) => {
+            error!("[memory/stats] completed threads count failed: {:?}", e);
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to count completed threads",
+            );
+        }
+    };
+
+    let threads_failed = match failed_res {
+        Ok(row) => row.cnt.unwrap_or(0),
+        Err(e) => {
+            error!("[memory/stats] failed threads count failed: {:?}", e);
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to count failed threads",
+            );
+        }
+    };
+
+    let messages = match messages_res {
+        Ok(row) => row.cnt.unwrap_or(0),
+        Err(e) => {
+            error!("[memory/stats] messages count failed: {:?}", e);
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to count messages",
+            );
+        }
+    };
+
+    let vectors = match vectors_res {
         Ok(row) => row.cnt.unwrap_or(0),
         Err(e) => {
             error!("[memory/stats] vectors count failed: {:?}", e);
