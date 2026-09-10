@@ -1396,9 +1396,21 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
     {
         let remote_store = load_remote_plugins(data_dir);
         for (yaml_type, entries, yaml_entries) in [
-            (PluginYamlType::Platform, remote_store.platforms.as_ref(), &platform_entries),
-            (PluginYamlType::Tool, remote_store.tools.as_ref(), &tool_entries),
-            (PluginYamlType::Provider, remote_store.providers.as_ref(), &provider_entries),
+            (
+                PluginYamlType::Platform,
+                remote_store.platforms.as_ref(),
+                &platform_entries,
+            ),
+            (
+                PluginYamlType::Tool,
+                remote_store.tools.as_ref(),
+                &tool_entries,
+            ),
+            (
+                PluginYamlType::Provider,
+                remote_store.providers.as_ref(),
+                &provider_entries,
+            ),
         ] {
             if let Some(entries) = entries {
                 for (key, remote) in entries {
@@ -1547,9 +1559,7 @@ fn build_remote_only_detail(
         name: name.to_string(),
         version: "0.1.0".to_string(),
         plugin_type,
-        description: Some(
-            "Remote plugin: declared in remote.yml, not downloaded yet".to_string(),
-        ),
+        description: Some("Remote plugin: declared in remote.yml, not downloaded yet".to_string()),
         entrypoint: None,
         capabilities: None,
         config_schema: Vec::new(),

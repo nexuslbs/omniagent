@@ -2525,7 +2525,7 @@ async fn handle_setup(
                 id,
                 -1,
                 &format!(
-                    "Authentication failed: check access_token and server_url: {}",
+                    "Step 1 (auth): authentication failed - check access_token and server_url: {}",
                     e
                 ),
             );
@@ -2552,7 +2552,10 @@ async fn handle_setup(
                         return make_error(
                             id,
                             -1,
-                            &format!("Team '{}' created but no id returned", params.setup_team),
+                            &format!(
+                                "Step 2 (team '{}'): team created but no id returned",
+                                params.setup_team
+                            ),
                         )
                     }
                 },
@@ -2560,7 +2563,10 @@ async fn handle_setup(
                     return make_error(
                         id,
                         -1,
-                        &format!("Failed to create team '{}': {}", params.setup_team, e),
+                        &format!(
+                            "Step 2 (team '{}'): failed to create team: {}",
+                            params.setup_team, e
+                        ),
                     )
                 }
             }
@@ -2569,7 +2575,10 @@ async fn handle_setup(
             return make_error(
                 id,
                 -1,
-                &format!("Failed to look up team '{}': {}", params.setup_team, e),
+                &format!(
+                    "Step 2 (team '{}'): failed to look up team: {}",
+                    params.setup_team, e
+                ),
             )
         }
     };
@@ -2577,22 +2586,74 @@ async fn handle_setup(
     // 3. Add bot to team
     let _ = client.add_team_member(&team_id, &bot_me.id).await;
 
-    // 4. Create or find channel
-    let channels = client
-        .get_user_channels(&bot_me.id, &team_id)
-        .await
-        .unwrap_or_default();
-    let channel_id = match channels.iter().find(|c| c.name == params.setup_channel) {
-        Some(c) => c.id.clone(),
-        None => {
-            // Create channel
-            match client
-                .create_channel(&team_id, &params.setup_channel, &params.setup_channel)
-                .await
-            {
-                Ok(c) => c["id"].as_str().unwrap_or("").to_string(),
-                Err(_) => String::new(),
-            }
+    // 4. Resolve or create the setup channel.
+    //
+    //    The channel can already exist in the team WITHOUT appearing in the
+    //    bot's member channels (the bot was never added, or a previous setup
+    //    run created it): createChannel then answers HTTP 409 "channel already
+    //    exists" and the old code turned that into a bare "Failed to create
+    //    channel" error - setup failed although the service was reachable and
+    //    the config was complete (operator incident 2026-09-10). Resolve the
+    //    channel by name from the team channel list (not member-limited), and
+    //    always report the upstream error detail when a step truly fails.
+    let channel_id: String = {
+        let member_channels = client.get_user_channels(&bot_me.id, &team_id).await;
+        if let Err(e) = &member_channels {
+            tracing::warn!(
+                "Step 4: could not list member channels for bot user '{}': {} - falling back to the team channel list",
+                bot_me.id,
+                e
+            );
+        }
+        match member_channels
+            .as_ref()
+            .ok()
+            .and_then(|chs| chs.iter().find(|c| c.name == params.setup_channel))
+        {
+            Some(c) => c.id.clone(),
+            None => match client.get_team_channels(&team_id).await {
+                Ok(team_channels) => {
+                    match team_channels
+                        .iter()
+                        .find(|c| c.name == params.setup_channel)
+                    {
+                        Some(c) => {
+                            tracing::info!(
+                                "Step 4: channel '{}' already exists in team '{}' - reusing it",
+                                params.setup_channel,
+                                params.setup_team
+                            );
+                            c.id.clone()
+                        }
+                        None => match client
+                            .create_channel(&team_id, &params.setup_channel, &params.setup_channel)
+                            .await
+                        {
+                            Ok(c) => c["id"].as_str().unwrap_or("").to_string(),
+                            Err(e) => {
+                                return make_error(
+                                    id,
+                                    -1,
+                                    &format!(
+                                    "Step 4 (channel '{}' in team '{}'): create channel failed: {}",
+                                    params.setup_channel, params.setup_team, e
+                                ),
+                                )
+                            }
+                        },
+                    }
+                }
+                Err(e) => {
+                    return make_error(
+                        id,
+                        -1,
+                        &format!(
+                            "Step 4 (channel '{}'): list channels of team '{}' failed: {}",
+                            params.setup_channel, params.setup_team, e
+                        ),
+                    )
+                }
+            },
         }
     };
 
@@ -2600,7 +2661,10 @@ async fn handle_setup(
         return make_error(
             id,
             -1,
-            &format!("Failed to create channel '{}'", params.setup_channel),
+            &format!(
+                "Step 4 (channel '{}' in team '{}'): channel does not exist and could not be created - check that the name is usable and that the bot may create channels there",
+                params.setup_channel, params.setup_team
+            ),
         );
     }
     let _ = client.add_channel_member(&channel_id, &bot_me.id).await;
@@ -2790,8 +2854,19 @@ async fn handle_setup(
                 }
             }
 
+            if bot_token.is_empty() {
+                return make_error(
+                    id,
+                    -1,
+                    &format!(
+                        "Step 7 (bot user '{}'): no bot access token available - a valid access_token for this bot user or admin_user/admin_password (secret MATTERMOST_ADMIN_PASSWORD) is required to obtain one.",
+                        params.bot_user
+                    ),
+                );
+            }
+
             let result = serde_json::json!({
-                "success": !bot_token.is_empty(),
+                "success": true,
                 "team_id": team_id,
                 "team_name": params.setup_team,
                 "channel_id": channel_id,
@@ -2807,7 +2882,7 @@ async fn handle_setup(
             // Create bot user: requires bot_password
             if params.bot_password.is_empty() {
                 return make_error(id, -1, &format!(
-                    "bot_password is required to create bot user '{}'. Set MM_BOT_PASSWORD in your .env file.",
+                    "Step 7 (bot user '{}'): bot_password is required to create the bot user - set it in the plugin config (secret MATTERMOST_BOT_PASSWORD).",
                     params.bot_user
                 ));
             }
@@ -2847,29 +2922,43 @@ async fn handle_setup(
                                     }),
                                 )
                             }
-                            Err(e) => {
-                                make_error(id, -1, &format!("Failed to obtain bot token: {}", e))
-                            }
+                            Err(e) => make_error(
+                                id,
+                                -1,
+                                &format!(
+                                    "Step 7 (bot user '{}'): failed to obtain bot token: {}",
+                                    params.bot_user, e
+                                ),
+                            ),
                         }
                     } else {
                         make_error(
                             id,
                             -1,
-                            &format!("Bot user '{}' created but no id returned", params.bot_user),
+                            &format!(
+                                "Step 7 (bot user '{}'): bot user created but no id returned",
+                                params.bot_user
+                            ),
                         )
                     }
                 }
                 Err(e) => make_error(
                     id,
                     -1,
-                    &format!("Failed to create bot user '{}': {}", params.bot_user, e),
+                    &format!(
+                        "Step 7 (bot user '{}'): failed to create bot user: {}",
+                        params.bot_user, e
+                    ),
                 ),
             }
         }
         Err(e) => make_error(
             id,
             -1,
-            &format!("Error looking up bot user '{}': {}", params.bot_user, e),
+            &format!(
+                "Step 7 (bot user '{}'): error looking up bot user: {}",
+                params.bot_user, e
+            ),
         ),
     }
 }

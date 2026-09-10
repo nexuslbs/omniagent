@@ -17,6 +17,82 @@ use crate::plugins_yaml;
 use crate::server::plugins_reload::reload_platform_plugin;
 use crate::server::AppState;
 
+// ── Setup failure reporting ─────────────────────────────────────────────
+//
+// Operator rule (2026-09-10, thread 1614): platform setup errors MUST be
+// informative AND the message itself must be surfaced in the API response
+// (and therefore the dashboard/UI) - never a bare 400/500 whose detail only
+// lives in the server log. Status-code contract:
+//   * HTTP 400 is reserved for causes the operator can fix in the config or
+//     environment: the platform service is not running / unreachable, or the
+//     plugin config is incomplete/invalid.
+//   * Any other failure (platform API error, channel/user sync error,
+//     upstream 4xx/5xx, unexpected plugin state) is an UPSTREAM failure and
+//     is reported as HTTP 502 Bad Gateway with the failing step, the plugin
+//     message and the plugin's own output in the response body.
+
+/// Substrings that mark a setup failure as a client-side cause (config or
+/// service availability) rather than an upstream/platform failure.
+const SETUP_CLIENT_CAUSE_MARKERS: &[&str] = &[
+    "missing required config",
+    "connection refused",
+    "connection error",
+    "connection reset",
+    "error sending request",
+    "dns error",
+    "failed to connect",
+    "no route to host",
+    "unreachable",
+    "timed out",
+    "timeout",
+    "invalid config",
+    "is required",
+    "authentication failed",
+    "check access_token and server_url",
+    "unauthorized",
+    "permission denied",
+];
+
+/// Classify a plugin-reported setup failure into (HTTP status, cause kind).
+pub(crate) fn classify_setup_failure(msg: &str) -> (StatusCode, &'static str) {
+    let m = msg.to_ascii_lowercase();
+    if SETUP_CLIENT_CAUSE_MARKERS.iter().any(|k| m.contains(k)) {
+        (StatusCode::BAD_REQUEST, "config or service availability")
+    } else {
+        (StatusCode::BAD_GATEWAY, "platform/upstream failure")
+    }
+}
+
+/// Build the JSON error response for a failed plugin setup call: the plugin
+/// name, the failing phase, the plugin's own message and its stderr/stdout
+/// are all included so the operator sees the cause without reading the log.
+pub(crate) fn setup_error_response(
+    name: &str,
+    phase: &str,
+    plugin_msg: &str,
+    detail: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let (status, kind) = classify_setup_failure(plugin_msg);
+    let mut error = format!(
+        "Setup for plugin '{}' failed during {} ({}): {}",
+        name, phase, kind, plugin_msg
+    );
+    let detail = detail.trim();
+    if !detail.is_empty() {
+        let truncated: String = detail.chars().take(2000).collect();
+        error.push_str(&format!(" | plugin output: {}", truncated));
+    }
+    (
+        status,
+        Json(serde_json::json!({
+            "success": false,
+            "error": error,
+            "plugin": name,
+            "phase": phase,
+        })),
+    )
+}
+
 pub(crate) async fn setup_plugin_handler(
     Path((p_type, source, name)): Path<(String, String, String)>,
     State(state): State<Arc<AppState>>,
@@ -451,6 +527,7 @@ pub(crate) async fn setup_plugin_handler(
     let max_wait = std::time::Duration::from_secs(120);
 
     let mut stdout_output = String::new();
+    let mut stderr_output = String::new();
     loop {
         if start.elapsed() >= max_wait {
             if let Err(ke) = child.kill() {
@@ -477,33 +554,23 @@ pub(crate) async fn setup_plugin_handler(
                         tracing::warn!("[plugins] Failed to read stdout: {:?}", e);
                     }
                 }
-                let stderr_output = child
-                    .stderr
-                    .take()
-                    .map(|mut s| {
-                        let mut buf = String::new();
-                        use std::io::Read;
-                        if let Err(e) = s.read_to_string(&mut buf) {
-                            tracing::warn!("[plugins] Failed to read stderr: {:?}", e);
-                        }
-                        buf
-                    })
-                    .unwrap_or_default();
+                if let Some(mut s) = child.stderr.take() {
+                    use std::io::Read;
+                    if let Err(e) = s.read_to_string(&mut stderr_output) {
+                        tracing::warn!("[plugins] Failed to read stderr: {:?}", e);
+                    }
+                }
 
                 if !status.success() {
-                    let err_detail = if stderr_output.is_empty() {
+                    let err_detail = if stderr_output.trim().is_empty() {
                         stdout_output.clone()
                     } else {
                         stderr_output.clone()
                     };
-                    let truncated = if err_detail.len() > 500 {
-                        format!("{}...", &err_detail[..500])
-                    } else {
-                        err_detail
-                    };
+                    let truncated: String = err_detail.trim().chars().take(2000).collect();
 
                     tracing::error!(
-                        "Setup for '{}' failed (exit: {}): {}",
+                        "Setup for plugin '{}' failed: plugin process exited with {}: {}",
                         name,
                         status,
                         truncated
@@ -513,7 +580,12 @@ pub(crate) async fn setup_plugin_handler(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(serde_json::json!({
                             "success": false,
-                            "error": format!("Setup failed: {}", truncated)
+                            "error": format!(
+                                "Setup for plugin '{}' failed: the plugin process exited with {} before returning a result. Plugin output: {}",
+                                name, status, truncated
+                            ),
+                            "plugin": name,
+                            "phase": "run (plugin process)",
                         })),
                     )
                         .into_response();
@@ -552,14 +624,35 @@ pub(crate) async fn setup_plugin_handler(
                     .and_then(|m| m.as_str())
                     .unwrap_or("Setup failed with unknown error");
 
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({
-                        "success": false,
-                        "error": msg.to_string()
-                    })),
-                )
-                    .into_response();
+                // Collect EVERYTHING the operator needs: any structured error
+                // data the plugin attached plus its own stderr/stdout. The
+                // status code is classified (400 only for config/availability
+                // causes, 502 for upstream/platform failures) so a sync failure
+                // is never reported as a bare HTTP 400.
+                let mut detail = String::new();
+                if let Some(data) = error.get("data") {
+                    if !data.is_null() {
+                        detail.push_str(&format!("error.data={}", data));
+                    }
+                }
+                if !stderr_output.trim().is_empty() {
+                    if !detail.is_empty() {
+                        detail.push_str("; ");
+                    }
+                    detail.push_str(&format!("stderr={}", stderr_output.trim()));
+                }
+                if detail.is_empty() && !stdout_output.trim().is_empty() {
+                    detail.push_str(&format!("stdout={}", stdout_output.trim()));
+                }
+
+                tracing::error!(
+                    "Setup for plugin '{}' failed during the setup call: {} (detail: {})",
+                    name,
+                    msg,
+                    detail
+                );
+
+                return setup_error_response(&name, "setup call", msg, &detail).into_response();
             }
 
             let result = val.get("result").cloned().unwrap_or(val);
@@ -641,5 +734,81 @@ pub(crate) async fn setup_plugin_handler(
             )
                 .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod setup_error_tests {
+    use super::*;
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    #[test]
+    fn setup_failure_unreachable_service_is_bad_request() {
+        // Cause (a): the platform service is not running / unreachable.
+        let (status, kind) =
+            classify_setup_failure("Mattermost: error sending request: connection refused");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(kind.contains("availability"));
+    }
+
+    #[test]
+    fn setup_failure_incomplete_config_is_bad_request() {
+        // Cause (b): the config is incomplete.
+        let (status, _) =
+            classify_setup_failure("Missing required config: setup_team: set it in the config");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status2, _) = classify_setup_failure(
+            "Step 7 (bot user 'omnibot'): bot_password is required to create bot user 'omnibot'",
+        );
+        assert_eq!(status2, StatusCode::BAD_REQUEST);
+
+        let (status3, _) = classify_setup_failure(
+            "Step 1 (auth): Authentication failed: check access_token and server_url: 401",
+        );
+        assert_eq!(status3, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn setup_failure_upstream_sync_is_not_a_bare_400() {
+        // The Mattermost case that used to surface as HTTP 400 with a bare
+        // message: a Mattermost<->omniagent sync failure is an upstream
+        // failure, so it must NOT be a 400.
+        let (status, kind) = classify_setup_failure(
+            "Step 4: channel 'stable-channel' does not exist in team 'omni' and could not be created",
+        );
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(kind.contains("upstream"));
+
+        let (status2, _) =
+            classify_setup_failure("Mattermost createChannel failed (500): internal error");
+        assert_eq!(status2, StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn setup_error_response_carries_step_message_and_plugin_output() {
+        let (status, Json(body)) = setup_error_response(
+            "mattermost",
+            "setup call",
+            "Step 4: create channel failed",
+            "stderr=boom",
+        );
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        let err = body["error"].as_str().unwrap();
+        assert!(err.contains("mattermost"), "names the plugin: {}", err);
+        assert!(err.contains("setup call"), "names the phase: {}", err);
+        assert!(err.contains("Step 4"), "keeps the plugin message: {}", err);
+        assert!(err.contains("boom"), "carries the plugin output: {}", err);
+        assert_eq!(body["plugin"], "mattermost");
+        assert_eq!(body["phase"], "setup call");
+    }
+
+    #[test]
+    fn setup_error_response_truncates_huge_plugin_output() {
+        let huge = "x".repeat(5000);
+        let (_, Json(body)) = setup_error_response("p", "setup call", "boom", &huge);
+        let err = body["error"].as_str().unwrap();
+        assert!(err.len() < 4000, "output truncated, len={}", err.len());
     }
 }
