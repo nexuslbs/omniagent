@@ -14,7 +14,7 @@ pub const COMPACTION_SUMMARY_MARKER: &str = "=== Compaction Summary ===";
 
 /// Excerpt/size limits for compaction, sourced from plugin config
 /// (plugin.json config_schema + settings.yml) - no hardcoded limits in code.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct CompactSettings {
     /// Characters of each individual tool result excerpt kept when a
     /// tool-call turn is compacted.
@@ -38,12 +38,30 @@ pub struct CompactSettings {
     /// stays bounded and compaction can actually bring the context under
     /// the trigger.
     pub max_summary_chars: usize,
+    /// Tool names whose plugin manifest declares `read_only: true`
+    /// (audit V-2). Passed by the core on every compaction call, so the core
+    /// registry is the single source of truth. EMPTY = an older core without
+    /// descriptors: the legacy name list below is then used as a fallback so
+    /// the plugin keeps working standalone.
+    pub read_only_tools: Vec<String>,
 }
 /// Tools whose results ARE the agent's working memory (file contents,
 /// listings, search hits). When compaction must drain them, keep a much
 /// larger excerpt than the generic cap - zeroing them forces the agent to
 /// re-read the same files (thread 700 death spiral: 117 sed windows).
-fn is_read_type_tool(name: &str) -> bool {
+/// Descriptor-driven read-type check (audit V-2): when the core supplies the
+/// declared read-only tools, THAT set decides; otherwise the legacy prefix
+/// list is used as a fallback.
+fn is_read_type_tool(name: &str, settings: &CompactSettings) -> bool {
+    if !settings.read_only_tools.is_empty() {
+        return settings.read_only_tools.iter().any(|t| t == name);
+    }
+    legacy_read_type_tool(name)
+}
+
+/// Legacy fallback (no descriptors supplied by the core): tools whose names
+/// start with these prefixes get the generous read excerpt.
+fn legacy_read_type_tool(name: &str) -> bool {
     name.starts_with("filesystem_read")
         || name.starts_with("filesystem_list")
         || name.starts_with("filesystem_search")
@@ -182,7 +200,7 @@ pub fn compact_old_assistant_messages(
                             // what it read and re-reads the same files
                             // (thread 700: 117 sed windows of the same
                             // ranges, zero commits).
-                            if is_read_type_tool(tool_name) {
+                            if is_read_type_tool(tool_name, settings) {
                                 crate::notes::note_append(
                                     dir,
                                     "auto-notes.md",
@@ -207,7 +225,7 @@ pub fn compact_old_assistant_messages(
                 let mut total_excerpt = 0;
                 for tm in &messages[i + 1..tool_end] {
                     let tool_name = tm.name.as_deref().unwrap_or("");
-                    let is_read = is_read_type_tool(tool_name);
+                    let is_read = is_read_type_tool(tool_name, settings);
                     let excerpt_chars = if is_read {
                         settings.read_excerpt_chars
                     } else {
@@ -368,8 +386,30 @@ mod tests {
     use super::*;
     use crate::chat_message::{ToolCallData, ToolCallFunction};
 
+    #[test]
+    fn read_only_descriptors_override_the_legacy_prefix_list() {
+        // A read-only tool that is NOT in the legacy prefix list must still
+        // get the generous read excerpt once the core passes its descriptor.
+        let mut s = settings();
+        s.read_only_tools = vec![
+            "search_thread-messages".to_string(),
+            "memory_list-memories".to_string(),
+            "notes_note-read".to_string(),
+        ];
+        assert!(is_read_type_tool("search_thread-messages", &s));
+        assert!(is_read_type_tool("memory_list-memories", &s));
+        assert!(is_read_type_tool("notes_note-read", &s));
+        // A tool absent from the descriptor set is not read-type, even when
+        // its name matches a legacy prefix: the descriptors win.
+        assert!(!is_read_type_tool("filesystem_read", &s));
+        // Empty descriptor set (older core): legacy fallback keeps working.
+        let legacy = settings();
+        assert!(is_read_type_tool("filesystem_read", &legacy));
+    }
+
     fn settings() -> CompactSettings {
         CompactSettings {
+            read_only_tools: Vec::new(),
             tool_excerpt_chars: 800,
             total_excerpt_cap: 4000,
             read_excerpt_chars: 2000,
@@ -644,6 +684,7 @@ mod tests {
     #[test]
     fn repeated_compaction_keeps_frozen_block_bounded() {
         let small = CompactSettings {
+            read_only_tools: Vec::new(),
             tool_excerpt_chars: 800,
             total_excerpt_cap: 4000,
             read_excerpt_chars: 2000,

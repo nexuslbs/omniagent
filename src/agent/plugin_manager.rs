@@ -297,6 +297,7 @@ impl PluginManager for ActorPluginManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp::behavior::ToolBehavior;
     use crate::mcp::external::client::ExternalMcpClients;
     use crate::mcp::{AppContext, McpToolHandler, McpToolResult};
     use serde_json::{json, Value};
@@ -321,6 +322,7 @@ mod tests {
             input_schema: json!({"type": "object"}),
             server_name: None,
             timeout_secs: Some(30),
+            behavior: ToolBehavior::default(),
             handler: make_test_handler(),
         }
     }

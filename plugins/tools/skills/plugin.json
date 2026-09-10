@@ -17,5 +17,9 @@
       "label": "Omni Dir",
       "type": "string"
     }
+  ],
+  "tools": [
+    { "name": "list_skills", "behavior": { "read_only": true, "repeat_guard": true } },
+    { "name": "view_skill", "behavior": { "read_only": true, "repeat_guard": true } }
   ]
 }

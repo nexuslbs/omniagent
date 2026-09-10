@@ -18,5 +18,9 @@
       "description": "Root omni data dir; thread notes live under {omni_dir}/data/threads/<thread_id>/"
     }
   ],
-  "label": "notes"
+  "label": "notes",
+  "tools": [
+    { "name": "note_read", "behavior": { "read_only": true, "repeat_guard": true } },
+    { "name": "note_list", "behavior": { "read_only": true, "repeat_guard": false } }
+  ]
 }

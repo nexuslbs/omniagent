@@ -24,5 +24,14 @@
       "default": "$env:OMNI_DIR",
       "description": "Data directory for wiki file search and channels.yml"
     }
+  ],
+  "tools": [
+    { "name": "search_messages", "behavior": { "read_only": true, "repeat_guard": true } },
+    { "name": "search_wiki", "behavior": { "read_only": true, "repeat_guard": true } },
+    { "name": "search_database", "behavior": { "read_only": true, "repeat_guard": true } },
+    { "name": "search_thread_messages", "behavior": { "read_only": true, "repeat_guard": true } },
+    { "name": "search_channel_prompts", "behavior": { "read_only": true, "repeat_guard": true } },
+    { "name": "search_channels", "behavior": { "read_only": true, "repeat_guard": false } },
+    { "name": "search_metrics", "behavior": { "read_only": true, "repeat_guard": false } }
   ]
 }

@@ -34,5 +34,8 @@
     "command": "mcp-server-compose",
     "args": [],
     "transport": "stdio"
-  }
+  },
+  "tools": [
+    { "name": "compose", "behavior": { "affects_own_stack": true } }
+  ]
 }

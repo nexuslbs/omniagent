@@ -54,5 +54,10 @@
     "command": "mcp-server-git",
     "args": [],
     "transport": "stdio"
-  }
+  },
+  "tools": [
+    { "name": "status", "behavior": { "read_only": true, "repeat_guard": true } },
+    { "name": "run_command", "behavior": { "read_only": true, "repeat_guard": true } },
+    { "name": "git_sync", "behavior": { "repeat_guard": true } }
+  ]
 }

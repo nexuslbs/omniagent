@@ -217,8 +217,10 @@ pub fn spill_tool_result(
     }
 }
 
+pub mod behavior;
 pub mod external;
 pub mod task_tools;
+pub use behavior::ToolBehavior;
 
 /// A tool call requested by the LLM.
 #[derive(Debug, Clone)]
@@ -372,6 +374,10 @@ pub struct McpTool {
     /// the agent full tracking/cancel/log control - a tool must never be
     /// killed by an invisible clock the agent didn't set.
     pub timeout_secs: Option<u64>,
+    /// Declared behaviour of this tool (audit V-2), read from its plugin
+    /// manifest. Default = nothing declared: not read-only, no coordination
+    /// family, does not affect the agent's own stack.
+    pub behavior: ToolBehavior,
     pub handler: McpToolHandler,
 }
 
@@ -395,6 +401,7 @@ impl McpTool {
             input_schema,
             server_name: None,
             timeout_secs,
+            behavior: ToolBehavior::default(),
             handler,
         }
     }
@@ -429,6 +436,63 @@ impl McpRegistry {
         for tool in tools {
             self.tools.insert(tool.name.clone(), tool);
         }
+    }
+
+    // ── Tool behaviour sets (audit V-2) ─────────────────────────────────
+    // Every set below is DERIVED FROM TOOL DESCRIPTORS (plugin manifests),
+    // never from a hardcoded tool-name allowlist: a tool registered under
+    // another id keeps its declared protection.
+
+    /// Tools whose declared behaviour applies the exact-repeat read guard.
+    ///
+    /// Fail CLOSED BUT LOUD: an undeclared tool is never treated as
+    /// read-only; a read-looking name emits one warning per process so the
+    /// missing manifest entry stays visible.
+    pub fn guarded_read_only_tools(&self) -> std::collections::HashSet<String> {
+        for tool in self.tools.values() {
+            if tool.behavior.is_empty() {
+                crate::mcp::behavior::warn_missing_descriptor(&tool.name);
+            }
+        }
+        self.tools
+            .values()
+            .filter(|t| t.behavior.repeat_guard_enabled())
+            .map(|t| t.name.clone())
+            .collect()
+    }
+
+    /// Tools that declare themselves read-only. Handed to the prompt plugin
+    /// so compaction keeps a generous excerpt of their results.
+    pub fn read_only_tools(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .tools
+            .values()
+            .filter(|t| t.behavior.read_only)
+            .map(|t| t.name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Tools that can change the stack the agent itself runs in: the
+    /// self-restart guard must run before any of them executes.
+    pub fn own_stack_tools(&self) -> std::collections::HashSet<String> {
+        self.tools
+            .values()
+            .filter(|t| t.behavior.affects_own_stack)
+            .map(|t| t.name.clone())
+            .collect()
+    }
+
+    /// Tools declaring a coordination family (e.g. "subtasks"): the core
+    /// loop treats the whole family as one capability, so a renamed tool is
+    /// still recognised.
+    pub fn family_tools(&self, family: &str) -> std::collections::HashSet<String> {
+        self.tools
+            .values()
+            .filter(|t| t.behavior.family.as_deref() == Some(family))
+            .map(|t| t.name.clone())
+            .collect()
     }
 
     /// Remove all tools belonging to a given server.
@@ -610,6 +674,7 @@ fn poll_task_tool() -> McpTool {
         }),
         server_name: None,
         timeout_secs: Some(10),
+        behavior: ToolBehavior::default(),
         handler: std::sync::Arc::new(|args: Value, ctx: crate::mcp::AppContext| {
             Box::pin(crate::mcp::task_tools::handle_poll_task(args, ctx))
         }),
@@ -647,6 +712,7 @@ fn wait_task_tool() -> McpTool {
         // when exceeded - an external kill clock would cut a legitimately
         // long wait short and force the agent into extra wait calls.
         timeout_secs: None,
+        behavior: ToolBehavior::default(),
         handler: std::sync::Arc::new(|args: Value, ctx: crate::mcp::AppContext| {
             Box::pin(crate::mcp::task_tools::handle_wait_task(args, ctx))
         }),
@@ -690,6 +756,7 @@ fn wait_for_status_tool() -> McpTool {
         // No declared timeout: like wait-task, the handler self-bounds by its
         // own timeout_s argument and returns a timeout STATUS (not an error).
         timeout_secs: None,
+        behavior: ToolBehavior::default(),
         handler: std::sync::Arc::new(|args: Value, ctx: crate::mcp::AppContext| {
             Box::pin(crate::mcp::task_tools::handle_wait_for_status(args, ctx))
         }),
@@ -713,6 +780,7 @@ fn cancel_task_tool() -> McpTool {
         }),
         server_name: None,
         timeout_secs: Some(10),
+        behavior: ToolBehavior::default(),
         handler: std::sync::Arc::new(|args: Value, ctx: crate::mcp::AppContext| {
             Box::pin(crate::mcp::task_tools::handle_cancel_task(args, ctx))
         }),
@@ -744,6 +812,7 @@ fn read_task_logs_tool() -> McpTool {
         }),
         server_name: None,
         timeout_secs: Some(10),
+        behavior: ToolBehavior::default(),
         handler: std::sync::Arc::new(|args: Value, ctx: crate::mcp::AppContext| {
             Box::pin(crate::mcp::task_tools::handle_read_task_logs(args, ctx))
         }),
@@ -778,6 +847,7 @@ fn read_attached_file_tool() -> McpTool {
         }),
         server_name: None,
         timeout_secs: None,
+        behavior: ToolBehavior::default(),
         handler: Arc::new(|args: Value, ctx: AppContext| {
             Box::pin(async move {
                 let file_id = args
@@ -927,6 +997,7 @@ fn list_tool_details_tool() -> McpTool {
         }),
         server_name: None,
         timeout_secs: None,
+        behavior: ToolBehavior::default(),
         handler: Arc::new(|args: Value, ctx: AppContext| {
             Box::pin(async move {
                 let tool_name = args
@@ -1230,6 +1301,7 @@ fn omniagent_api_tool() -> McpTool {
         }),
         server_name: None,
         timeout_secs: Some(30),
+        behavior: ToolBehavior::default(),
         handler: std::sync::Arc::new(move |args: Value, _ctx: crate::mcp::AppContext| {
             let base_url = base_url.clone();
             Box::pin(async move {
@@ -1320,6 +1392,7 @@ fn fail_thread_tool() -> McpTool {
         }),
         server_name: None,
         timeout_secs: None,
+        behavior: ToolBehavior::default(),
         handler: Arc::new(|args: Value, ctx: AppContext| {
             Box::pin(crate::mcp::task_tools::handle_fail_thread(args, ctx))
         }),
@@ -1568,6 +1641,69 @@ mod tests {
         })
     }
 
+    #[test]
+    fn behavior_sets_are_derived_from_descriptors() {
+        let mut reg = McpRegistry::new();
+        // (a) A read-only tool under an id nobody hardcoded IS guarded.
+        let mut custom = make_tool("zorp_inspect", None, None);
+        custom.behavior = ToolBehavior {
+            read_only: true,
+            ..Default::default()
+        };
+        reg.register(custom);
+        // A name that LOOKS like a legacy read tool but declares no
+        // descriptor stays unguarded: fail closed, never allowlist by name.
+        reg.register(make_tool("filesystem_read", None, None));
+
+        let guarded = reg.guarded_read_only_tools();
+        assert!(
+            guarded.contains("zorp_inspect"),
+            "descriptor-declared read tool must be guarded"
+        );
+        assert!(
+            !guarded.contains("filesystem_read"),
+            "undeclared tool must fail closed"
+        );
+        assert!(crate::agent::helpers::is_guarded_read_only(
+            &guarded,
+            "zorp_inspect"
+        ));
+        assert!(!crate::agent::helpers::is_guarded_read_only(
+            &guarded,
+            "filesystem_read"
+        ));
+        // The set handed to the prompt plugin follows descriptors too.
+        assert_eq!(reg.read_only_tools(), vec!["zorp_inspect".to_string()]);
+    }
+
+    #[test]
+    fn own_stack_and_family_sets_follow_descriptors() {
+        let mut reg = McpRegistry::new();
+        // (b) The docker tool is renamed in its manifest ("compose"); the
+        // self-restart guard follows the DESCRIPTOR, so the registry name
+        // docker_compose stays protected.
+        let mut compose = make_tool("compose", Some("docker"), None);
+        compose.behavior = ToolBehavior {
+            affects_own_stack: true,
+            ..Default::default()
+        };
+        reg.register(compose);
+        // (c) A subtask tool registered under a brand-new id still resets the
+        // proactive reminder counter through its declared family.
+        let mut zap = make_tool("zap_thread_items", Some("subtasks"), None);
+        zap.behavior = ToolBehavior {
+            family: Some("subtasks".to_string()),
+            ..Default::default()
+        };
+        reg.register(zap);
+
+        assert!(reg.own_stack_tools().contains("docker_compose"));
+        assert!(reg
+            .family_tools("subtasks")
+            .contains("subtasks_zap-thread-items"));
+        assert!(!reg.own_stack_tools().contains("subtasks_zap-thread-items"));
+    }
+
     fn make_tool(name: &str, server: Option<&str>, timeout: Option<u64>) -> McpTool {
         // name IS the full name (the only name): qualify it like real tools.
         let qualified = if let Some(srv) = server {
@@ -1581,6 +1717,7 @@ mod tests {
             input_schema: json!({"type": "object", "properties": {}}),
             server_name: server.map(|s| s.to_string()),
             timeout_secs: timeout,
+            behavior: ToolBehavior::default(),
             handler: make_test_handler(),
         }
     }
@@ -1730,6 +1867,7 @@ mod tests {
             input_schema: json!({"type": "object", "properties": {}}),
             server_name: Some("fs".to_string()),
             timeout_secs: Some(30),
+            behavior: ToolBehavior::default(),
             handler: make_test_handler(),
         };
         registry.register(tool);

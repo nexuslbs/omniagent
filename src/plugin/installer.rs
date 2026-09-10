@@ -1031,6 +1031,7 @@ pub fn discover_plugins(data_dir: &str) -> Vec<(PluginManifest, String, String)>
                         .unwrap_or_else(|| format!("mcp-server-{}", dir_name));
 
                     let manifest = PluginManifest {
+                        tools: Vec::new(),
                         name: dir_name.clone(),
                         version: "0.1.0".to_string(),
                         plugin_type: match *type_name {
@@ -1090,6 +1091,7 @@ pub fn discover_plugins(data_dir: &str) -> Vec<(PluginManifest, String, String)>
                 crate::mcp::external::config::McpTransport::Http => "http",
             };
             let manifest = PluginManifest {
+                tools: Vec::new(),
                 name: srv.name.clone(),
                 version: "0.1.0".to_string(),
                 plugin_type: PluginType::Mcp,

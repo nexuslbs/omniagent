@@ -1437,6 +1437,15 @@ Previous plan:\n{}",
         let mut was_compacted = false;
         let mut dump_file: Option<String> = None;
         let mut dump_entries = 0usize;
+        // Read-only tool names from the plugin descriptors (audit V-2): the
+        // prompt plugin keeps a generous excerpt of their results when
+        // compaction drains them, so the registry - not a second hardcoded
+        // list inside the plugin - is the single source of truth.
+        let read_only_tools = cfg
+            .plugin_manager
+            .snapshot_registry()
+            .await
+            .read_only_tools();
         let condense_tool = cfg_snapshot.compact_messages_tool_name.clone();
         if !condense_tool.is_empty() {
             let condense_call = McpToolCall {
@@ -1449,6 +1458,7 @@ Previous plan:\n{}",
                     "soft_budget": eff_model_cfg.token_budget_soft,
                     "hard_budget": eff_model_cfg.token_budget_hard,
                     "force_compact": prev_over_budget,
+                    "read_only_tools": read_only_tools,
                 }),
                 id: String::new(),
             };
@@ -2314,6 +2324,17 @@ Previous plan:\n{}",
             })
             .collect();
 
+        // ── Tool behaviour sets (audit V-2) ──
+        // Derived from the tool DESCRIPTORS declared in the plugin manifests
+        // (via the registry) instead of hardcoded tool-name allowlists: a
+        // read-only tool registered under another id keeps the exact-repeat
+        // guard, a renamed container tool keeps the self-restart guard, and a
+        // renamed subtask tool keeps resetting the progress reminder.
+        let behavior_snapshot = cfg.plugin_manager.snapshot_registry().await;
+        let guarded_read_tools = behavior_snapshot.guarded_read_only_tools();
+        let own_stack_tools = behavior_snapshot.own_stack_tools();
+        let subtask_family_tools = behavior_snapshot.family_tools("subtasks");
+
         let pool = cfg.pool.clone();
         // mcp_registry removed - use cfg.plugin_manager instead
         let mut join_set = JoinSet::new();
@@ -2328,7 +2349,7 @@ Previous plan:\n{}",
             // WS-4b: exact-repeat read guard for read-only tools.
             let args_hash = helpers::hash_tool_args(&tool_args);
             let guard_key = (tool_name.clone(), args_hash);
-            if helpers::is_guarded_read_only(&tool_name) {
+            if helpers::is_guarded_read_only(&guarded_read_tools, &tool_name) {
                 if let Some((guard_iter, _len)) = read_guard.get(&guard_key) {
                     read_dup_blocks += 1;
                     let mut note = format!(
@@ -2388,6 +2409,9 @@ Previous plan:\n{}",
             let is_multi_tool = tool_count > 1;
 
             // --- Phase 1.5: Self-restart guard (P2 #6) ---
+            // Applies to every tool whose descriptor declares
+            // `affects_own_stack: true` (audit V-2) - not to a hardcoded
+            // name, so a renamed container tool stays protected.
             // An agent must never tear down the container it runs inside: a
             // `docker compose restart/down/stop/rm/kill` against its OWN
             // compose project kills its own thread (thread 488 self-kill).
@@ -2398,7 +2422,7 @@ Previous plan:\n{}",
             // any project; other, unrelated compose projects are
             // always manageable.
             let mut self_restart_block: Option<String> = None;
-            if tool_name == "docker_compose" {
+            if own_stack_tools.contains(&tool_name) {
                 self_restart_block = self_restart_guard_block(&tc.function.arguments).await;
             }
             let self_restart_block_for_task = self_restart_block.clone();
@@ -2711,7 +2735,7 @@ Previous plan:\n{}",
 
         // WS-4b: record output length for executed read-only tools.
         for (idx, tc) in response.tool_calls.iter().enumerate() {
-            if helpers::is_guarded_read_only(&tc.function.name) {
+            if helpers::is_guarded_read_only(&guarded_read_tools, &tc.function.name) {
                 if let Some(Some((_, _, output))) = tool_results.get(idx) {
                     read_guard.insert(
                         (
@@ -2772,10 +2796,10 @@ Previous plan:\n{}",
         // so the appended obligation stays visible mid-run without plan mode.
         if enable_subtasks || sub_prompt_tracking_active {
             // Check if any tool call in this round was manage_subtasks
-            let called_manage = response.tool_calls.iter().any(|tc| {
-                tc.function.name == "subtasks_manage-subtasks"
-                    || tc.function.name == "manage_subtasks"
-            });
+            let called_manage = response
+                .tool_calls
+                .iter()
+                .any(|tc| subtask_family_tools.contains(&tc.function.name));
             if called_manage {
                 calls_since_subtask_management = 0;
             } else {

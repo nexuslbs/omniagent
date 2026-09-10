@@ -1699,6 +1699,20 @@ fn measure_size(items: &[crate::chat_message::ChatMessage], tokenizer_encoding: 
 // Tool: prompt_compact_messages
 // ---------------------------------------------------------------------------
 
+/// Read-only tool names declared by the plugin descriptors (audit V-2).
+/// The core passes the registry-derived set; a missing/empty argument means
+/// an older core, in which case the plugin falls back to its legacy list.
+fn read_only_tool_names(args: &Value) -> Vec<String> {
+    args["read_only_tools"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(String, bool)> {
     let messages_arr = match args["messages"].as_array() {
         Some(arr) => arr,
@@ -1802,6 +1816,7 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
                 thread_dir.as_deref(),
                 current_iteration,
                 &crate::compact::CompactSettings {
+                    read_only_tools: read_only_tool_names(args),
                     tool_excerpt_chars: cfg.tool_excerpt_chars,
                     total_excerpt_cap: cfg.total_excerpt_cap,
                     read_excerpt_chars: cfg.read_excerpt_chars,

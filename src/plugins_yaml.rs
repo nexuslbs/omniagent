@@ -1349,6 +1349,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
             if !groups.contains_key(key) {
                 let is_remote = yaml_entry.source == "remote";
                 let manifest = PluginManifest {
+                    tools: Vec::new(),
                     name: key.clone(),
                     version: "0.1.0".to_string(),
                     plugin_type: match yaml_type {
@@ -1454,6 +1455,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
                 continue;
             }
             let manifest = crate::plugin::PluginManifest {
+                tools: Vec::new(),
                 name: name.clone(),
                 version: "0.1.0".to_string(),
                 plugin_type: crate::plugin::PluginType::Provider,
@@ -1563,6 +1565,7 @@ fn build_remote_only_detail(
         PluginYamlType::Provider => "provider",
     };
     let manifest = PluginManifest {
+        tools: Vec::new(),
         name: name.to_string(),
         version: "0.1.0".to_string(),
         plugin_type,
@@ -1795,6 +1798,7 @@ fn build_not_found_from_yaml(
         if let Some(yaml_entry) = entries.get(name) {
             let is_remote = yaml_entry.source == "remote";
             let manifest = PluginManifest {
+                tools: Vec::new(),
                 name: name.to_string(),
                 version: "0.1.0".to_string(),
                 plugin_type: match yaml_type {
@@ -2450,6 +2454,7 @@ providers:
     fn test_manifest(command: &str, args: Vec<&str>) -> PluginManifest {
         use crate::plugin::PluginType;
         PluginManifest {
+            tools: Vec::new(),
             name: "test-plugin".to_string(),
             version: "1.0.0".to_string(),
             plugin_type: PluginType::Platform,

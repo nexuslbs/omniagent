@@ -32,6 +32,11 @@ pub enum McpTransport {
 pub struct McpServerConfig {
     /// Unique name for this server (used as tool name prefix).
     pub name: String,
+    /// Per-tool behaviour declared in the plugin manifest (audit V-2).
+    /// Carried onto every registered tool so the core agent loop derives its
+    /// guards from descriptors, never from hardcoded tool names.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub tool_behavior: crate::mcp::behavior::ToolBehaviorMap,
     /// Transport type: "stdio" or "http".
     pub transport: McpTransport,
     /// For stdio: command to execute (e.g. "node", "python3").
@@ -282,6 +287,34 @@ pub(crate) fn get_bin_path(name: &str) -> String {
         .unwrap_or_else(|| format!("/app/target/release/{}", name))
 }
 
+/// Read a plugin's declared tool behaviours from its `plugin.json`
+/// (audit V-2). A missing or unparsable manifest declares nothing: the tools
+/// stay behaviour-neutral (fail CLOSED) and the registry warns loudly.
+fn manifest_tool_behavior(plugin_dir: &str) -> crate::mcp::behavior::ToolBehaviorMap {
+    let manifest_path = format!("{}/plugin.json", plugin_dir);
+    match crate::plugin::load_manifest(&manifest_path) {
+        Ok(manifest) if !manifest.tools.is_empty() => {
+            let map = crate::mcp::behavior::behavior_map(&manifest.tools);
+            tracing::debug!(
+                "Plugin '{}': {} tool behaviour descriptor(s)",
+                plugin_dir,
+                map.len()
+            );
+            map
+        }
+        Ok(_) => crate::mcp::behavior::ToolBehaviorMap::new(),
+        Err(e) => {
+            tracing::debug!(
+                "No tool behaviour descriptors for '{}' ({}): {}",
+                plugin_dir,
+                manifest_path,
+                e
+            );
+            crate::mcp::behavior::ToolBehaviorMap::new()
+        }
+    }
+}
+
 /// Process a single plugin directory: handles mcp-config.json or Cargo.toml + plugin.json.
 /// Returns None if the directory doesn't exist or has no valid plugin manifest.
 fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConfig>> {
@@ -333,6 +366,7 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
             cmd
         );
         let mut srv = McpServerConfig {
+            tool_behavior: manifest_tool_behavior(plugin_dir),
             name: dir_name.clone(),
             transport: McpTransport::Stdio,
             command: Some(cmd),
@@ -430,6 +464,7 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
         };
 
         let mut srv = McpServerConfig {
+            tool_behavior: manifest_tool_behavior(plugin_dir),
             name: dir_name.clone(),
             transport: if ep.transport == "http" {
                 McpTransport::Http
@@ -510,10 +545,14 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
                 None
             };
 
+            let declared_behavior = manifest_tool_behavior(&plugin_dir_str);
             let resolved_servers: Vec<McpServerConfig> = config
                 .servers
                 .into_iter()
                 .map(|mut srv| {
+                    if !declared_behavior.is_empty() {
+                        srv.tool_behavior = declared_behavior.clone();
+                    }
                     if srv.transport == McpTransport::Stdio && srv.command.is_none() {
                         if has_cargo_toml {
                             // Deterministic binary path by plugin location:
@@ -795,6 +834,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn real_plugin_manifests_declare_tool_behaviours() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let dir = |name: &str| format!("{}/plugins/tools/{}", root.display(), name);
+
+        // docker manifest declares the raw tool name "compose"; the
+        // descriptor must resolve to the registry name docker_compose so the
+        // self-restart guard protects the stack the agent runs in.
+        let docker = manifest_tool_behavior(&dir("docker"));
+        let compose = crate::mcp::behavior::for_tool(&docker, "docker", "docker_compose");
+        assert!(compose.affects_own_stack);
+
+        let subtasks = manifest_tool_behavior(&dir("subtasks"));
+        let manage =
+            crate::mcp::behavior::for_tool(&subtasks, "subtasks", "subtasks_manage-subtasks");
+        assert_eq!(manage.family.as_deref(), Some("subtasks"));
+
+        let fs = manifest_tool_behavior(&dir("filesystem"));
+        let read = crate::mcp::behavior::for_tool(&fs, "filesystem", "filesystem_read");
+        assert!(read.read_only && read.repeat_guard_enabled());
+        // No descriptor for the write tool: fail closed.
+        assert!(!crate::mcp::behavior::for_tool(&fs, "filesystem", "filesystem_write").read_only);
+    }
+
+    #[test]
     fn test_resolve_env_vars_are_literal() {
         std::env::set_var("TEST_MCP_KEY", "secret-key-123");
         // ${VAR} is NEVER interpolated - it stays as a literal string.
@@ -818,6 +881,7 @@ mod tests {
     #[test]
     fn test_default_config_values() {
         let config = McpServerConfig {
+            tool_behavior: Default::default(),
             name: "test".to_string(),
             transport: McpTransport::Stdio,
             command: Some("echo".to_string()),

@@ -58,5 +58,9 @@
       "depends_on": "summary_provider",
       "description": "Model to use for channel summarization"
     }
+  ],
+  "tools": [
+    { "name": "list_memories", "behavior": { "read_only": true, "repeat_guard": true } },
+    { "name": "review_memories", "behavior": { "read_only": true, "repeat_guard": false } }
   ]
 }

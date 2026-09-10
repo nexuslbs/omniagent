@@ -63,6 +63,15 @@ pub struct PluginManifest {
     /// locally placed executable (see `plugin::binary`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary: Option<PluginBinary>,
+    /// Declared behaviour of the tools this plugin exposes (audit V-2).
+    ///
+    /// Core agent behaviour (exact-repeat read guard, self-restart guard,
+    /// subtask family reminder) is derived from these descriptors instead of
+    /// hardcoded tool-name allowlists, so a tool registered under another id
+    /// keeps its declared protection. Missing entries fail CLOSED (the tool
+    /// is behaviour-neutral) and are reported loudly by the registry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<crate::mcp::behavior::ToolManifestEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

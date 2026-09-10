@@ -17,5 +17,12 @@
       "default": "$env:DATABASE_URL",
       "description": "PostgreSQL connection URL for subtask storage"
     }
+  ],
+  "tools": [
+    { "name": "manage_subtasks", "behavior": { "family": "subtasks" } },
+    { "name": "add_subtask", "behavior": { "family": "subtasks" } },
+    { "name": "update_subtask", "behavior": { "family": "subtasks" } },
+    { "name": "delete_subtask", "behavior": { "family": "subtasks" } },
+    { "name": "list_subtasks", "behavior": { "read_only": true, "repeat_guard": false, "family": "subtasks" } }
   ]
 }

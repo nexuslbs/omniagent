@@ -161,6 +161,15 @@ pub trait McpServerClient: Send + Sync {
         None
     }
 
+    /// Per-tool behaviour declared by the plugin manifest (audit V-2).
+    /// The default is EMPTY: an undeclared tool stays behaviour-neutral
+    /// (fail closed) - core never guesses read-only-ness from a name.
+    fn tool_behaviors(&self) -> &crate::mcp::behavior::ToolBehaviorMap {
+        static EMPTY: once_cell::sync::Lazy<crate::mcp::behavior::ToolBehaviorMap> =
+            once_cell::sync::Lazy::new(crate::mcp::behavior::ToolBehaviorMap::new);
+        &EMPTY
+    }
+
     /// Convert external tools to McpTool instances with a circuit-breaking wrapper.
     async fn to_mcp_tools(&self) -> Vec<McpTool> {
         let tools = match self.initialize().await {
@@ -176,6 +185,9 @@ pub trait McpServerClient: Send + Sync {
         };
 
         let server_name = self.name().to_string();
+        // Descriptors declared by the plugin manifest travel with the server
+        // config; they are matched against the raw tool name from the server.
+        let behaviors = self.tool_behaviors().clone();
         let mut result = Vec::with_capacity(tools.len());
 
         for t in tools {
@@ -199,6 +211,7 @@ pub trait McpServerClient: Send + Sync {
                 input_schema: schema,
                 server_name: Some(server_name.clone()),
                 timeout_secs: self.timeout_secs(),
+                behavior: crate::mcp::behavior::for_tool(&behaviors, &server_name, &prefixed_name),
                 handler: Arc::new(move |args: Value, ctx: crate::mcp::AppContext| {
                     let sn = sn.clone();
                     let tn = tn.clone();
@@ -872,6 +885,10 @@ impl StdioMcpClient {
 
 #[async_trait]
 impl McpServerClient for StdioMcpClient {
+    fn tool_behaviors(&self) -> &crate::mcp::behavior::ToolBehaviorMap {
+        &self.config.tool_behavior
+    }
+
     async fn initialize(&self) -> AppResult<Vec<McpExternalTool>> {
         {
             let tools = self.tools.lock().await;
@@ -1231,6 +1248,10 @@ impl HttpMcpClient {
 
 #[async_trait]
 impl McpServerClient for HttpMcpClient {
+    fn tool_behaviors(&self) -> &crate::mcp::behavior::ToolBehaviorMap {
+        &self.config.tool_behavior
+    }
+
     async fn initialize(&self) -> AppResult<Vec<McpExternalTool>> {
         {
             let tools = self.tools.lock().await;

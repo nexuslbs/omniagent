@@ -188,28 +188,17 @@ pub fn count_tokens(
 /// exact-repeat read guard. State-changing tools (writes, commits, clones)
 /// are excluded; executing one clears the guard map (reads after a mutation
 /// are always fresh).
-pub fn is_guarded_read_only(tool: &str) -> bool {
-    matches!(
-        tool,
-        "filesystem_read"
-            | "filesystem_info"
-            | "filesystem_list"
-            | "filesystem_search"
-            | "search_messages"
-            | "search_wiki"
-            | "note_read"
-            | "notes_note-read"
-            | "memory_list-memories"
-            | "skills_list-skills"
-            | "skills_view-skill"
-            | "search_database"
-            | "search_channel-prompts"
-            | "search_thread-messages"
-    ) || (tool.starts_with("git_")
-        && !matches!(
-            tool,
-            "git_commit-and-push" | "git_clone-repo" | "git_create-github-repo"
-        ))
+///
+/// audit V-2: the set is built from the tools' own DESCRIPTORS (declared in
+/// the plugin manifests and exposed by the registry), never from a hardcoded
+/// tool-name allowlist - a read-only tool registered under another id, or a
+/// new read-only plugin, is guarded without touching core. An undeclared tool
+/// is NOT read-only (fail closed) and the registry warns loudly about it.
+pub fn is_guarded_read_only(
+    guarded_read_tools: &std::collections::HashSet<String>,
+    tool: &str,
+) -> bool {
+    guarded_read_tools.contains(tool)
 }
 
 /// WS-4b: FNV-1a hash of a tool call's raw argument JSON - stable within the
