@@ -190,6 +190,10 @@ pub struct PluginDetail {
     /// Populated from the tool registry at API response time.
     #[serde(default)]
     pub tool_names: Vec<String>,
+    /// Declared prebuilt binary artifact (manifest `binary`): declared/installed
+    /// state, expected checksum, path and size. `None` when the plugin declares none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<crate::plugin::binary::PluginBinaryStatus>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1032,6 +1036,7 @@ fn build_plugin_detail(
         status_message: String::new(),
         language,
         tool_names: vec![],
+        binary: crate::plugin::binary::status_for(manifest, plugin_dir),
     }
 }
 
@@ -1363,6 +1368,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
                     default_base_url: None,
                     api_mode: None,
                     api_modes: None,
+                    binary: None,
                 };
                 let source = if is_remote { "remote" } else { "bundled" };
                 let mut detail = build_plugin_detail(
@@ -1476,6 +1482,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
                 default_base_url: ov.default_base_url.clone(),
                 api_mode: ov.api_mode.clone(),
                 api_modes: None,
+                binary: None,
             };
             let mut detail = build_plugin_detail(
                 &manifest,
@@ -1567,6 +1574,7 @@ fn build_remote_only_detail(
         default_base_url: None,
         api_mode: None,
         api_modes: None,
+        binary: None,
     };
     PluginDetail {
         id: 0,
@@ -1590,6 +1598,7 @@ fn build_remote_only_detail(
         status_message: String::new(),
         language: "unknown".to_string(),
         tool_names: Vec::new(),
+        binary: None,
     }
 }
 
@@ -1805,6 +1814,7 @@ fn build_not_found_from_yaml(
                 default_base_url: None,
                 api_mode: None,
                 api_modes: None,
+                binary: None,
             };
             let source = if is_remote { "remote" } else { "bundled" };
             let mut detail = build_plugin_detail(
@@ -2456,6 +2466,7 @@ providers:
             default_base_url: None,
             api_mode: None,
             api_modes: None,
+            binary: None,
         }
     }
 

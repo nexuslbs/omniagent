@@ -8,6 +8,7 @@
 //! Plugin state (enabled/disabled + config) is managed via YAML files
 //! in the `plugins_yaml` module.
 
+pub mod binary;
 pub mod installer;
 
 use crate::err_msg;
@@ -54,6 +55,14 @@ pub struct PluginManifest {
     /// Example: `{"anthropic_messages": ["minimax-*", "claude-*-thinking"]}`
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_modes: Option<std::collections::HashMap<String, Vec<String>>>,
+
+    /// Optional prebuilt binary artifact published at a remote location.
+    ///
+    /// When present, the plugin INSTALL action downloads the artifact instead of
+    /// building source code, and `entrypoint.command` starts the server from the
+    /// locally placed executable (see `plugin::binary`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<PluginBinary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -73,6 +82,64 @@ pub struct PluginEntrypoint {
     pub transport: String, // "stdio" or "http"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>, // for HTTP transport
+}
+
+/// A prebuilt binary artifact for a plugin, declared in `plugin.json`.
+///
+/// The artifact lives at a remote location (HTTPS) and is downloaded by the
+/// plugin INSTALL action; `install-git` stays clone-only.
+///
+/// Example:
+/// ```json
+/// "binary": {
+///   "url": "https://github.com/acme/tool/releases/download/v{version}/tool_{version}_{os}_{goarch}.tar.gz",
+///   "version": "1.4.0",
+///   "file": "tool",
+///   "checksums": { "linux-x86_64": "sha256:abc..." },
+///   "auth": "$secret:TOOL_DOWNLOAD_TOKEN"
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PluginBinary {
+    /// Remote artifact URL, optionally templated with `{version}`, `{os}`,
+    /// `{arch}` and `{goarch}`. Used when no `assets` entry matches the platform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Explicit per-platform URLs, keyed by `<os>-<arch>` (e.g. `linux-x86_64`).
+    /// Takes precedence over `url` for the running platform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assets: Option<HashMap<String, String>>,
+    /// Pinned artifact version, substituted for `{version}` in `url`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Expected SHA-256 of the artifact (bare hex or `sha256:<hex>`); applies to
+    /// every platform. `checksums` overrides it per platform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checksum: Option<String>,
+    /// Per-platform expected SHA-256, keyed by `<os>-<arch>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checksums: Option<HashMap<String, String>>,
+    /// Name of the installed executable inside the plugin directory. Defaults to
+    /// `member`/the plugin name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// Name of the executable inside an archive artifact. Defaults to `file`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member: Option<String>,
+    /// Archive format: `raw`, `tar.gz` or `zip`. Inferred from the URL suffix
+    /// when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// Credential reference for authenticated artifacts: `$secret:NAME` or a
+    /// bare secret name. Never a literal secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
+    /// HTTP header used for `auth` (default `Authorization`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_header: Option<String>,
+    /// Scheme prefix for the `auth` header value (default `Bearer `).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_scheme: Option<String>,
 }
 
 /// Capabilities a platform plugin can advertise

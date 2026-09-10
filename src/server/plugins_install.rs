@@ -52,6 +52,43 @@ pub(crate) async fn install_plugin_handler(
     let category_source = category_to_source(&category);
     let yaml_source = category_to_source(&yaml_category);
 
+    // 1b. Remote plugin not cloned yet (e.g. a binary plugin whose artifact is
+    //     declared in the repo's plugin.json): clone it now, with the exact
+    //     clone-only semantics of the install-git endpoint. This keeps the
+    //     INSTALL action self-sufficient for remote binary plugins.
+    if category_source == "remote" {
+        ensure_remote_clone(data_dir, &yaml_type, &name, &plugin_dir).await;
+    }
+
+    // 1c. Binary plugin: the manifest declares a prebuilt artifact at a remote
+    //     location, so download it instead of building source (R1-R3).
+    let manifest_path = std::path::Path::new(&plugin_dir).join("plugin.json");
+    if manifest_path.exists() {
+        match plugin::load_manifest(&manifest_path.to_string_lossy()) {
+            Ok(manifest) => {
+                if manifest.binary.is_some() {
+                    return install_binary_plugin(
+                        &state,
+                        &manifest,
+                        &plugin_dir,
+                        &name,
+                        &yaml_type,
+                        yaml_source,
+                        data_dir,
+                    )
+                    .await
+                    .into_response();
+                }
+            }
+            Err(e) => tracing::warn!(
+                "Install: could not read manifest of '{}' ({}): {:?} - falling back to build path",
+                name,
+                manifest_path.display(),
+                e
+            ),
+        }
+    }
+
     // 2. Compile FIRST: synchronous, no background spawn
     info!(
         "Install: compiling plugin '{}' from {} (source: {})",
@@ -984,4 +1021,180 @@ async fn run_capture(
         ));
     }
     Ok((stdout, stderr))
+}
+
+// ---------------------------------------------------------------------------
+// Remote-binary plugin support (prebuilt artifact declared in plugin.json)
+// ---------------------------------------------------------------------------
+
+/// Clone a remote plugin repository when it is not present locally yet.
+///
+/// `install-git` remains clone-only and is the normal path; this helper only
+/// makes the INSTALL action self-sufficient for a remote plugin that the
+/// dashboard has not downloaded yet (it then finds `plugin.json` on disk and
+/// can act on its `binary` declaration).
+async fn ensure_remote_clone(
+    data_dir: &str,
+    yaml_type: &plugins_yaml::PluginYamlType,
+    name: &str,
+    plugin_dir: &str,
+) {
+    if std::path::Path::new(plugin_dir)
+        .join("plugin.json")
+        .exists()
+    {
+        return;
+    }
+    let remote = match plugins_yaml::get_remote_plugin(data_dir, yaml_type, name) {
+        Some(r) => r,
+        None => return,
+    };
+    let target_root = format!("{}/plugins/{}/.remote", data_dir, yaml_type.type_dir_name());
+    info!(
+        "Install: remote plugin '{}' is not cloned yet - cloning {} (clone-only)",
+        name, remote.url
+    );
+    match plugin::installer::install_from_git(
+        &remote.url,
+        name,
+        remote.git_ref.as_deref(),
+        data_dir,
+        &target_root,
+        remote.path.as_deref(),
+    ) {
+        Ok(_) => info!("Install: clone of '{}' completed", name),
+        Err(e) => tracing::warn!(
+            "Install: clone of '{}' failed (continuing with what is on disk): {:?}",
+            name,
+            e
+        ),
+    }
+}
+
+/// Install the plugin's declared prebuilt binary artifact (plugin.json `binary`).
+///
+/// Downloads the artifact for the running platform, verifies the declared
+/// checksum, places it (executable, atomically) in the plugin directory, then
+/// registers and hot-reloads the plugin so its MCP server starts from the new
+/// binary. Every failure names the failing step and the underlying cause.
+async fn install_binary_plugin(
+    state: &Arc<AppState>,
+    manifest: &plugin::PluginManifest,
+    plugin_dir: &str,
+    name: &str,
+    yaml_type: &plugins_yaml::PluginYamlType,
+    yaml_source: &str,
+    data_dir: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(bin) = manifest.binary.as_ref() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "success": false,
+                "step": "binary",
+                "error": format!("Install: plugin '{}' has no `binary` declaration", name),
+            })),
+        );
+    };
+
+    // Credential for private artifacts: resolved from the secrets store, never a
+    // literal secret in the manifest. Accepts `$secret:NAME` or a bare secret name.
+    let auth_token = match bin.auth.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => {
+            let reference = if raw.starts_with("$secret:") {
+                raw.to_string()
+            } else {
+                format!("$secret:{}", raw)
+            };
+            let token = plugins_yaml::resolve_config_ref_value(&reference, &state.pool).await;
+            let token = token.trim().to_string();
+            if token.is_empty() || token == reference {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "step": "auth",
+                        "error": format!(
+                            "Install: the binary artifact of '{}' references secret '{}' which could not be resolved from the secrets store",
+                            name, raw
+                        ),
+                    })),
+                );
+            }
+            Some(token)
+        }
+        None => None,
+    };
+
+    info!(
+        "Install: plugin '{}' declares a prebuilt binary artifact - downloading (no build step)",
+        name
+    );
+    let installed = match plugin::binary::install_binary(plugin_dir, name, bin, auth_token).await {
+        Ok(installed) => installed,
+        Err(e) => {
+            let msg = format!(
+                "Install: binary artifact download/install failed for '{}': {}",
+                name, e
+            );
+            tracing::error!("{}", msg);
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "success": false,
+                    "step": "binary",
+                    "error": msg,
+                })),
+            );
+        }
+    };
+    info!(
+        "Install: installed binary '{}' for '{}' at {} ({} bytes)",
+        installed.file, name, installed.path, installed.size
+    );
+
+    // Register in YAML (preserving existing user config) and hot-reload so the
+    // MCP server starts from the installed binary.
+    let existing_config = plugins_yaml::existing_config_or_default(data_dir, yaml_type, name);
+    if let Err(e) = plugins_yaml::set_entry_with_source(
+        data_dir,
+        yaml_type,
+        name,
+        true,
+        yaml_source,
+        existing_config,
+    ) {
+        let msg = format!("Install: YAML registration failed for '{}': {}", name, e);
+        tracing::error!("{}", msg);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "success": false,
+                "step": "register",
+                "error": msg,
+            })),
+        );
+    }
+    if *yaml_type == plugins_yaml::PluginYamlType::Tool {
+        reload_tool_plugin(state, name).await;
+    }
+
+    let binary_json = serde_json::to_value(&installed).unwrap_or_default();
+    match plugins_yaml::get_plugin(data_dir, name, yaml_type) {
+        Ok(Some(detail)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "success": true,
+                "data": detail,
+                "binary": binary_json,
+            })),
+        ),
+        _ => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "success": true,
+                "binary": binary_json,
+            })),
+        ),
+    }
 }

@@ -300,8 +300,9 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
     let has_cargo_toml = path.join("Cargo.toml").exists();
     let has_plugin_json = path.join("plugin.json").exists();
 
-    // Skip utility libs (no manifest files at all)
-    if !(config_file.exists() || has_cargo_toml && has_plugin_json) {
+    // Skip utility libs (no manifest files at all). A plugin.json alone is
+    // enough: it may declare an entrypoint/binary (prebuilt artifact).
+    if !(config_file.exists() || has_plugin_json) {
         return None;
     }
 
@@ -379,6 +380,101 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
 
         servers.push(srv);
         return Some(servers);
+    }
+
+    // Binary/script plugin: plugin.json declares an `entrypoint` (and possibly a
+    // downloadable `binary` artifact), with no Cargo.toml and no mcp-config.json.
+    // Synthesize the MCP server from the manifest so the plugin is startable, and
+    // report clearly when the declared binary has not been installed yet.
+    if !config_file.exists() && !has_cargo_toml && has_plugin_json {
+        let manifest_path = path.join("plugin.json");
+        let manifest = match crate::plugin::load_manifest(&manifest_path.to_string_lossy()) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(
+                    "MCP plugin '{}': cannot read {}: {:?}",
+                    dir_name,
+                    manifest_path.display(),
+                    e
+                );
+                return None;
+            }
+        };
+
+        if manifest.entrypoint.is_none() {
+            if manifest.binary.is_some() {
+                tracing::warn!(
+                    "MCP plugin '{}': declares a `binary` artifact but no `entrypoint` -                      add an entrypoint with the command that starts its MCP server",
+                    dir_name
+                );
+            }
+            return None;
+        }
+
+        let ep = manifest
+            .entrypoint
+            .as_ref()
+            .expect("entrypoint checked above");
+        let plugin_dir_str = path.to_string_lossy().to_string();
+        let (command, url) = if ep.transport == "http" {
+            (None, ep.url.clone())
+        } else {
+            (
+                Some(resolve_entrypoint_command(
+                    ep,
+                    path,
+                    manifest.binary.as_ref(),
+                )),
+                None,
+            )
+        };
+
+        let mut srv = McpServerConfig {
+            name: dir_name.clone(),
+            transport: if ep.transport == "http" {
+                McpTransport::Http
+            } else {
+                McpTransport::Stdio
+            },
+            command,
+            args: ep.args.clone(),
+            url,
+            env: HashMap::new(),
+            current_dir: Some(plugin_dir_str.clone()),
+            timeout_secs: None,
+            max_retries: default_max_retries(),
+            allowed_tools: default_allowed_tools(),
+            pool_size: default_pool_size(),
+        };
+        if let Some(yaml_config) = crate::plugins_yaml::load_plugin_yaml_config(
+            &dir_name,
+            data_dir,
+            &crate::plugins_yaml::PluginYamlType::Tool,
+        ) {
+            if let Some(obj) = yaml_config.as_object() {
+                for (key, val) in obj {
+                    let raw = match val {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Number(n) => n.to_string(),
+                        serde_json::Value::Bool(b) => b.to_string(),
+                        _ => String::new(),
+                    };
+                    if !raw.is_empty() {
+                        let resolved = crate::plugins_yaml::resolve_config_value(&raw);
+                        if !resolved.is_empty() {
+                            srv.env.insert(key.clone(), resolved);
+                        }
+                    }
+                }
+            }
+        }
+        apply_config_schema_defaults(&mut srv.env, &plugin_dir_str);
+        tracing::debug!(
+            "Binary/script plugin '{}': synthesized MCP server (command: {:?})",
+            dir_name,
+            srv.command
+        );
+        return Some(vec![srv]);
     }
 
     // Has mcp-config.json - parse it, or return None if no config file
@@ -649,6 +745,50 @@ fn apply_config_schema_defaults(env: &mut HashMap<String, String>, plugin_dir: &
 /// `plugins_yaml::resolve_config_value`).
 pub fn resolve_env_vars(value: &str) -> String {
     value.to_string()
+}
+
+
+/// Resolve the executable for a manifest-declared plugin entrypoint.
+///
+/// Paths are resolved inside the plugin directory first (that is where the
+/// plugin INSTALL action places a downloaded binary artifact), then as a bare
+/// command (PATH lookup). A declared binary that is missing produces a clear,
+/// actionable log instead of a silent no-tools plugin.
+fn resolve_entrypoint_command(
+    entrypoint: &crate::plugin::PluginEntrypoint,
+    plugin_dir: &std::path::Path,
+    binary: Option<&crate::plugin::PluginBinary>,
+) -> String {
+    let declared_file = binary
+        .and_then(|b| b.file.clone().or_else(|| b.member.clone()))
+        .unwrap_or_default();
+    let cmd = entrypoint.command.trim();
+
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if !cmd.is_empty() && (!cmd.contains('/') || cmd.starts_with("./")) {
+        candidates.push(plugin_dir.join(cmd.trim_start_matches("./")));
+    }
+    if !declared_file.is_empty() {
+        candidates.push(plugin_dir.join(&declared_file));
+    }
+    if let Some(found) = candidates.iter().find(|c| c.is_file()) {
+        return found.to_string_lossy().to_string();
+    }
+
+    if !declared_file.is_empty() {
+        let expected = plugin_dir.join(&declared_file);
+        tracing::warn!(
+            "MCP plugin '{}': binary not installed at {} - run install from the dashboard to download it",
+            plugin_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("?"),
+            expected.display()
+        );
+        return expected.to_string_lossy().to_string();
+    }
+
+    cmd.to_string()
 }
 
 #[cfg(test)]
