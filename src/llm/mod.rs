@@ -2442,3 +2442,138 @@ mod usage_parse_tests {
     }
 }
 
+#[cfg(test)]
+mod request_shaping_wire_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    const ANTHROPIC_BODY: &str = r#"{"id":"msg_1","type":"message","role":"assistant","model":"shape-model","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}"#;
+
+    /// Minimal HTTP server: records the FIRST request head and answers with a
+    /// valid Anthropic Messages payload. Returns (base_url, captured head).
+    fn spawn_capture_server() -> (String, Arc<Mutex<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let captured = Arc::new(Mutex::new(String::new()));
+        let cap = Arc::clone(&captured);
+        std::thread::spawn(move || {
+            for _ in 0..4 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let mut head: Vec<u8> = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    match stream.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            head.extend_from_slice(&buf[..n]);
+                            if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let text = String::from_utf8_lossy(&head).to_string();
+                let mut guard = cap.lock().expect("lock");
+                if guard.is_empty() {
+                    *guard = text;
+                }
+                drop(guard);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    ANTHROPIC_BODY.len(),
+                    ANTHROPIC_BODY
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://{}", addr), captured)
+    }
+
+    fn declared(name: &str, auth_style: Option<&str>) -> ProviderMetadata {
+        ProviderMetadata {
+            name: name.to_string(),
+            default_base_url: String::new(),
+            api_mode: "anthropic_messages".to_string(),
+            api_modes: HashMap::new(),
+            default_model: "shape-model".to_string(),
+            supports_reasoning: false,
+            auth_style: auth_style.map(|s| s.to_string()),
+            api_key_header_name: None,
+            api_version_header: None,
+            thinking_param: None,
+        }
+    }
+
+    async fn captured_request_head(provider: &str, auth_style: Option<&str>) -> String {
+        let (base, captured) = spawn_capture_server();
+        PROVIDER_METADATA
+            .write()
+            .insert(provider.to_string(), declared(provider, auth_style));
+        let config = LLMConfig {
+            provider: ProviderId::new(provider),
+            api_mode: ApiMode::AnthropicMessages,
+            api_key: "shape-key".to_string(),
+            base_url: base,
+            model: "shape-model".to_string(),
+            max_tokens: 16,
+            temperature: 0.0,
+            supports_reasoning: false,
+            extra_headers: vec![],
+        };
+        let client = LLMClient::new(config);
+        let request = CompletionRequest {
+            messages: vec![ChatMessage::user("hi")],
+            max_tokens: Some(16),
+            temperature: 0.0,
+            stream: false,
+            tools: None,
+        };
+        let _ = client.completion(request).await;
+        PROVIDER_METADATA.write().remove(provider);
+        let head = captured.lock().expect("lock").clone();
+        head.to_ascii_lowercase()
+    }
+
+    #[tokio::test]
+    async fn api_key_header_style_is_used_for_any_provider_name() {
+        let head = captured_request_head("anthropic-proxy", Some("api_key_header")).await;
+        assert!(head.contains("x-api-key: shape-key"), "wire head: {head}");
+        assert!(
+            head.contains("anthropic-version: 2023-06-01"),
+            "wire head: {head}"
+        );
+        assert!(
+            !head.contains("authorization:"),
+            "must not send Bearer: {head}"
+        );
+        assert!(
+            head.contains("post /messages"),
+            "anthropic endpoint expected: {head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bearer_style_wins_even_for_the_anthropic_provider_name() {
+        let head = captured_request_head("anthropic", Some("bearer")).await;
+        assert!(
+            head.contains("authorization: bearer shape-key"),
+            "wire head: {head}"
+        );
+        assert!(
+            !head.contains("x-api-key:"),
+            "must not send x-api-key: {head}"
+        );
+        assert!(
+            !head.contains("anthropic-version:"),
+            "must not send version header: {head}"
+        );
+    }
+}
