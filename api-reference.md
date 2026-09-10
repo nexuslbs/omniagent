@@ -211,3 +211,62 @@ grep -rn '\.route(' src/server/ | sed "s/.*\.route(//; s/,.*//" | sort -u
 Repo: https://github.com/nexuslbs/omniagent (not shipped in the image -
 `git clone https://github.com/nexuslbs/omniagent /opt/workspace/omniagent-src`
 to read the source).
+
+## Internal latency budget (server-side < 500 ms)
+
+Every route in this reference must serve within **500 ms of internal
+server-side handling time**: DB query + business logic + serialization inside
+the omniagent process. Client connection and internet latency are out of
+scope; the budget is measured network-free. Two rules follow from it:
+
+1. **Independent work runs concurrently.** Sequential `await` of independent
+   queries/HTTP calls/file reads inside one handler is a bug: use
+   `tokio::join!` / `tokio::try_join!` so the handler pays `max`, not `sum`.
+   The same rule applies in the dashboard: a page that needs several
+   independent endpoints must issue them in a single concurrent fan-out
+   (`allSettledOrNull` in `src/lib/parallel.ts`), not one after another.
+2. **List queries must not scale with the table.** The `LIMIT n` page is
+   materialized first (CTE, ordered by the primary key) and any per-row
+   decoration (last message, per-thread counts, reverse lookups) is applied
+   with `LEFT JOIN LATERAL` to that page only, backed by an index; the row
+   count for pagination runs concurrently with the page query.
+
+Only genuinely dependent calls stay sequential (`B` needs `A`'s result).
+
+### Measuring it
+
+Every response carries the `x-response-time-ms` header: the time spent inside
+the omniagent process (network-free), which is the number the budget applies
+to. Requests over 500 ms additionally emit a `slow request` warning log.
+
+### Latency inventory
+
+Measured in the omnidev stack against a production-like volume (3.2k threads /
+234k messages / 553 MB), server-side ms from `x-response-time-ms`, p50/p95/max
+over repeated calls. All 29 audited endpoints are inside the budget:
+
+| endpoint | p50 | p95 | max |
+|---|---|---|---|
+| /memory/stats | 78 | 102 | 102 |
+| /messages/filters | 54 | 58 | 58 |
+| /messages/events?limit=50&offset=0 | 34 | 36 | 36 |
+| /messages/events?limit=50&offset=500 | 33 | 35 | 35 |
+| /overview | 3 | 26 | 26 |
+| /plugins | 14 | 17 | 17 |
+| /threads?limit=50&offset=50 | 2 | 12 | 12 |
+| /overview/dashboard | 10 | 11 | 11 |
+| /threads?limit=50&offset=500 | 2 | 10 | 10 |
+| /threads?limit=50&offset=1500 | 2 | 7 | 7 |
+| /threads?limit=50&offset=0 | 2 | 6 | 6 |
+| /settings | 6 | 6 | 6 |
+| /kanban/tasks | 1 | 3 | 3 |
+| /channels | 2 | 3 | 3 |
+| /threads/filters | 2 | 2 | 2 |
+| /channels/all | 2 | 2 | 2 |
+| /platforms | 2 | 2 | 2 |
+| /hooks | 0 | 1 | 1 |
+| /secrets | 0 | 1 | 1 |
+| /health, /kanban/history, /kanban/tags, /boards, /workflows, /profiles, /actions, /schedule, /prompt/default, /mcp/tools | 0 | 0 | 0 |
+
+The dashboard calls these as `/api/<path>`; the path without the `/api`
+prefix is the internal route listed here.
