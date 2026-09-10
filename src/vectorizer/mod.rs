@@ -25,30 +25,50 @@ use crate::error::{AppResult, ErrorContext};
 // ---------------------------------------------------------------------------
 
 /// External embedding API protocol.
-/// Identifies the API format to use. Known protocols (openai, gemini, cohere, jina)
-/// have specific request/response handling. Unknown protocols default to
-/// OpenAI-compatible format.
+/// Identifies the API format to use. The supported protocols have explicit
+/// request/response handling; any other value is a hard error, never a silent
+/// OpenAI-compatible fallback.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EmbeddingProtocol(pub String);
 
-impl FromStr for EmbeddingProtocol {
-    type Err = std::convert::Infallible;
+/// Comma-separated list of the supported protocols, used in error messages.
+pub const SUPPORTED_PROTOCOLS: &str = "openai, gemini, cohere, jina";
 
+impl FromStr for EmbeddingProtocol {
+    type Err = String;
+
+    /// Parse a protocol name (case-insensitive). Unknown values are rejected so
+    /// that a typo cannot silently select the OpenAI-compatible client.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self(s.to_lowercase()))
+        let normalized = s.trim().to_lowercase();
+        if EmbeddingProtocol::SUPPORTED.contains(&normalized.as_str()) {
+            Ok(Self(normalized))
+        } else {
+            Err(format!(
+                "unknown embedding protocol '{}': supported protocols are {}",
+                s, SUPPORTED_PROTOCOLS
+            ))
+        }
     }
 }
 
+/// Request parts for a single embedding call: (url, headers, body_json).
+pub type EmbeddingRequestParts = (String, Vec<(String, String)>, serde_json::Value);
+
 impl EmbeddingProtocol {
+    /// Protocols that have explicit request/response handling. Anything else is
+    /// rejected; there is no implicit OpenAI-compatible fallback.
+    pub const SUPPORTED: &'static [&'static str] = &["openai", "gemini", "cohere", "jina"];
+
     /// Build the HTTP request components for a single text embedding.
-    /// Returns (url, headers, body_json).
+    /// Returns (url, headers, body_json) or an error for an unsupported protocol.
     pub fn build_request(
         &self,
         text: &str,
         api_url: &str,
         api_key: &Option<String>,
         model: &str,
-    ) -> (String, Vec<(String, String)>, serde_json::Value) {
+    ) -> AppResult<EmbeddingRequestParts> {
         match self.0.as_str() {
             "gemini" => {
                 let url = format!("{}:embedContent", api_url.trim_end_matches('/'));
@@ -62,7 +82,7 @@ impl EmbeddingProtocol {
                         "parts": [{"text": text}]
                     }
                 });
-                (url, headers, body)
+                Ok((url, headers, body))
             }
             "cohere" => {
                 let url = format!("{}/embed", api_url.trim_end_matches('/'));
@@ -75,7 +95,7 @@ impl EmbeddingProtocol {
                     "model": model,
                     "input_type": "search_document",
                 });
-                (url, headers, body)
+                Ok((url, headers, body))
             }
             "jina" => {
                 let url = format!("{}/embeddings", api_url.trim_end_matches('/'));
@@ -87,10 +107,10 @@ impl EmbeddingProtocol {
                     "input": [text],
                     "model": model,
                 });
-                (url, headers, body)
+                Ok((url, headers, body))
             }
-            // Default (openai and unknown): OpenAI-compatible /embeddings endpoint
-            _ => {
+            // "openai": OpenAI-compatible /embeddings endpoint
+            "openai" => {
                 let url = format!("{}/embeddings", api_url.trim_end_matches('/'));
                 let mut headers = Vec::new();
                 if let Some(key) = api_key {
@@ -100,8 +120,15 @@ impl EmbeddingProtocol {
                     "input": text,
                     "model": model,
                 });
-                (url, headers, body)
+                Ok((url, headers, body))
             }
+            // Hard error: an unrecognised protocol must never silently fall back
+            // to the OpenAI-compatible client.
+            other => Err(err_str!(
+                "unknown embedding protocol '{}': supported protocols are {}",
+                other,
+                SUPPORTED_PROTOCOLS
+            )),
         }
     }
 
@@ -139,8 +166,8 @@ impl EmbeddingProtocol {
                     })
                     .collect()
             }
-            // Default (openai, jina, and unknown): OpenAI-compatible data[0].embedding
-            _ => {
+            // OpenAI-compatible response format (openai, jina)
+            "openai" | "jina" => {
                 let embedding = response
                     .get("data")
                     .and_then(|d| d.as_array())
@@ -157,8 +184,32 @@ impl EmbeddingProtocol {
                     })
                     .collect()
             }
+            other => Err(err_str!(
+                "unknown embedding protocol '{}': supported protocols are {}",
+                other,
+                SUPPORTED_PROTOCOLS
+            )),
         }
     }
+}
+
+/// Validate a configured embedding protocol for a vectorization target
+/// ("messages" or "wiki").
+///
+/// There is no hidden OpenAI-compatible default: an empty value means "not
+/// configured" and is an error (the worker is disabled with this message), and
+/// an unrecognised value is an error as well, so a typo such as
+/// `openai_compat` can never silently select the OpenAI-compatible client.
+pub(crate) fn resolve_protocol(target: &str, protocol: &str) -> AppResult<EmbeddingProtocol> {
+    if protocol.trim().is_empty() {
+        return Err(err_str!(
+            "{}: method=api but {}_vectorization_protocol is not set; vectorization disabled",
+            target,
+            target
+        ));
+    }
+    EmbeddingProtocol::from_str(protocol)
+        .map_err(|e| err_str!("{}: {}; vectorization disabled", target, e))
 }
 
 // ---------------------------------------------------------------------------
@@ -242,8 +293,16 @@ impl ApiVectorizer {
 impl Vectorizer for ApiVectorizer {
     async fn generate_embedding(&self, text: &str) -> Vec<f32> {
         let (url, headers, body) =
-            self.protocol
-                .build_request(text, &self.api_url, &self.api_key, &self.model);
+            match self
+                .protocol
+                .build_request(text, &self.api_url, &self.api_key, &self.model)
+            {
+                Ok(parts) => parts,
+                Err(e) => {
+                    tracing::error!("ApiVectorizer: {:?}", e);
+                    return vec![0.0f32; 1536];
+                }
+            };
 
         let mut req = self.client.post(&url);
         for (key, value) in &headers {
@@ -309,7 +368,9 @@ impl Default for VectorizerConfig {
         Self {
             method: "local".to_string(),
             api_url: None,
-            protocol: "openai".to_string(),
+            // No hidden default: an empty protocol means "not configured" and
+            // disables the external API vectorizer with a loud error.
+            protocol: String::new(),
             api_key: None,
             api_model: None,
             batch_size: 50,
@@ -679,12 +740,15 @@ pub async fn spawn_vectorizers(
         method: &str,
         target: &str,
         config: MakeVectorizerConfig<'_>,
-    ) -> Box<dyn Vectorizer> {
+    ) -> AppResult<Box<dyn Vectorizer>> {
         match method {
             "api" => {
                 if let Some(ref url) = config.api_url {
-                    let proto = EmbeddingProtocol::from_str(config.protocol)
-                        .expect("EmbeddingProtocol::from_str is infallible");
+                    // No hidden default and no fallback: the protocol must be
+                    // configured explicitly and must name a supported protocol.
+                    // Anything else disables this worker with a loud error
+                    // instead of silently calling the OpenAI-compatible client.
+                    let proto = resolve_protocol(target, config.protocol)?;
 
                     let model = config
                         .api_model
@@ -697,23 +761,23 @@ pub async fn spawn_vectorizers(
                         proto,
                         model
                     );
-                    Box::new(ApiVectorizer::new(
+                    Ok(Box::new(ApiVectorizer::new(
                         proto,
                         url.clone(),
                         config.api_key.clone(),
                         model,
-                    ))
+                    )))
                 } else {
                     tracing::warn!(
                         "{}: method=api but no api_url set; falling back to local",
                         target
                     );
-                    Box::new(HashVectorizer)
+                    Ok(Box::new(HashVectorizer))
                 }
             }
             _ => {
                 tracing::info!("{}: Using HashVectorizer (local feature hashing)", target);
-                Box::new(HashVectorizer)
+                Ok(Box::new(HashVectorizer))
             }
         }
     }
@@ -767,24 +831,25 @@ pub async fn spawn_vectorizers(
             poll_interval_secs: messages_interval,
             ..Default::default()
         };
-        let vec = MessageVectorizer::new(
-            pool_clone,
-            make_vectorizer(
-                &messages_config.method,
-                "messages",
-                MakeVectorizerConfig {
-                    api_url: &messages_config.api_url,
-                    protocol: &messages_config.protocol,
-                    api_key: &messages_config.api_key,
-                    api_model: &messages_config.api_model,
-                },
-            ),
-            messages_config,
-        );
-        tokio::spawn(async move {
-            tracing::info!("MessageVectorizer worker started");
-            vec.run().await;
-        });
+        match make_vectorizer(
+            &messages_config.method,
+            "messages",
+            MakeVectorizerConfig {
+                api_url: &messages_config.api_url,
+                protocol: &messages_config.protocol,
+                api_key: &messages_config.api_key,
+                api_model: &messages_config.api_model,
+            },
+        ) {
+            Ok(vectorizer) => {
+                let vec = MessageVectorizer::new(pool_clone, vectorizer, messages_config);
+                tokio::spawn(async move {
+                    tracing::info!("MessageVectorizer worker started");
+                    vec.run().await;
+                });
+            }
+            Err(e) => tracing::error!("Message vectorization disabled: {:?}", e),
+        }
     } else {
         tracing::info!("Message vectorization disabled");
     }
@@ -800,30 +865,36 @@ pub async fn spawn_vectorizers(
             poll_interval_secs: wiki_interval,
             ..Default::default()
         };
-        let wiki_vec = WikiVectorizer::new(
-            format!(
-                "{}/profiles/{}/wiki",
-                data_dir,
-                crate::profile::default_profile_name()
-            ),
-            qdrant_url.clone(),
-            make_vectorizer(
-                &wiki_config.method,
-                "wiki",
-                MakeVectorizerConfig {
-                    api_url: &wiki_config.api_url,
-                    protocol: &wiki_config.protocol,
-                    api_key: &wiki_config.api_key,
-                    api_model: &wiki_config.api_model,
-                },
-            ),
-            wiki_config,
+        let wiki_dir = format!(
+            "{}/profiles/{}/wiki",
             data_dir,
+            crate::profile::default_profile_name()
         );
-        tokio::spawn(async move {
-            tracing::info!("WikiVectorizer worker started");
-            wiki_vec.run().await;
-        });
+        match make_vectorizer(
+            &wiki_config.method,
+            "wiki",
+            MakeVectorizerConfig {
+                api_url: &wiki_config.api_url,
+                protocol: &wiki_config.protocol,
+                api_key: &wiki_config.api_key,
+                api_model: &wiki_config.api_model,
+            },
+        ) {
+            Ok(vectorizer) => {
+                let wiki_vec = WikiVectorizer::new(
+                    wiki_dir,
+                    qdrant_url.clone(),
+                    vectorizer,
+                    wiki_config,
+                    data_dir,
+                );
+                tokio::spawn(async move {
+                    tracing::info!("WikiVectorizer worker started");
+                    wiki_vec.run().await;
+                });
+            }
+            Err(e) => tracing::error!("Wiki vectorization disabled: {:?}", e),
+        }
     } else {
         tracing::info!("Wiki vectorization disabled");
     }
@@ -936,12 +1007,14 @@ mod tests {
     #[test]
     fn test_embedding_protocol_openai_build_request() {
         let protocol = EmbeddingProtocol("openai".to_string());
-        let (url, headers, body) = protocol.build_request(
-            "test text",
-            "https://api.openai.com/v1",
-            &None,
-            "text-embedding-ada-002",
-        );
+        let (url, headers, body) = protocol
+            .build_request(
+                "test text",
+                "https://api.openai.com/v1",
+                &None,
+                "text-embedding-ada-002",
+            )
+            .unwrap();
         assert_eq!(url, "https://api.openai.com/v1/embeddings");
         assert!(headers.is_empty());
         assert_eq!(body["input"], "test text");
@@ -951,12 +1024,14 @@ mod tests {
     #[test]
     fn test_embedding_protocol_openai_with_api_key() {
         let protocol = EmbeddingProtocol("openai".to_string());
-        let (_, headers, _) = protocol.build_request(
-            "test",
-            "https://api.openai.com/v1",
-            &Some("sk-test".to_string()),
-            "ada",
-        );
+        let (_, headers, _) = protocol
+            .build_request(
+                "test",
+                "https://api.openai.com/v1",
+                &Some("sk-test".to_string()),
+                "ada",
+            )
+            .unwrap();
         assert_eq!(headers.len(), 1);
         assert_eq!(headers[0].0, "Authorization");
         assert_eq!(headers[0].1, "Bearer sk-test");
@@ -965,12 +1040,14 @@ mod tests {
     #[test]
     fn test_embedding_protocol_gemini_build_request() {
         let protocol = EmbeddingProtocol("gemini".to_string());
-        let (url, headers, body) = protocol.build_request(
-            "test text",
-            "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004",
-            &Some("test-key".to_string()),
-            "models/text-embedding-004",
-        );
+        let (url, headers, body) = protocol
+            .build_request(
+                "test text",
+                "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004",
+                &Some("test-key".to_string()),
+                "models/text-embedding-004",
+            )
+            .unwrap();
         assert!(url.ends_with(":embedContent"));
         assert!(!headers.is_empty());
         assert_eq!(headers[0].0, "x-goog-api-key");
@@ -982,12 +1059,14 @@ mod tests {
     #[test]
     fn test_embedding_protocol_cohere_build_request() {
         let protocol = EmbeddingProtocol("cohere".to_string());
-        let (url, headers, body) = protocol.build_request(
-            "test text",
-            "https://api.cohere.com/v1",
-            &Some("co-key".to_string()),
-            "embed-english-v3.0",
-        );
+        let (url, headers, body) = protocol
+            .build_request(
+                "test text",
+                "https://api.cohere.com/v1",
+                &Some("co-key".to_string()),
+                "embed-english-v3.0",
+            )
+            .unwrap();
         assert!(url.ends_with("/embed"));
         assert_eq!(headers[0].0, "Authorization");
         assert_eq!(headers[0].1, "Bearer co-key");
@@ -999,12 +1078,14 @@ mod tests {
     #[test]
     fn test_embedding_protocol_jina_build_request() {
         let protocol = EmbeddingProtocol("jina".to_string());
-        let (url, headers, body) = protocol.build_request(
-            "test text",
-            "https://api.jina.ai/v1",
-            &Some("jina-key".to_string()),
-            "jina-embeddings-v3",
-        );
+        let (url, headers, body) = protocol
+            .build_request(
+                "test text",
+                "https://api.jina.ai/v1",
+                &Some("jina-key".to_string()),
+                "jina-embeddings-v3",
+            )
+            .unwrap();
         assert!(url.ends_with("/embeddings"));
         assert_eq!(headers[0].0, "Authorization");
         assert_eq!(body["input"][0], "test text");
@@ -1012,21 +1093,21 @@ mod tests {
     }
 
     #[test]
-    fn test_embedding_protocol_unknown_defaults_to_openai() {
+    fn test_embedding_protocol_unknown_is_hard_error() {
         let protocol = EmbeddingProtocol("unknown-protocol".to_string());
-        let (url, headers, body) =
-            protocol.build_request("test", "https://example.com", &None, "some-model");
-        // Unknown protocols should default to OpenAI-compatible format
-        assert!(url.ends_with("/embeddings"));
-        assert!(headers.is_empty());
-        assert_eq!(body["input"], "test");
+        let result = protocol.build_request("test", "https://example.com", &None, "some-model");
+        // Unknown protocols must never default to the OpenAI-compatible format
+        assert!(result.is_err(), "unknown protocol must be a hard error");
+        let msg = format!("{:?}", result.err().unwrap());
+        assert!(msg.contains("unknown embedding protocol"), "{msg}");
     }
 
     #[test]
     fn test_embedding_protocol_no_trailing_slash_handling() {
         let protocol = EmbeddingProtocol("openai".to_string());
-        let (url, _, _) =
-            protocol.build_request("test", "https://api.openai.com/v1/", &None, "model");
+        let (url, _, _) = protocol
+            .build_request("test", "https://api.openai.com/v1/", &None, "model")
+            .unwrap();
         // Should strip trailing slash before appending /embeddings
         assert_eq!(url, "https://api.openai.com/v1/embeddings");
     }
@@ -1103,14 +1184,16 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_embedding_unknown_protocol() {
-        // Unknown protocols use the default OpenAI-compatible extraction
+    fn test_extract_embedding_unknown_protocol_is_error() {
+        // Unknown protocols are rejected; extract_embedding has no OpenAI fallback
         let protocol = EmbeddingProtocol("custom".to_string());
         let response = json!({
             "data": [{"embedding": [3.0, 4.0]}]
         });
-        let result = protocol.extract_embedding(&response).unwrap();
-        assert_eq!(result, vec![3.0, 4.0]);
+        let result = protocol.extract_embedding(&response);
+        assert!(result.is_err(), "unknown protocol must be a hard error");
+        let msg = format!("{:?}", result.err().unwrap());
+        assert!(msg.contains("unknown embedding protocol"), "{msg}");
     }
 
     // ── EmbeddingProtocol from_str ──────────────────────────────────────────
@@ -1127,13 +1210,67 @@ mod tests {
         assert_eq!(p, EmbeddingProtocol("gemini".to_string()));
     }
 
+    #[test]
+    fn test_embedding_protocol_from_str_rejects_unknown() {
+        // A typo must not silently select the OpenAI-compatible client
+        let err = "openai_compat".parse::<EmbeddingProtocol>().unwrap_err();
+        assert!(err.contains("unknown embedding protocol"), "{err}");
+        assert!(err.contains("openai, gemini, cohere, jina"), "{err}");
+    }
+
+    #[test]
+    fn test_embedding_protocol_from_str_rejects_empty() {
+        assert!("".parse::<EmbeddingProtocol>().is_err());
+        assert!("   ".parse::<EmbeddingProtocol>().is_err());
+    }
+
+    // ── resolve_protocol (no hidden default, loud failure) ──────────────────
+
+    #[test]
+    fn test_resolve_protocol_rejects_unset_messages() {
+        let err = resolve_protocol("messages", "").unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("messages_vectorization_protocol is not set"),
+            "{msg}"
+        );
+        assert!(msg.contains("vectorization disabled"), "{msg}");
+    }
+
+    #[test]
+    fn test_resolve_protocol_rejects_unset_wiki() {
+        let err = resolve_protocol("wiki", "  ").unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("wiki_vectorization_protocol is not set"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_protocol_rejects_unknown() {
+        let err = resolve_protocol("wiki", "openai_compat").unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("unknown embedding protocol"), "{msg}");
+        assert!(msg.contains("vectorization disabled"), "{msg}");
+    }
+
+    #[test]
+    fn test_resolve_protocol_accepts_supported_protocols() {
+        for proto in EmbeddingProtocol::SUPPORTED {
+            let resolved = resolve_protocol("messages", proto).unwrap();
+            assert_eq!(resolved.0, *proto);
+        }
+    }
+
     // ── VectorizerConfig ────────────────────────────────────────────────────
 
     #[test]
     fn test_vectorizer_config_defaults() {
         let cfg = VectorizerConfig::default();
         assert_eq!(cfg.method, "local");
-        assert_eq!(cfg.protocol, "openai");
+        // No hidden provider default: the protocol must be configured explicitly
+        assert_eq!(cfg.protocol, "");
         assert_eq!(cfg.batch_size, 50);
         assert_eq!(cfg.poll_interval_secs, 3600);
         assert!(cfg.api_url.is_none());

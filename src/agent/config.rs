@@ -338,10 +338,13 @@ impl AgentConfig {
 
             // Vectorization - defaults match settings.yml so the worker is
             // active out of the box (vectorize_messages: true by default).
+            // The external API protocol has NO default: it must be set
+            // explicitly, otherwise the api vectorizer is disabled with a
+            // loud error (see vectorizer::resolve_protocol).
             vectorize_messages: get("vectorize_messages", "true").parse().unwrap_or(true),
             messages_vectorization_method: get("messages_vectorization_method", "local"),
             messages_vectorization_api_url: opt_str(&get("messages_vectorization_api_url", "")),
-            messages_vectorization_protocol: get("messages_vectorization_protocol", "openai"),
+            messages_vectorization_protocol: get("messages_vectorization_protocol", ""),
             messages_vectorization_api_key: opt_str(&get("messages_vectorization_api_key", "")),
             messages_vectorization_api_model: opt_str(&get("messages_vectorization_api_model", "")),
             messages_vectorization_interval_secs: get("messages_vectorization_interval", "3600")
@@ -350,7 +353,7 @@ impl AgentConfig {
             vectorize_wiki: get("vectorize_wiki", "false").parse().unwrap_or(false),
             wiki_vectorization_method: get("wiki_vectorization_method", "local"),
             wiki_vectorization_api_url: opt_str(&get("wiki_vectorization_api_url", "")),
-            wiki_vectorization_protocol: get("wiki_vectorization_protocol", "openai"),
+            wiki_vectorization_protocol: get("wiki_vectorization_protocol", ""),
             wiki_vectorization_api_key: opt_str(&get("wiki_vectorization_api_key", "")),
             wiki_vectorization_api_model: opt_str(&get("wiki_vectorization_api_model", "")),
             wiki_vectorization_interval_secs: get("wiki_vectorization_interval", "3600")
@@ -457,11 +460,12 @@ impl AgentConfig {
             max_compaction_retries: get("max_compaction_retries", "2").parse().unwrap_or(2),
             default_profile: get("default_profile", "omni"),
 
-            // Vectorization (same defaults as from_env; values come from settings.yml)
+            // Vectorization (same defaults as from_env; values come from
+            // settings.yml). The external API protocol has NO default.
             vectorize_messages: get("vectorize_messages", "true").parse().unwrap_or(true),
             messages_vectorization_method: get("messages_vectorization_method", "local"),
             messages_vectorization_api_url: opt_str(&get("messages_vectorization_api_url", "")),
-            messages_vectorization_protocol: get("messages_vectorization_protocol", "openai"),
+            messages_vectorization_protocol: get("messages_vectorization_protocol", ""),
             messages_vectorization_api_key: opt_str(&get("messages_vectorization_api_key", "")),
             messages_vectorization_api_model: opt_str(&get("messages_vectorization_api_model", "")),
             messages_vectorization_interval_secs: get("messages_vectorization_interval", "3600")
@@ -470,7 +474,7 @@ impl AgentConfig {
             vectorize_wiki: get("vectorize_wiki", "false").parse().unwrap_or(false),
             wiki_vectorization_method: get("wiki_vectorization_method", "local"),
             wiki_vectorization_api_url: opt_str(&get("wiki_vectorization_api_url", "")),
-            wiki_vectorization_protocol: get("wiki_vectorization_protocol", "openai"),
+            wiki_vectorization_protocol: get("wiki_vectorization_protocol", ""),
             wiki_vectorization_api_key: opt_str(&get("wiki_vectorization_api_key", "")),
             wiki_vectorization_api_model: opt_str(&get("wiki_vectorization_api_model", "")),
             wiki_vectorization_interval_secs: get("wiki_vectorization_interval", "3600")
