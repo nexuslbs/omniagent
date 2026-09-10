@@ -130,13 +130,19 @@ pub fn select_compaction_range(messages: &[ChatMessage]) -> Option<Range<usize>>
     Some(start..end)
 }
 
-/// Build the LLM request that summarizes the compacted range. Tool results
-/// are stripped (their content is already pruned/persisted; the summary only
-/// needs the gist) and assistant `tool_calls` are nulled (providers such as
-/// DeepSeek require complete tool-call chains - same convention as the
-/// response-handler summary path).
-pub fn build_compact_summary_request(range_messages: &[ChatMessage]) -> CompletionRequest {
-    let mut summary_msgs: Vec<ChatMessage> = range_messages
+/// Drop the tool-call CHAIN consistently: remove `tool`-role messages and, in
+/// the same pass, the `tool_calls` of the assistant messages they answer.
+///
+/// The OpenAI-compatible chat protocol requires every `assistant.tool_calls`
+/// entry to be followed by a matching `tool` result, so whenever the results
+/// are dropped the paired calls MUST be dropped with them; otherwise the next
+/// request is rejected as an incomplete chain. The decision is derived from
+/// the request SHAPE alone - no provider name, model name or setting is
+/// consulted - hence a plain function and not a configurable detector: the
+/// `malformed_response_tool` setting classifies provider-SPECIFIC malformed
+/// response forms, it does not own protocol shaping.
+pub(crate) fn strip_tool_chain(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    messages
         .iter()
         .filter(|m| m.role != "tool")
         .map(|m| {
@@ -146,7 +152,16 @@ pub fn build_compact_summary_request(range_messages: &[ChatMessage]) -> Completi
             }
             cloned
         })
-        .collect();
+        .collect()
+}
+
+/// Build the LLM request that summarizes the compacted range. Tool results
+/// are stripped (their content is already pruned/persisted; the summary only
+/// needs the gist) and the assistant `tool_calls` are nulled together with
+/// them by [`strip_tool_chain`] - same convention as the response-handler
+/// summary path.
+pub fn build_compact_summary_request(range_messages: &[ChatMessage]) -> CompletionRequest {
+    let mut summary_msgs: Vec<ChatMessage> = strip_tool_chain(range_messages);
     summary_msgs.push(ChatMessage::system(
         "The messages above are the OLDEST segment of an ongoing conversation that exceeded the \
          model's context window. Write a concise but complete summary of this segment: the task \
@@ -451,5 +466,49 @@ mod tests {
         assert_eq!(estimate_tokens(0), 0);
         assert_eq!(estimate_tokens(1), 0);
         assert_eq!(estimate_tokens(4_000), 1_000);
+    }
+
+    // -- strip_tool_chain (provider-agnostic chain repair) ------------------
+
+    #[test]
+    fn strip_tool_chain_removes_tools_and_assistant_calls_together() {
+        let msgs = vec![
+            ChatMessage::user("task"),
+            asst_with_tool_calls(&["call_1"]),
+            ChatMessage::tool_result("call_1", "filesystem_read", "result"),
+            ChatMessage::assistant("done"),
+        ];
+        let stripped = strip_tool_chain(&msgs);
+        // No tool message and no assistant tool_calls survive: the chain is
+        // dropped as a unit, so the request can never carry a dangling call.
+        assert!(stripped.iter().all(|m| m.role != "tool"));
+        assert!(stripped.iter().all(|m| m.tool_calls.is_none()));
+        // Plain prose is preserved verbatim.
+        assert_eq!(stripped.len(), 3);
+        assert_eq!(stripped[0].content, "task");
+        assert_eq!(stripped[2].content, "done");
+    }
+
+    #[test]
+    fn tool_chain_repair_is_shape_driven_and_provider_agnostic() {
+        // Two structurally identical conversations are repaired identically
+        // whatever tool/provider names they carry, and a chain with no
+        // provider-specific markup at all is still repaired: the decision
+        // depends on the message SHAPE (role + tool_calls) only.
+        let a = vec![
+            asst_with_tool_calls(&["call_1"]),
+            ChatMessage::tool_result("call_1", "filesystem_read", "r"),
+        ];
+        let b = vec![
+            asst_with_tool_calls(&["call_2"]),
+            ChatMessage::tool_result("call_2", "some_other_tool", "s"),
+        ];
+        let ra = strip_tool_chain(&a);
+        let rb = strip_tool_chain(&b);
+        assert_eq!(ra.len(), rb.len());
+        assert!(ra.iter().chain(rb.iter()).all(|m| m.tool_calls.is_none()));
+        assert!(ra.iter().chain(rb.iter()).all(|m| m.role != "tool"));
+        // Idempotent: repairing an already-repaired conversation is a no-op.
+        assert_eq!(strip_tool_chain(&ra).len(), ra.len());
     }
 }

@@ -1,4 +1,5 @@
 use crate::agent::config::AgentContext;
+use crate::agent::context_compactor::strip_tool_chain;
 use crate::agent::helpers;
 use crate::agent::response_hygiene;
 use crate::agent::terminal_summary::{
@@ -78,20 +79,11 @@ pub(crate) async fn handle_response(
         // ── Summary generation (when interrupted / iteration limit reached) ──
         // Generate an LLM summary that reports what was accomplished and what remains.
         // This replaces the hardcoded message so the summary is the only output.
-        let mut summary_msgs: Vec<ChatMessage> = messages
-            .iter()
-            .filter(|m| m.role != "tool")
-            .map(|m| {
-                let mut cloned = m.clone();
-                // Remove tool_calls from assistant messages since we removed
-                // the corresponding tool results: DeepSeek requires tool_call
-                // chains to be complete.
-                if cloned.role == "assistant" && cloned.tool_calls.is_some() {
-                    cloned.tool_calls = None;
-                }
-                cloned
-            })
-            .collect();
+        // Tool results and the assistant tool_calls they answer are removed
+        // together: the chat protocol requires complete tool_call/tool-result
+        // chains, so the pair is always dropped as a unit (provider-neutral,
+        // see `strip_tool_chain`).
+        let mut summary_msgs: Vec<ChatMessage> = strip_tool_chain(messages);
         // Include a compact digest of tool activity so the summarizer can see
         // what the agent actually did (file writes, git commits, test results).
         if let Some(digest) = build_tool_evidence_digest(messages) {
@@ -105,7 +97,7 @@ pub(crate) async fn handle_response(
              Write a reasonably brief summary (a few sentences to a short paragraph) - the reader needs the key \
              accomplishments and remaining work. Inform the user they can request to continue. \
              Tools are DISABLED for this call: reply in plain prose only, never emit tool calls or \
-             XML/DSML markup, and do not plan further actions - no further tool call can run in \
+             any tool-call markup, and do not plan further actions - no further tool call can run in \
              this interrupted thread.",
             current_iter, iter_limit,
         );
@@ -161,7 +153,7 @@ pub(crate) async fn handle_response(
         // Terminal-content hygiene (interrupted threads must end with a PROPER
         // summary; thread 1596). A provider in text-tool mode sometimes answers
         // the summary prompt (tools:None) with raw PROVIDER-SPECIFIC tool-call
-        // markup (DeepSeek DSML/XML) or with continuation prose ("I'll update
+        // markup (for example an XML envelope) or with continuation prose ("I'll update
         // the subtasks..."). Persist neither: the global setting
         // `malformed_response_tool` names the MCP tool that owns that detection
         // (empty default = the core's built-in provider-neutral heuristic), and
@@ -219,7 +211,7 @@ pub(crate) async fn handle_response(
             // The agent returned no final message but did perform tool activity:
             // summarize what was accomplished from the tool evidence instead of
             // reporting a bare "empty response" error.
-            let mut summary_msgs = strip_tool_messages(messages);
+            let mut summary_msgs = strip_tool_chain(messages);
             summary_msgs.push(ChatMessage::system(&format!(
                 "The agent returned an empty final message, but the following tool activity \
                  was recorded (tool results, newest first):\n{}",
@@ -229,7 +221,7 @@ pub(crate) async fn handle_response(
                  recorded. Write a reasonably brief summary (a few sentences to a short \
                  paragraph) - the reader needs the key accomplishments and remaining work. \
                  Tools are disabled for this call: reply in plain prose only, never emit tool \
-                 calls or XML/DSML markup.";
+                 calls or any tool-call markup.";
             summary_msgs.push(ChatMessage::system(iter_summary));
             let summary_request = CompletionRequest {
                 messages: summary_msgs,
@@ -499,7 +491,7 @@ const MAX_DIGEST_TOOL_CHARS: usize = 300;
 /// messages. Each entry is `[tool] <name> <truncated output>` - enough for
 /// the summarizer to see file writes, git commits, and test results without
 /// blowing the summary token budget. Plain text in a `system` message, so the
-/// DeepSeek tool_call/tool-result chain requirement is never reintroduced.
+/// tool_call/tool-result chain requirement is never reintroduced.
 fn build_tool_evidence_digest(messages: &[ChatMessage]) -> Option<String> {
     let tool_msgs: Vec<&ChatMessage> = messages
         .iter()
@@ -523,23 +515,6 @@ fn build_tool_evidence_digest(messages: &[ChatMessage]) -> Option<String> {
         entries.push(format!("[tool] {} {}", name, output));
     }
     Some(entries.join("\n"))
-}
-
-/// Clone the conversation without tool-result messages, stripping assistant
-/// `tool_calls` so the tool_call/tool-result chain requirement is not
-/// violated when raw tool messages are not passed back to the model.
-fn strip_tool_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
-    messages
-        .iter()
-        .filter(|m| m.role != "tool")
-        .map(|m| {
-            let mut cloned = m.clone();
-            if cloned.role == "assistant" && cloned.tool_calls.is_some() {
-                cloned.tool_calls = None;
-            }
-            cloned
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -607,15 +582,16 @@ mod tests {
     }
 
     #[test]
-    fn strip_tool_messages_removes_tools_and_assistant_calls() {
+    fn strip_tool_chain_removes_tools_and_assistant_calls() {
         let msgs = vec![
             ChatMessage::user("hi"),
             ChatMessage::assistant("let me check"),
             ChatMessage::tool_result("call_1", "filesystem_read", "content"),
         ];
-        let stripped = strip_tool_messages(&msgs);
+        let stripped = strip_tool_chain(&msgs);
         assert_eq!(stripped.len(), 2);
         assert!(stripped.iter().all(|m| m.role != "tool"));
+        assert!(stripped.iter().all(|m| m.tool_calls.is_none()));
     }
 
     #[test]
