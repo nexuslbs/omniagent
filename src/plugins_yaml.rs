@@ -1387,6 +1387,30 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
         }
     }
 
+    // ── remote.yml-only entries: remote.yml is the SOURCE OF TRUTH ────
+    // A plugin declared in remote.yml must ALWAYS appear in the listing, even
+    // when it has no plugins.yml entry and its repository is not cloned
+    // locally (operator rule 2026-09-10). Without this block such a plugin
+    // silently disappears from the dashboard Platforms page. Activating it
+    // from the dashboard adds it to plugins.yml (install-git) - unchanged.
+    {
+        let remote_store = load_remote_plugins(data_dir);
+        for (yaml_type, entries, yaml_entries) in [
+            (PluginYamlType::Platform, remote_store.platforms.as_ref(), &platform_entries),
+            (PluginYamlType::Tool, remote_store.tools.as_ref(), &tool_entries),
+            (PluginYamlType::Provider, remote_store.providers.as_ref(), &provider_entries),
+        ] {
+            if let Some(entries) = entries {
+                for (key, remote) in entries {
+                    if groups.contains_key(key) || yaml_entries.contains_key(key) {
+                        continue;
+                    }
+                    results.push(build_remote_only_detail(key, &yaml_type, remote));
+                }
+            }
+        }
+    }
+
     // ── models.yml overlay + plugin-less providers ──
     // models.yml `models` list wins over the plugin's default_model enum for
     // provider selectors (user spec). Apply to every provider detail.
@@ -1495,6 +1519,68 @@ pub fn provider_plugin_config_headers(
         }
     }
     out
+}
+
+/// Synthetic `PluginDetail` for a plugin declared ONLY in `remote.yml`
+/// (no `plugins.yml` entry and no clone on disk).
+///
+/// `remote.yml` is the SOURCE OF TRUTH for remote plugins: a plugin declared
+/// there must always be listed (and resolvable) so it can be downloaded and
+/// activated from the dashboard, regardless of whether its repository is
+/// cloned locally or whether `plugins.yml` mentions it.
+fn build_remote_only_detail(
+    name: &str,
+    pt: &PluginYamlType,
+    remote: &PluginRemote,
+) -> PluginDetail {
+    let plugin_type = match pt {
+        PluginYamlType::Platform => PluginType::Platform,
+        PluginYamlType::Tool => PluginType::Mcp,
+        PluginYamlType::Provider => PluginType::Provider,
+    };
+    let plugin_type_str = match pt {
+        PluginYamlType::Platform => "platform",
+        PluginYamlType::Tool => "tool",
+        PluginYamlType::Provider => "provider",
+    };
+    let manifest = PluginManifest {
+        name: name.to_string(),
+        version: "0.1.0".to_string(),
+        plugin_type,
+        description: Some(
+            "Remote plugin: declared in remote.yml, not downloaded yet".to_string(),
+        ),
+        entrypoint: None,
+        capabilities: None,
+        config_schema: Vec::new(),
+        env: std::collections::HashMap::new(),
+        default_base_url: None,
+        api_mode: None,
+        api_modes: None,
+    };
+    PluginDetail {
+        id: 0,
+        name: name.to_string(),
+        plugin_type: plugin_type_str.to_string(),
+        version: "0.1.0".to_string(),
+        source: Some("remote".to_string()),
+        status: "not_found".to_string(),
+        manifest: serde_json::to_value(&manifest).unwrap_or_default(),
+        config: serde_json::json!({}),
+        config_schema: Vec::new(),
+        resolved_env: HashMap::new(),
+        created_at: String::new(),
+        updated_at: String::new(),
+        needs_build: false,
+        remote: Some(remote.clone()),
+        needs_download: true,
+        is_duplicated: false,
+        has_source_code: false,
+        is_script: false,
+        status_message: String::new(),
+        language: "unknown".to_string(),
+        tool_names: Vec::new(),
+    }
 }
 
 pub fn get_plugin(
@@ -1657,6 +1743,13 @@ pub fn get_plugin(
         &provider_entries,
     ) {
         return Ok(Some(detail));
+    }
+
+    // remote.yml is the SOURCE OF TRUTH for remote plugins: resolve an entry
+    // declared there even when it is absent from plugins.yml and not cloned
+    // (mirrors list_plugins; keeps the dashboard detail page working).
+    if let Some(remote) = get_remote_plugin(data_dir, pt, name) {
+        return Ok(Some(build_remote_only_detail(name, pt, &remote)));
     }
 
     Ok(None)
@@ -2291,6 +2384,43 @@ providers:
             file_path(path, &PluginYamlType::Provider),
             PathBuf::from(path).join("config").join("plugins.yml")
         );
+    }
+
+    // ------------------------------------------------------------------
+    // remote.yml is the SOURCE OF TRUTH for remote plugins (WS1 regression)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_list_plugins_includes_remote_yml_only_entry() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        // remote.yml declares a platform that is NOT in plugins.yml and is NOT cloned.
+        std::fs::write(
+            dir.path().join("config").join("remote.yml"),
+            "platforms:\n  telegram:\n    url: file:///tmp/omni-plugins\n    path: platforms/telegram\n",
+        )
+        .unwrap();
+        // plugins.yml exists but has no telegram entry.
+        std::fs::write(
+            dir.path().join("config").join("plugins.yml"),
+            "platforms:\n  mattermost:\n    enabled: true\n",
+        )
+        .unwrap();
+        let data_dir = dir.path().to_str().unwrap().to_string();
+
+        let details = list_plugins(&data_dir).unwrap();
+        let telegram = details.iter().find(|d| d.name == "telegram").expect(
+            "a plugin declared only in remote.yml must still be listed (remote.yml is the source of truth)",
+        );
+        assert_eq!(telegram.source.as_deref(), Some("remote"));
+        assert!(telegram.needs_download, "not cloned -> needs_download");
+        assert!(telegram.remote.is_some(), "remote metadata must be exposed");
+        assert_eq!(telegram.plugin_type, "platform");
+
+        let one = get_plugin(&data_dir, "telegram", &PluginYamlType::Platform)
+            .unwrap()
+            .expect("get_plugin must resolve a remote.yml-only platform");
+        assert_eq!(one.source.as_deref(), Some("remote"));
     }
 
     // ------------------------------------------------------------------
