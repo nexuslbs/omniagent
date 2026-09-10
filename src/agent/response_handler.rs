@@ -103,7 +103,10 @@ pub(crate) async fn handle_response(
         let iter_summary = format!(
             "The iteration limit ({}/{}) was reached so the task may be incomplete. \
              Write a reasonably brief summary (a few sentences to a short paragraph) - the reader needs the key \
-             accomplishments and remaining work. Inform the user they can request to continue.",
+             accomplishments and remaining work. Inform the user they can request to continue. \
+             Tools are DISABLED for this call: reply in plain prose only, never emit tool calls or \
+             XML/DSML markup, and do not plan further actions - no further tool call can run in \
+             this interrupted thread.",
             current_iter, iter_limit,
         );
         summary_msgs.push(ChatMessage::system(&iter_summary));
@@ -221,7 +224,9 @@ pub(crate) async fn handle_response(
             )));
             let iter_summary = "The agent produced no final message, but tool activity was \
                  recorded. Write a reasonably brief summary (a few sentences to a short \
-                 paragraph) - the reader needs the key accomplishments and remaining work.";
+                 paragraph) - the reader needs the key accomplishments and remaining work. \
+                 Tools are disabled for this call: reply in plain prose only, never emit tool \
+                 calls or XML/DSML markup.";
             summary_msgs.push(ChatMessage::system(iter_summary));
             let summary_request = CompletionRequest {
                 messages: summary_msgs,

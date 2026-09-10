@@ -22,6 +22,26 @@
 //! real summary and never a malformed tool-call tail or a "let me now..."
 //! opener.
 
+/// Delimiter of DeepSeek text-mode tool-call markup ("DSML"): instead of XML
+/// angle brackets the model writes special tokens with a FULL-WIDTH VERTICAL
+/// BAR (U+FF5C), e.g. `<\u{FF5C}DSML\u{FF5C} calls>` or
+/// `<\u{FF5C}DSML\u{FF5C} invoke name="...">`. Observed live on
+/// deepseek-v4-flash answering the limit-reached summary prompt (tools
+/// disabled) in omnidev on 2026-09-10: the entire terminal summary was such a
+/// block, and the XML-only sanitizer below did not recognize it.
+const DSML_BAR: char = '\u{FF5C}';
+
+/// Token-name separator (U+2581) used inside DeepSeek special tokens
+/// (`<\u{FF5C}tool\u{2581}calls\u{2581}begin\u{FF5C}>`).
+const DSML_SEP: char = '\u{2581}';
+
+/// True when `text` carries DeepSeek DSML special-token markup: the full-width
+/// bar delimiter or the U+2581 token separator. A plain-prose summary contains
+/// neither character.
+pub(crate) fn contains_dsml_markup(text: &str) -> bool {
+    text.contains(DSML_BAR) || text.contains(DSML_SEP)
+}
+
 /// Strip DSML/XML tool-call envelopes and markdown `tool_call` fences from a
 /// raw terminal message.
 ///
@@ -75,6 +95,8 @@ pub(crate) fn sanitize_terminal_content(raw: &str) -> String {
             continue;
         }
         if trimmed.is_empty()
+            || trimmed.contains(DSML_BAR)
+            || trimmed.contains(DSML_SEP)
             || trimmed.starts_with("<invoke")
             || trimmed.starts_with("</invoke>")
             || trimmed.starts_with("<parameter")
@@ -350,6 +372,42 @@ mod tests {
         let s = deterministic_interrupted_summary("Do a thing", None, 1, 3);
         assert!(s.contains("No tool activity had completed"));
         assert!(s.contains("Reply \"continue\""));
+    }
+
+    #[test]
+    fn deepseek_dsml_envelope_only_becomes_empty() {
+        // Real terminal summary persisted by the omnidev repro (deepseek-v4-flash,
+        // iteration limit reached, 2026-09-10): the model answered the summary
+        // prompt (tools disabled) with its DSML text-tool syntax.
+        let raw = "<\u{FF5C}DSML\u{FF5C} calls>\n\
+                   <\u{FF5C}DSML\u{FF5C} invoke name=\"subtasks_manage-subtasks\">\n\
+                   <\u{FF5C}DSML\u{FF5C} parameter name=\"action\" string=\"true\">update</\u{FF5C}DSML\u{FF5C} parameter>\n\
+                   <\u{FF5C}DSML\u{FF5C} parameter name=\"subtask_id\" string=\"false\">1</\u{FF5C}DSML\u{FF5C} parameter>\n\
+                   </\u{FF5C}DSML\u{FF5C} invoke>\n\
+                   </\u{FF5C}DSML\u{FF5C} calls>";
+        assert!(contains_dsml_markup(raw));
+        assert!(sanitize_terminal_content(raw).is_empty());
+    }
+
+    #[test]
+    fn deepseek_dsml_envelope_keeps_surrounding_prose() {
+        let raw = "The task hit its iteration limit before the final check.\n\
+                   <\u{FF5C}DSML\u{FF5C} invoke name=\"x\">\n\
+                   </\u{FF5C}DSML\u{FF5C} invoke>\n\
+                   Remaining: the reproduction run was not executed.";
+        let cleaned = sanitize_terminal_content(raw);
+        assert!(cleaned.contains("hit its iteration limit before the final check"));
+        assert!(cleaned.contains("Remaining: the reproduction run was not executed."));
+        assert!(!contains_dsml_markup(&cleaned));
+    }
+
+    #[test]
+    fn dsml_detector_ignores_plain_prose() {
+        assert!(!contains_dsml_markup(
+            "Plain summary text: committed abc123, pushed to origin/main."
+        ));
+        assert!(contains_dsml_markup("x\u{FF5C}y"));
+        assert!(contains_dsml_markup("x\u{2581}y"));
     }
 }
 
