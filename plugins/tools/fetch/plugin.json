@@ -2,7 +2,7 @@
   "id": "mcp-server-fetch",
   "name": "Fetch MCP Server",
   "version": "0.1.0",
-  "description": "HTTP tool \u2014 fetch web pages and API responses (GET by default; optional method gated by allow_unsafe_methods)",
+  "description": "HTTP tool \u2014 fetch web pages and API responses (GET by default; optional method gated by allow_unsafe_methods; optional custom headers gated by allow_custom_headers with $env:/$secret: expansion)",
   "type": "mcp",
   "entrypoint": {
     "command": "mcp-server-fetch",
@@ -16,6 +16,20 @@
       "type": "boolean",
       "default": "false",
       "description": "When false (default), the fetch tool only allows safe/read-only HTTP methods (GET, HEAD, OPTIONS). When true, all HTTP methods (POST, PUT, PATCH, DELETE, etc.) are allowed. Configure per-plugin via the config endpoint (POST /api/plugins/tools/bundled/fetch/config with {\"config\":{\"allow_unsafe_methods\":\"true\"}}) or the plugins.yml `config:` map. The value reaches the plugin subprocess as the env var `allow_unsafe_methods`."
+    },
+    {
+      "key": "allow_custom_headers",
+      "label": "Allow Custom Headers",
+      "type": "boolean",
+      "default": "false",
+      "description": "When false (default), the fetch tool REJECTS the optional `headers` argument with an informative error. When true, the agent may define custom HTTP headers per call (JSON object, header name -> string value). Header values support call-time reference expansion: `$env:VAR` (plugin environment) and `$secret:NAME` (omniagent secrets store), so credentials such as \"Authorization\": \"Basic $secret:TWILIO_BASIC\" never appear literally in the tool call. Header names/values containing CR or LF are rejected (header injection), as are values >8 KiB, more than 32 headers or >16 KiB in total; values expanded from `$secret:` are redacted from the tool result. Configure via plugins.yml `fetch.config.allow_custom_headers` or POST /api/plugins/tools/bundled/fetch/config with {\"config\":{\"allow_custom_headers\":\"true\"}}. The value reaches the plugin subprocess as the env var `allow_custom_headers`."
+    },
+    {
+      "key": "database_url",
+      "label": "Secrets Store Database URL",
+      "type": "string",
+      "default": "$env:DATABASE_URL",
+      "description": "Postgres URL of the omniagent secrets store, used ONLY to expand `$secret:NAME` references in fetch header values at call time (read-only SELECT on the secrets table; the value is never logged and never written anywhere). Default `$env:DATABASE_URL` resolves to the same database the omniagent server itself uses. Leave empty to disable `$secret:` expansion: a header value referencing $secret:NAME then fails with an explicit error naming the secret and this config key."
     }
   ]
 }

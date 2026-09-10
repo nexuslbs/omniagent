@@ -2,7 +2,7 @@
 name = "mcp-server-fetch"
 version = "0.1.0"
 edition = "2021"
-description = "Fetch MCP server: HTTP GET tool using reqwest"
+description = "Fetch MCP server: HTTP tool with optional custom headers and $env:/$secret: expansion"
 
 [dependencies]
 mcp-server-util = { path = "../util" }
@@ -12,3 +12,4 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 reqwest = { version = "0.12" }
+sqlx = { version = "0.9", features = ["postgres", "runtime-tokio"] }

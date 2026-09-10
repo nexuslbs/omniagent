@@ -1355,6 +1355,7 @@ dependencies = [
  "mcp-server-util",
  "reqwest",
  "serde_json",
+ "sqlx",
  "tokio",
  "tracing",
  "tracing-subscriber",
