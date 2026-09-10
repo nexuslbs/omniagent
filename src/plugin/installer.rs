@@ -1051,6 +1051,7 @@ pub fn discover_plugins(data_dir: &str) -> Vec<(PluginManifest, String, String)>
                         default_base_url: None,
                         api_mode: None,
                         api_modes: None,
+                        binary: None,
                     };
                     let path_str = plugin_path.join("Cargo.toml").to_string_lossy().to_string();
                     results.push((manifest, "built-in".to_string(), path_str));
@@ -1105,6 +1106,7 @@ pub fn discover_plugins(data_dir: &str) -> Vec<(PluginManifest, String, String)>
                 default_base_url: None,
                 api_mode: None,
                 api_modes: None,
+                binary: None,
             };
             results.push((manifest, "mcp_config".to_string(), String::new()));
         }

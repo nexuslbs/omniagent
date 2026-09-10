@@ -520,6 +520,21 @@ impl StdioMcpClient {
         // env below plus an explicit minimal PATH for the child's own spawns.
         command.env_clear();
         command.env("PATH", crate::process_env::MINIMAL_PATH);
+        // HOME_FOR_PLUGIN_CHILD: the child env is isolated and never inherits
+        // the server's HOME. Several MCP servers (Go binaries with an embedded
+        // SQLite store, node tools using a cache dir) resolve their state
+        // directory from $HOME and abort at startup when it is undefined
+        // ("determine home directory: $HOME is not defined"). Default it to
+        // the server working directory (the plugin dir) so state persists
+        // across restarts, falling back to the temp dir.
+        if !self.config.env.contains_key("HOME") {
+            let home = self
+                .config
+                .current_dir
+                .clone()
+                .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
+            command.env("HOME", home);
+        }
 
         if let Some(dir) = &self.config.current_dir {
             command.current_dir(dir);
