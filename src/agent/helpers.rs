@@ -505,20 +505,18 @@ pub async fn enqueue_delivery(
         thread_sequence: saved.thread_sequence,
         cause_external_id: resolved_cause_external_id,
         cause_root_id: {
-            // Look up the cause message's metadata for root_id (e.g. Mattermost
-            // thread root): used when the user's message was inside an existing
-            // thread, so bot replies reference the thread root rather than the
-            // intermediate reply (Mattermost doesn't allow nested threads).
+            // Look up the cause message's metadata for the protocol-level parent
+            // external id (neutral key `parent_external_id`, with the one-release
+            // `root_id` alias), e.g. the Mattermost thread root: used when the
+            // user's message was inside an existing thread, so bot replies
+            // reference the thread root rather than the intermediate reply
+            // (Mattermost doesn't allow nested threads).
             queries::get_cause_message(&ctx.pool, saved.thread_id)
                 .await
                 .ok()
                 .flatten()
                 .and_then(|m| {
-                    m.metadata
-                        .get("root_id")
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                        .map(|s| s.to_string())
+                    crate::platform::external::parent_external_id_from_metadata(&m.metadata)
                 })
         },
         reply_to_message_id: None,

@@ -2861,10 +2861,12 @@ mod tests {
 ///      whose root thread row still exists);
 ///   3. shared parent external id: the seq-0 cause messages of both
 ///      threads carry the same non-empty parent external id (metadata
-///      key 'root_id'). This covers parent-by-chat platforms (telegram:
-///      root_id = chat id, never a message external id, so it never
-///      resolves to a threads.parent_id) and Mattermost sibling replies
-///      after the root thread row was deleted or never existed.
+///      key 'parent_external_id'; the Mattermost-named alias 'root_id'
+///      is still accepted for one release). This covers parent-by-chat
+///      platforms (telegram: parent external id = chat id, never a
+///      message external id, so it never resolves to a
+///      threads.parent_id) and Mattermost sibling replies after the root
+///      thread row was deleted or never existed.
 ///
 /// Top-level channel messages (no parent external id) never match here.
 ///
@@ -2905,9 +2907,9 @@ pub async fn list_appendable_pending_threads(
                     FROM messages r0, messages p0
                     WHERE r0.thread_id = :running_thread_id AND r0.thread_sequence = 0
                       AND p0.thread_id = t.id AND p0.thread_sequence = 0
-                      AND r0.metadata->>'root_id' IS NOT NULL
-                      AND r0.metadata->>'root_id' <> ''
-                      AND p0.metadata->>'root_id' = r0.metadata->>'root_id'
+                      AND COALESCE(r0.metadata->>'parent_external_id', r0.metadata->>'root_id') IS NOT NULL
+                      AND COALESCE(r0.metadata->>'parent_external_id', r0.metadata->>'root_id') <> ''
+                      AND COALESCE(p0.metadata->>'parent_external_id', p0.metadata->>'root_id') = COALESCE(r0.metadata->>'parent_external_id', r0.metadata->>'root_id')
                )
           )
         ORDER BY t.id ASC
@@ -3346,13 +3348,43 @@ mod sub_prompt_appendable_tests {
 
     /// Insert a user thread row plus its seq-0 cause message (role 'cause',
     /// msg_type 'Cause'), mirroring create_thread_with_cause for an inbound
-    /// platform message. parent_root_id is stored in metadata 'root_id'
-    /// (the parent external id). Returns the new thread id.
+    /// platform message. `parent_root_id` is the protocol-level parent external
+    /// id, stored here under the legacy Mattermost-named alias 'root_id' (the
+    /// one-release alias core still accepts). Use
+    /// [`insert_user_thread_with_key`] to store it under the neutral
+    /// 'parent_external_id' key. Returns the new thread id.
     async fn insert_user_thread(
         pool: &PgPool,
         channel: &str,
         status: &str,
         external_id: &str,
+        parent_root_id: Option<&str>,
+        parent_id: Option<i64>,
+        msg_subtype: &str,
+    ) -> i64 {
+        insert_user_thread_with_key(
+            pool,
+            channel,
+            status,
+            external_id,
+            crate::platform::external::PARENT_EXTERNAL_ID_KEY_ALIAS,
+            parent_root_id,
+            parent_id,
+            msg_subtype,
+        )
+        .await
+    }
+
+    /// Same as [`insert_user_thread`], but stores the parent external id under
+    /// an explicit metadata key: `parent_external_id` (the neutral protocol
+    /// key) or `root_id` (the one-release Mattermost-named alias).
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_user_thread_with_key(
+        pool: &PgPool,
+        channel: &str,
+        status: &str,
+        external_id: &str,
+        metadata_key: &str,
         parent_root_id: Option<&str>,
         parent_id: Option<i64>,
         msg_subtype: &str,
@@ -3369,7 +3401,7 @@ mod sub_prompt_appendable_tests {
         .expect("insert test thread");
         let mut meta = serde_json::json!({});
         if let Some(root) = parent_root_id {
-            meta["root_id"] = serde_json::json!(root);
+            meta[metadata_key] = serde_json::json!(root);
         }
         sqlx::query(
             "INSERT INTO messages (thread_id, thread_sequence, role, content, msg_type, \
@@ -3411,8 +3443,9 @@ mod sub_prompt_appendable_tests {
     #[tokio::test]
     async fn telegram_same_chat_follow_up_merges_into_running_thread() {
         // Telegram parent_by_chat: every inbound message of a chat carries
-        // the chat id as its parent external id (metadata 'root_id'), never
-        // a message external_id, so no threads.parent_id is ever resolved.
+        // the chat id as its parent external id (here stored under the legacy
+        // alias 'root_id'), never a message external_id, so no
+        // threads.parent_id is ever resolved.
         // A follow-up arriving while a same-chat thread is running must
         // merge into that running thread. Pre-fix this listed nothing.
         let Ok(db_url) = std::env::var("DATABASE_URL") else {
@@ -3550,8 +3583,9 @@ mod sub_prompt_appendable_tests {
         // Mattermost: two sequential replies inside the same root thread,
         // sent after the root thread finished and its row no longer exists.
         // threads.parent_id was never resolved (NULL), but both seq-0
-        // messages carry the same root post id in metadata 'root_id', so
-        // the second reply merges into the first once the first runs.
+        // messages carry the same root post id in metadata 'root_id' (the
+        // one-release alias of the neutral 'parent_external_id' key), so the
+        // second reply merges into the first once the first runs.
         let Ok(db_url) = std::env::var("DATABASE_URL") else {
             return;
         };
@@ -3594,6 +3628,121 @@ mod sub_prompt_appendable_tests {
         );
 
         cleanup_threads(&pool, &[running_id, pending_id]).await;
+    }
+
+    #[tokio::test]
+    async fn neutral_parent_external_id_merges_into_running_thread() {
+        // V-6: the neutral protocol key 'parent_external_id' (the key plugins
+        // emit after the rename) must drive the same-parent merge exactly like
+        // the legacy Mattermost-named alias 'root_id'.
+        let Ok(db_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let _db_guard = crate::db::DB_TEST_LOCK.lock().await;
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect dev db");
+        let channel = chan("neutral-key");
+
+        let running_id = insert_user_thread_with_key(
+            &pool,
+            &channel,
+            "processing",
+            "tg-n1",
+            crate::platform::external::PARENT_EXTERNAL_ID_KEY,
+            Some("chat-11"),
+            None,
+            "telegram",
+        )
+        .await;
+        let pending_id = insert_user_thread_with_key(
+            &pool,
+            &channel,
+            "pending",
+            "tg-n2",
+            crate::platform::external::PARENT_EXTERNAL_ID_KEY,
+            Some("chat-11"),
+            None,
+            "telegram",
+        )
+        .await;
+
+        let appendable =
+            list_appendable_pending_threads(&pool, &channel, "test-profile", running_id)
+                .await
+                .expect("list appendable");
+        let ids: Vec<i64> = appendable.iter().map(|t| t.id).collect();
+        assert_eq!(
+            ids,
+            vec![pending_id],
+            "neutral parent_external_id must merge a same-parent follow-up"
+        );
+
+        cleanup_threads(&pool, &[running_id, pending_id]).await;
+    }
+
+    #[tokio::test]
+    async fn legacy_alias_and_neutral_key_interop() {
+        // V-6 one-release alias: a running thread whose stored metadata still
+        // carries the legacy 'root_id' key must merge a pending thread that
+        // already carries the neutral 'parent_external_id' key; a different
+        // parent id still never merges.
+        let Ok(db_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let _db_guard = crate::db::DB_TEST_LOCK.lock().await;
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect dev db");
+        let channel = chan("alias-interop");
+
+        let running_id = insert_user_thread_with_key(
+            &pool,
+            &channel,
+            "processing",
+            "tg-a1",
+            crate::platform::external::PARENT_EXTERNAL_ID_KEY_ALIAS,
+            Some("chat-12"),
+            None,
+            "telegram",
+        )
+        .await;
+        let pending_id = insert_user_thread_with_key(
+            &pool,
+            &channel,
+            "pending",
+            "tg-a2",
+            crate::platform::external::PARENT_EXTERNAL_ID_KEY,
+            Some("chat-12"),
+            None,
+            "telegram",
+        )
+        .await;
+        let other_pending_id = insert_user_thread_with_key(
+            &pool,
+            &channel,
+            "pending",
+            "tg-a3",
+            crate::platform::external::PARENT_EXTERNAL_ID_KEY,
+            Some("chat-13"),
+            None,
+            "telegram",
+        )
+        .await;
+
+        let appendable =
+            list_appendable_pending_threads(&pool, &channel, "test-profile", running_id)
+                .await
+                .expect("list appendable");
+        let ids: Vec<i64> = appendable.iter().map(|t| t.id).collect();
+        assert_eq!(
+            ids,
+            vec![pending_id],
+            "the legacy alias and the neutral key resolve to the same parent id; \
+             a different parent id still never merges"
+        );
+
+        cleanup_threads(&pool, &[running_id, pending_id, other_pending_id]).await;
     }
 
     #[tokio::test]

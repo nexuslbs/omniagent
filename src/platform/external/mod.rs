@@ -477,8 +477,10 @@ pub struct DeliverParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cause_external_id: Option<String>,
     /// If the cause message was itself a reply in a thread, this is the
-    /// thread root's external_id (e.g. root_id in Mattermost): used by
-    /// platform plugins that don't allow nested threads (Mattermost).
+    /// thread root's external_id - the protocol-level parent external id
+    /// assigned by the platform plugin (metadata key
+    /// [`PARENT_EXTERNAL_ID_KEY`]; mattermost: root post id): used by platform
+    /// plugins that don't allow nested threads (Mattermost).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause_root_id: Option<String>,
     /// External id of the message this delivery must be sent as a reply to
@@ -570,6 +572,40 @@ pub struct InboundMessage {
     pub files: Vec<FileAttachment>,
     #[serde(default)]
     pub metadata: Value,
+}
+
+/// Metadata key carrying the protocol-level PARENT EXTERNAL ID of an inbound
+/// message: the platform-scoped id of the message/thread this message is a
+/// reply to. Platform plugins own the assignment; core only consumes it.
+///
+/// Per-platform semantics:
+/// - mattermost: the root post id of the thread the user replied in
+///   (Mattermost's own `post.root_id`), `null` for top-level posts.
+/// - telegram (`parent_by_chat`): the chat id (never a message id), so every
+///   message of one chat shares the same parent external id; absent when
+///   `parent_by_chat` is false.
+pub const PARENT_EXTERNAL_ID_KEY: &str = "parent_external_id";
+
+/// Legacy alias of [`PARENT_EXTERNAL_ID_KEY`]: the Mattermost-named key
+/// plugins emitted before the rename. Accepted for ONE release; plugins now
+/// emit `parent_external_id` and keep this key as a transitional alias.
+pub const PARENT_EXTERNAL_ID_KEY_ALIAS: &str = "root_id";
+
+/// Extract the protocol-level parent external id from an inbound message's
+/// `metadata` (or from a stored cause message's metadata).
+///
+/// Prefers the neutral [`PARENT_EXTERNAL_ID_KEY`] and falls back to the
+/// one-release alias [`PARENT_EXTERNAL_ID_KEY_ALIAS`], so plugins that predate
+/// the rename keep working. Absent, non-string or empty values yield `None`.
+pub fn parent_external_id_from_metadata(metadata: &Value) -> Option<String> {
+    for key in [PARENT_EXTERNAL_ID_KEY, PARENT_EXTERNAL_ID_KEY_ALIAS] {
+        if let Some(value) = metadata.get(key).and_then(|v| v.as_str()) {
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// A notification from the plugin to the agent (e.g. status update).
@@ -949,6 +985,47 @@ mod tests {
                 "no shortcode may leak into the react request: {}",
                 req
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod parent_external_id_metadata_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn prefers_neutral_key_and_falls_back_to_legacy_alias() {
+        assert_eq!(
+            parent_external_id_from_metadata(&json!({"parent_external_id": "chat-9"})),
+            Some("chat-9".to_string())
+        );
+        assert_eq!(
+            parent_external_id_from_metadata(&json!({"root_id": "chat-9"})),
+            Some("chat-9".to_string()),
+            "the legacy Mattermost-named alias is accepted for one release"
+        );
+        assert_eq!(
+            parent_external_id_from_metadata(&json!({
+                "parent_external_id": "new-id",
+                "root_id": "old-id",
+            })),
+            Some("new-id".to_string()),
+            "the neutral key wins when both keys are present"
+        );
+    }
+
+    #[test]
+    fn missing_empty_or_non_string_parent_is_none() {
+        for meta in [
+            json!({}),
+            json!({"parent_external_id": ""}),
+            json!({"root_id": ""}),
+            json!({"parent_external_id": null}),
+            json!({"root_id": null}),
+            json!({"root_id": 7}),
+        ] {
+            assert_eq!(parent_external_id_from_metadata(&meta), None);
         }
     }
 }

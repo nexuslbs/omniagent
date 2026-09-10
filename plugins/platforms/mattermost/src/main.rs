@@ -3115,6 +3115,13 @@ async fn send_inbound_notification(
             "external_id": post.id,
             "files": file_attachments,
             "metadata": {
+                // Protocol-level parent external id (see
+                // src/platform/external/mod.rs PARENT_EXTERNAL_ID_KEY):
+                // Mattermost assigns the root post id of the thread the user
+                // replied in, null for top-level posts. "root_id" carries the
+                // same value as a one-release alias so omniagent cores that
+                // predate the rename keep working.
+                "parent_external_id": root_id,
                 "root_id": root_id,
                 "thread_id": thread_id,
                 "user_id": post.user_id,

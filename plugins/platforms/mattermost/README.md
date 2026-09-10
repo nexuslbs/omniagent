@@ -98,8 +98,23 @@ All messages are JSON-Lines (one JSON object per line) over stdin/stdout. The pl
 
 ### Inbound Notification (plugin to OmniAgent)
 ```json
-{"method": "inbound_message", "params": {"channel_id": "...", "text": "...", ...}}
+{"method": "inbound_message", "params": {"resource_identifier": "...", "text": "...", "external_id": "...", "files": [], "metadata": {"parent_external_id": "...", "root_id": "...", "thread_id": "...", "user_id": "...", "channel_id": "...", "server_url": "..."}}}
 ```
+
+`metadata.parent_external_id` is the **protocol-level parent external id** of the
+inbound message: the platform-scoped id of the message/thread this message is a
+parented reply to. Each platform plugin owns the assignment (per-platform
+semantics):
+
+| Platform | `metadata.parent_external_id` |
+| --- | --- |
+| mattermost | thread root post id (Mattermost `post.root_id`); `null` for top-level channel messages |
+| telegram (`parent_by_chat`) | chat id (never a message id), absent when `parent_by_chat` is false (see `omni-plugins/platforms/telegram`) |
+
+Core consumes it to resolve `threads.parent_id` and to merge same-parent pending
+messages into a running thread as sub-prompts. `metadata.root_id` carries the
+**same value** as a one-release compatibility alias for cores that predate the
+rename; it will be dropped in a later release.
 
 ## Setup Mode
 

@@ -38,7 +38,8 @@ pub struct OutboundEnvelope {
     /// The cause (seq-0) message's external_id: used for threading replies.
     pub cause_external_id: Option<String>,
     /// If the cause message was itself a reply in a thread, this is the
-    /// thread root's external_id (e.g. root_id in Mattermost).
+    /// thread root's external_id, i.e. the protocol-level parent external id
+    /// assigned by the platform plugin (mattermost: root post id).
     pub cause_root_id: Option<String>,
     /// External id of the message this delivery must be sent as a reply to
     /// (e.g. the seq-0 message's Telegram message_id). Only set for FINAL
