@@ -22,7 +22,7 @@ Next-generation agent system built with Rust, PostgreSQL + pgvector, and MCP too
 ### 🔍 Hybrid Retrieval
 - **4-tier retrieval** controlled by profile `retrieval_aggressiveness` (0-3):
   - Level 1: ILIKE text search in messages + wiki text search (walkdir)
-  - Level 2+: pgvector semantic search (`<=>` cosine similarity on message embeddings) + Qdrant vector search on wiki content
+  - Level 2+: pgvector semantic search (`<=>` cosine similarity on message embeddings)
 - **Query classifier**: heuristic (Greeting/Command/FollowUp/Factual/ExternalQuery) gates whether retrieval runs
 - Re-ranking with recency and same-thread boosts
 
@@ -72,7 +72,6 @@ External MCP servers are configured via `MCP_SERVERS_CONFIG` (a JSON file listin
 ### Requirements
 
 - Rust (stable) + PostgreSQL 16 with pgvector
-- Qdrant (optional, for wiki/message vector search)
 
 ### Setup
 
@@ -401,8 +400,6 @@ Tasks without an explicit channel resolve through: task → board → `default_k
 | `vectorize_messages` | true | Enable message embedding for semantic recall |
 | `messages_vectorization_method` | `local` | `local` (sentence-transformers) or provider-based |
 | `messages_vectorization_interval` | 5 | Seconds between vectorization batches |
-| `vectorize_wiki` | false | Enable wiki embedding |
-| `wiki_vectorization_interval` | 3600 | Seconds between wiki re-vectorization |
 
 ## HTTP API
 

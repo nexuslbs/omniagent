@@ -288,16 +288,15 @@ async fn run_server() -> AppResult<()> {
         data_dir.clone(),
     );
 
-    // Spawn background vectorization workers (messages + wiki) if enabled.
+    // Spawn the background message vectorization worker if enabled.
     // vectorize_messages defaults to true in settings.yml, so the message
     // vectorizer populates embedding_vec for new messages automatically.
     {
         let vec_pool = pool.clone();
         let vec_config = shared_config.clone();
-        let vec_data_dir = data_dir.clone();
         tokio::spawn(async move {
-            tracing::info!("Spawning vectorization workers");
-            omniagent::vectorizer::spawn_vectorizers(vec_pool, vec_config, &vec_data_dir).await;
+            tracing::info!("Spawning vectorization worker");
+            omniagent::vectorizer::spawn_vectorizers(vec_pool, vec_config).await;
         });
     }
 

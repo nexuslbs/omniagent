@@ -1,9 +1,9 @@
 //! Vectorization module for OmniAgent.
 //!
-//! Provides background workers that generate embeddings for database messages
-//! and wiki content without involving the LLM agent. Supports a lightweight
-//! local hash-based vectorizer (character trigram feature hashing, 1536
-//! dimensions) and an external API-based vectorizer.
+//! Provides a background worker that generates embeddings for database messages
+//! without involving the LLM agent. Supports a lightweight local hash-based
+//! vectorizer (character trigram feature hashing, 1536 dimensions) and an
+//! external API-based vectorizer.
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
@@ -11,14 +11,12 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
-use crate::err_msg;
 use crate::err_str;
-use crate::error::{AppResult, ErrorContext};
+use crate::error::AppResult;
 
 // ---------------------------------------------------------------------------
 // EmbeddingProtocol
@@ -193,8 +191,7 @@ impl EmbeddingProtocol {
     }
 }
 
-/// Validate a configured embedding protocol for a vectorization target
-/// ("messages" or "wiki").
+/// Validate a configured embedding protocol for the message vectorization target.
 ///
 /// There is no hidden OpenAI-compatible default: an empty value means "not
 /// configured" and is an error (the worker is disabled with this message), and
@@ -389,39 +386,6 @@ pub fn vector_to_string(vec: &[f32]) -> String {
     format!("[{}]", parts.join(","))
 }
 
-// ---------------------------------------------------------------------------
-// State tracking for wiki worker
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WikiState {
-    /// Map from file path to last-known modification timestamp (epoch seconds).
-    files: std::collections::HashMap<String, u64>,
-}
-
-impl WikiState {
-    fn load(path: &Path) -> AppResult<Self> {
-        if path.exists() {
-            let content =
-                std::fs::read_to_string(path).ctx("Failed to read vectorizer state file")?;
-            serde_json::from_str(&content).ctx("Failed to parse vectorizer state")
-        } else {
-            Ok(Self {
-                files: std::collections::HashMap::new(),
-            })
-        }
-    }
-
-    fn save(&self, path: &Path) -> AppResult<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-        let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, content).ctx("Failed to write vectorizer state file")
-    }
-}
-
-// ---------------------------------------------------------------------------
 // MessageVectorizer worker
 // ---------------------------------------------------------------------------
 
@@ -487,248 +451,15 @@ impl MessageVectorizer {
     }
 }
 
-// ---------------------------------------------------------------------------
-// WikiVectorizer worker
-// ---------------------------------------------------------------------------
-
-/// Background worker that scans wiki .md files, generates embeddings, and
-/// upserts them into a Qdrant collection via REST API.
-pub struct WikiVectorizer {
-    wiki_dir: String,
-    qdrant_url: String,
-    vectorizer: Box<dyn Vectorizer>,
-    config: VectorizerConfig,
-    state_path: String,
-    client: reqwest::Client,
-}
-
-impl WikiVectorizer {
-    pub fn new(
-        wiki_dir: String,
-        qdrant_url: String,
-        vectorizer: Box<dyn Vectorizer>,
-        config: VectorizerConfig,
-        data_dir: &str,
-    ) -> Self {
-        let state_path = format!("{}/vectorizer-state.json", data_dir);
-        Self {
-            wiki_dir,
-            qdrant_url,
-            vectorizer,
-            config,
-            state_path,
-            client: reqwest::Client::new(),
-        }
-    }
-
-    pub async fn run(&self) {
-        // Ensure Qdrant wiki collection exists
-        if let Err(e) = self.ensure_collection().await {
-            tracing::error!(
-                "WikiVectorizer: failed to ensure Qdrant collection: {:?}",
-                e
-            );
-        }
-
-        let interval = Duration::from_secs(self.config.poll_interval_secs);
-        loop {
-            if let Err(e) = self.process_files().await {
-                tracing::error!("WikiVectorizer: file processing error: {:?}", e);
-            }
-            tokio::time::sleep(interval).await;
-        }
-    }
-
-    async fn ensure_collection(&self) -> AppResult<()> {
-        let url = format!("{}/collections/wiki", self.qdrant_url);
-        let body = serde_json::json!({
-            "name": "wiki",
-            "vectors": {
-                "size": 1536,
-                "distance": "Cosine"
-            }
-        });
-
-        let resp = self
-            .client
-            .put(&url)
-            .json(&body)
-            .send()
-            .await
-            .ctx("Failed to create Qdrant wiki collection")?;
-
-        if resp.status().is_success() || resp.status().as_u16() == 409 {
-            // 409 = already exists, which is fine
-            tracing::info!("WikiVectorizer: Qdrant wiki collection ready");
-            Ok(())
-        } else {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            Err(err_str!(
-                "Qdrant collection creation failed ({}): {}",
-                status,
-                text
-            ))
-        }
-    }
-
-    async fn process_files(&self) -> AppResult<()> {
-        let state_path = Path::new(&self.state_path);
-        let mut state = WikiState::load(state_path).unwrap_or(WikiState {
-            files: std::collections::HashMap::new(),
-        });
-
-        let wiki_dir = Path::new(&self.wiki_dir);
-        if !wiki_dir.exists() {
-            tracing::warn!(
-                "WikiVectorizer: wiki directory does not exist: {}",
-                self.wiki_dir
-            );
-            return Ok(());
-        }
-
-        // Collect .md files recursively
-        let mut entries = Vec::new();
-        for entry in walkdir::WalkDir::new(wiki_dir)
-            .follow_links(true)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            if entry.file_type().is_file() {
-                let path = entry.path();
-                if path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| e.eq_ignore_ascii_case("md"))
-                    .unwrap_or(false)
-                {
-                    entries.push(path.to_path_buf());
-                }
-            }
-        }
-
-        let mut changed_count = 0u64;
-        let mut points = Vec::new();
-
-        for path in &entries {
-            let path_str = path.to_string_lossy().to_string();
-            let metadata = std::fs::metadata(path)?;
-            let mtime = metadata
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-
-            // Check if file was modified since last scan
-            let last_mtime = state.files.get(&path_str).copied().unwrap_or(0);
-            if mtime <= last_mtime {
-                continue; // No change
-            }
-
-            // Read file content
-            let content = std::fs::read_to_string(path)
-                .ctx(format!("Failed to read wiki file: {}", path_str))?;
-
-            // Strip frontmatter (YAML/TOML between --- delimiters)
-            let body = strip_frontmatter(&content);
-
-            if body.trim().is_empty() {
-                tracing::debug!("WikiVectorizer: skipping empty file: {}", path_str);
-                state.files.insert(path_str.clone(), mtime);
-                continue;
-            }
-
-            // Generate embedding
-            let embedding = self.vectorizer.generate_embedding(body).await;
-
-            // Derive a deterministic ID from the path (must be unsigned for Qdrant)
-            let mut hasher = DefaultHasher::new();
-            path_str.hash(&mut hasher);
-            let point_id = hasher.finish();
-
-            // Derive a title from the filename
-            let title = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("untitled")
-                .to_string();
-
-            points.push(serde_json::json!({
-                "id": point_id,
-                "vector": embedding,
-                "payload": {
-                    "path": path_str,
-                    "title": title,
-                    "updated": mtime.to_string()
-                }
-            }));
-
-            state.files.insert(path_str, mtime);
-            changed_count += 1;
-        }
-
-        if points.is_empty() {
-            return Ok(());
-        }
-
-        // Upsert to Qdrant
-        let url = format!("{}/collections/wiki/points?wait=true", self.qdrant_url);
-        let payload = serde_json::json!({ "points": points });
-
-        // Qdrant 1.18+ uses PUT for upserting points
-        let resp = self
-            .client
-            .put(&url)
-            .json(&payload)
-            .send()
-            .await
-            .ctx("Failed to upsert wiki points to Qdrant")?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            err_msg!("Qdrant upsert failed ({}): {}", status, text);
-        }
-
-        // Save updated state
-        state.save(state_path)?;
-
-        tracing::info!(
-            "WikiVectorizer: upserted {} wiki documents to Qdrant",
-            changed_count
-        );
-
-        Ok(())
-    }
-}
-
-/// Strip YAML/TOML frontmatter delimited by `---` lines from markdown content.
-fn strip_frontmatter(content: &str) -> &str {
-    let content = content.trim_start();
-    if let Some(after) = content.strip_prefix("---") {
-        if let Some(end) = after.find("---") {
-            let after_stripped = &after[end + 3..];
-            return after_stripped.trim_start();
-        }
-    }
-    content
-}
-
-// ---------------------------------------------------------------------------
 // spawn_vectorizers
 // ---------------------------------------------------------------------------
 
-/// Spawn both vectorization workers as tokio tasks if enabled in config.
+/// Spawn the message vectorization worker as a tokio task if enabled in config.
 ///
 /// This function does not return until cancellation (i.e., it loops forever
 /// via `futures::future::pending()`). It is intended to be spawned as its own
 /// tokio task from main.
-pub async fn spawn_vectorizers(
-    pool: PgPool,
-    config: Arc<RwLock<crate::agent::AgentConfig>>,
-    data_dir: &str,
-) {
+pub async fn spawn_vectorizers(pool: PgPool, config: Arc<RwLock<crate::agent::AgentConfig>>) {
     struct MakeVectorizerConfig<'a> {
         api_url: &'a Option<String>,
         protocol: &'a str,
@@ -790,14 +521,6 @@ pub async fn spawn_vectorizers(
         messages_api_key,
         messages_api_model,
         messages_interval,
-        vectorize_wiki,
-        wiki_method,
-        wiki_api_url,
-        wiki_protocol,
-        wiki_api_key,
-        wiki_api_model,
-        wiki_interval,
-        qdrant_url,
     ) = {
         let cfg = config.read();
         (
@@ -808,14 +531,6 @@ pub async fn spawn_vectorizers(
             cfg.messages_vectorization_api_key.clone(),
             cfg.messages_vectorization_api_model.clone(),
             cfg.messages_vectorization_interval_secs,
-            cfg.vectorize_wiki,
-            cfg.wiki_vectorization_method.clone(),
-            cfg.wiki_vectorization_api_url.clone(),
-            cfg.wiki_vectorization_protocol.clone(),
-            cfg.wiki_vectorization_api_key.clone(),
-            cfg.wiki_vectorization_api_model.clone(),
-            cfg.wiki_vectorization_interval_secs,
-            String::new(), // Qdrant: moved to plugin concern
         )
     };
 
@@ -852,51 +567,6 @@ pub async fn spawn_vectorizers(
         }
     } else {
         tracing::info!("Message vectorization disabled");
-    }
-
-    // Spawn wiki vectorizer (with its own config)
-    if vectorize_wiki {
-        let wiki_config = VectorizerConfig {
-            method: wiki_method,
-            api_url: wiki_api_url,
-            protocol: wiki_protocol,
-            api_key: wiki_api_key,
-            api_model: wiki_api_model,
-            poll_interval_secs: wiki_interval,
-            ..Default::default()
-        };
-        let wiki_dir = format!(
-            "{}/profiles/{}/wiki",
-            data_dir,
-            crate::profile::default_profile_name()
-        );
-        match make_vectorizer(
-            &wiki_config.method,
-            "wiki",
-            MakeVectorizerConfig {
-                api_url: &wiki_config.api_url,
-                protocol: &wiki_config.protocol,
-                api_key: &wiki_config.api_key,
-                api_model: &wiki_config.api_model,
-            },
-        ) {
-            Ok(vectorizer) => {
-                let wiki_vec = WikiVectorizer::new(
-                    wiki_dir,
-                    qdrant_url.clone(),
-                    vectorizer,
-                    wiki_config,
-                    data_dir,
-                );
-                tokio::spawn(async move {
-                    tracing::info!("WikiVectorizer worker started");
-                    wiki_vec.run().await;
-                });
-            }
-            Err(e) => tracing::error!("Wiki vectorization disabled: {:?}", e),
-        }
-    } else {
-        tracing::info!("Wiki vectorization disabled");
     }
 
     // Keep running until cancelled (we never return)
@@ -1238,18 +908,8 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_protocol_rejects_unset_wiki() {
-        let err = resolve_protocol("wiki", "  ").unwrap_err();
-        let msg = format!("{:?}", err);
-        assert!(
-            msg.contains("wiki_vectorization_protocol is not set"),
-            "{msg}"
-        );
-    }
-
-    #[test]
     fn test_resolve_protocol_rejects_unknown() {
-        let err = resolve_protocol("wiki", "openai_compat").unwrap_err();
+        let err = resolve_protocol("messages", "openai_compat").unwrap_err();
         let msg = format!("{:?}", err);
         assert!(msg.contains("unknown embedding protocol"), "{msg}");
         assert!(msg.contains("vectorization disabled"), "{msg}");

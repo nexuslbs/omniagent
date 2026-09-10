@@ -193,7 +193,7 @@ pub struct AgentConfig {
     /// Default profile name (used at login / session start).
     pub default_profile: String,
 
-    // ── Vectorization (message/wiki background embedding workers) ──
+    // ── Vectorization (message background embedding worker) ──
     /// Whether the background message vectorizer runs (populates embedding_vec).
     pub vectorize_messages: bool,
     /// Embedding method for messages: "local" (HashVectorizer) or "api".
@@ -204,14 +204,6 @@ pub struct AgentConfig {
     pub messages_vectorization_api_model: Option<String>,
     /// Poll interval (seconds) between message vectorizer batch runs.
     pub messages_vectorization_interval_secs: u64,
-    /// Whether the background wiki vectorizer runs (Qdrant).
-    pub vectorize_wiki: bool,
-    pub wiki_vectorization_method: String,
-    pub wiki_vectorization_api_url: Option<String>,
-    pub wiki_vectorization_protocol: String,
-    pub wiki_vectorization_api_key: Option<String>,
-    pub wiki_vectorization_api_model: Option<String>,
-    pub wiki_vectorization_interval_secs: u64,
 }
 
 /// Shared context bundle used by channel_handler and process_thread.
@@ -350,15 +342,6 @@ impl AgentConfig {
             messages_vectorization_interval_secs: get("messages_vectorization_interval", "3600")
                 .parse()
                 .unwrap_or(3600),
-            vectorize_wiki: get("vectorize_wiki", "false").parse().unwrap_or(false),
-            wiki_vectorization_method: get("wiki_vectorization_method", "local"),
-            wiki_vectorization_api_url: opt_str(&get("wiki_vectorization_api_url", "")),
-            wiki_vectorization_protocol: get("wiki_vectorization_protocol", ""),
-            wiki_vectorization_api_key: opt_str(&get("wiki_vectorization_api_key", "")),
-            wiki_vectorization_api_model: opt_str(&get("wiki_vectorization_api_model", "")),
-            wiki_vectorization_interval_secs: get("wiki_vectorization_interval", "3600")
-                .parse()
-                .unwrap_or(3600),
         })
     }
 
@@ -471,15 +454,6 @@ impl AgentConfig {
             messages_vectorization_interval_secs: get("messages_vectorization_interval", "3600")
                 .parse()
                 .unwrap_or(3600),
-            vectorize_wiki: get("vectorize_wiki", "false").parse().unwrap_or(false),
-            wiki_vectorization_method: get("wiki_vectorization_method", "local"),
-            wiki_vectorization_api_url: opt_str(&get("wiki_vectorization_api_url", "")),
-            wiki_vectorization_protocol: get("wiki_vectorization_protocol", ""),
-            wiki_vectorization_api_key: opt_str(&get("wiki_vectorization_api_key", "")),
-            wiki_vectorization_api_model: opt_str(&get("wiki_vectorization_api_model", "")),
-            wiki_vectorization_interval_secs: get("wiki_vectorization_interval", "3600")
-                .parse()
-                .unwrap_or(3600),
         })
     }
 }
@@ -539,13 +513,6 @@ mod tests {
             messages_vectorization_api_key: None,
             messages_vectorization_api_model: None,
             messages_vectorization_interval_secs: 3600,
-            vectorize_wiki: false,
-            wiki_vectorization_method: "local".to_string(),
-            wiki_vectorization_api_url: None,
-            wiki_vectorization_protocol: "openai".to_string(),
-            wiki_vectorization_api_key: None,
-            wiki_vectorization_api_model: None,
-            wiki_vectorization_interval_secs: 3600,
         };
         assert_eq!(cfg.default_provider, "");
         assert_eq!(cfg.max_tokens, Some(32768));
@@ -618,13 +585,6 @@ mod tests {
             messages_vectorization_api_key: None,
             messages_vectorization_api_model: None,
             messages_vectorization_interval_secs: 0,
-            vectorize_wiki: false,
-            wiki_vectorization_method: String::new(),
-            wiki_vectorization_api_url: None,
-            wiki_vectorization_protocol: String::new(),
-            wiki_vectorization_api_key: None,
-            wiki_vectorization_api_model: None,
-            wiki_vectorization_interval_secs: 0,
         };
         // Verify a few key fields are accessible
         assert_eq!(cfg.database_url, "postgres://localhost:5432/omniagent");

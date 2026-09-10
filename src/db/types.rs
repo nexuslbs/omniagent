@@ -511,48 +511,6 @@ pub fn search_wiki_text(
         .collect()
 }
 
-/// Search wiki via Qdrant vector database.
-pub async fn search_wiki_qdrant(
-    qdrant_url: &str,
-    embedding: &[f32],
-    limit: usize,
-) -> crate::error::AppResult<Vec<(String, String, f64)>> {
-    use serde_json::json;
-
-    let client = reqwest::Client::new();
-    let payload = json!({
-        "vector": embedding,
-        "limit": limit as u64,
-        "with_payload": true,
-    });
-
-    let resp = client
-        .post(format!("{}/collections/wiki/points/search", qdrant_url))
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| {
-            crate::error::Error::Message(format!("Qdrant search request failed: {}", e))
-        })?;
-
-    let body: serde_json::Value = resp.json().await.map_err(|e| {
-        crate::error::Error::Message(format!("Qdrant search response parse failed: {}", e))
-    })?;
-
-    let mut results = Vec::new();
-    if let Some(points) = body["result"].as_array() {
-        for point in points {
-            let score = point["score"].as_f64().unwrap_or(0.0);
-            let payload = &point["payload"];
-            let path = payload["path"].as_str().unwrap_or("").to_string();
-            let title = payload["title"].as_str().unwrap_or("").to_string();
-            results.push((path, title, score));
-        }
-    }
-
-    Ok(results)
-}
-
 // ---------------------------------------------------------------------------
 // Re-exports from domain modules for backward compatibility
 // All `use crate::db::types as queries;` imports continue to work because
