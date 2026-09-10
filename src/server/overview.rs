@@ -271,8 +271,20 @@ async fn overview_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
 /// `row_to_json` and `json_agg`. This Rust version runs individual
 /// `sql_forge!()` queries for each section and assembles the response.
 async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // ── 1. KPIs ────────────────────────────────────────────────────────────
-    let kpis = match sql_forge!(
+    // Sections 1-8: all queries below are INDEPENDENT, so run them
+    // concurrently (tokio::join!) - the handler costs one round trip
+    // instead of the sum of N round trips. Error semantics unchanged.
+    let (
+        kpis_res,
+        hourly_rows_res,
+        status_dist_res,
+        token_trend_res,
+        recent_res,
+        channel_health_res,
+        top_tools_res,
+        kanban_snapshot_res,
+    ) = tokio::join!(
+        sql_forge!(
         KpiRow,
         r#"
         SELECT
@@ -295,22 +307,9 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
                 WHERE created_at >= date_trunc('day', NOW() - INTERVAL '1 day')
                   AND created_at < date_trunc('day', NOW())), 0)::bigint AS tokens_yesterday
         "#,
-    )
-    .fetch_one(&state.pool)
-    .await
-    {
-        Ok(row) => row,
-        Err(e) => {
-            error!("[dashboard] kpis query failed: {:?}", e);
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to fetch dashboard KPIs",
-            );
-        }
-    };
-
-    // ── 2. Hourly thread counts (7 days) ──────────────────────────────────
-    let hourly_rows = match sql_forge!(
+)
+    .fetch_one(&state.pool),
+        sql_forge!(
         HourlyRow,
         r#"
         SELECT
@@ -325,10 +324,141 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
         GROUP BY bucket
         ORDER BY bucket
         "#,
-    )
-    .fetch_all(&state.pool)
-    .await
-    {
+)
+    .fetch_all(&state.pool),
+        sql_forge!(
+        StatusDistRow,
+        r#"
+        SELECT COALESCE(t.status, 'unknown') AS status, COUNT(*)::bigint AS count
+        FROM threads t
+        GROUP BY t.status
+        ORDER BY count DESC
+        "#,
+)
+    .fetch_all(&state.pool),
+        sql_forge!(
+        TokenTrendRow,
+        r#"
+        SELECT
+            g::date::text AS day,
+            COALESCE(SUM(t.input_tokens + t.output_tokens), 0)::bigint AS tokens,
+            COALESCE(SUM(t.cached_tokens), 0)::bigint AS input_cache_hit,
+            COALESCE(SUM(GREATEST(t.input_tokens - t.cached_tokens, 0)), 0)::bigint AS input_cache_miss,
+            COALESCE(SUM(t.output_tokens), 0)::bigint AS output_tokens
+        FROM generate_series(
+            (NOW() - INTERVAL '13 days')::date,
+            NOW()::date,
+            INTERVAL '1 day'
+        ) g
+        LEFT JOIN threads t ON t.created_at::date = g::date
+        GROUP BY g::date
+        ORDER BY g::date
+        "#,
+)
+    .fetch_all(&state.pool),
+        sql_forge!(
+        OverviewRow,
+        r#"
+        SELECT
+            t.id,
+            t.channel_id,
+            t.id AS thread_id,
+            LEFT(COALESCE(m.content, ''), 200) AS content_preview,
+            COALESCE(t.status, 'unknown') AS status,
+            t.duration_ms AS processing_time_ms,
+            (t.input_tokens + t.output_tokens) AS total_tokens,
+            COALESCE(t.created_at, NOW()) AS created_at,
+            COALESCE(t.channel_id, 'unknown') AS channel_name,
+            t.model,
+            (SELECT COUNT(*) FROM messages sub WHERE sub.thread_id = t.id) AS thread_count
+        FROM threads t
+        JOIN messages m ON m.thread_id = t.id AND m.thread_sequence = 0
+        ORDER BY t.id DESC
+        LIMIT 10
+        "#,
+)
+    .fetch_all(&state.pool),
+        sql_forge!(
+        ChannelHealthRow,
+        r#"
+        SELECT
+            COALESCE(t.channel_id, 'unknown') AS name,
+            COUNT(*) FILTER (
+                WHERE t.created_at >= date_trunc('day', NOW()) AND t.status != 'system'
+            )::bigint AS threads_today,
+            COALESCE(AVG(t.duration_ms) FILTER (WHERE t.status = 'completed')::bigint, 0) AS avg_duration,
+            CASE
+                WHEN COUNT(*) FILTER (WHERE t.status != 'system') > 0
+                THEN ROUND(
+                    COUNT(*) FILTER (WHERE t.status = 'completed')::numeric
+                    / GREATEST(COUNT(*) FILTER (WHERE t.status != 'system'), 1), 2
+                )::float8
+                ELSE 0
+            END AS success_rate,
+            COALESCE(MAX(t.created_at)::text, '') AS last_activity
+        FROM threads t
+        GROUP BY t.channel_id
+        ORDER BY threads_today DESC
+        "#,
+)
+    .fetch_all(&state.pool),
+        sql_forge!(
+        TopToolRow,
+        r#"
+        SELECT
+            COALESCE(m.msg_subtype, 'unknown') AS tool,
+            COUNT(*)::bigint AS count
+        FROM messages m
+        WHERE m.msg_type = 'tool-result'
+            AND m.created_at >= NOW() - INTERVAL '7 days'
+        GROUP BY m.msg_subtype
+        ORDER BY count DESC
+        LIMIT 10
+        "#,
+)
+    .fetch_all(&state.pool),
+        sql_forge!(
+        KanbanSnapshotRow,
+        r#"
+        SELECT board, task_id, title, status, tags, changed_at
+        FROM (
+            SELECT DISTINCT ON (h.kanban_task_id)
+                COALESCE(t.board, '') AS board,
+                h.kanban_task_id AS task_id,
+                COALESCE(t.title, '') AS title,
+                COALESCE(t.status, '') AS status,
+                COALESCE((
+                    SELECT string_agg(kt.name, ',' ORDER BY kt.name)
+                    FROM task_tags tt
+                    JOIN kanban_tags kt ON kt.id = tt.tag_id
+                    WHERE tt.task_id = h.kanban_task_id
+                ), '') AS tags,
+                h.created_at::text AS changed_at
+            FROM kanban_history h
+            JOIN kanban_tasks t ON t.id = h.kanban_task_id
+            WHERE h.action = 'moved'
+            ORDER BY h.kanban_task_id, h.created_at DESC, h.id DESC
+        ) sub
+        ORDER BY sub.changed_at::timestamptz DESC
+        LIMIT 10
+        "#,
+)
+    .fetch_all(&state.pool),
+    );
+    // ── 1. KPIs ────────────────────────────────────────────────────────────
+    let kpis = match kpis_res {
+        Ok(row) => row,
+        Err(e) => {
+            error!("[dashboard] kpis query failed: {:?}", e);
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to fetch dashboard KPIs",
+            );
+        }
+    };
+
+    // ── 2. Hourly thread counts (7 days) ──────────────────────────────────
+    let hourly_rows = match hourly_rows_res {
         Ok(rows) => rows
             .into_iter()
             .map(|r| HourlyEntry {
@@ -349,18 +479,7 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
     };
 
     // ── 3. Status distribution ────────────────────────────────────────────
-    let status_dist = match sql_forge!(
-        StatusDistRow,
-        r#"
-        SELECT COALESCE(t.status, 'unknown') AS status, COUNT(*)::bigint AS count
-        FROM threads t
-        GROUP BY t.status
-        ORDER BY count DESC
-        "#,
-    )
-    .fetch_all(&state.pool)
-    .await
-    {
+    let status_dist = match status_dist_res {
         Ok(rows) => rows
             .into_iter()
             .map(|r| StatusDistEntry {
@@ -382,28 +501,7 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
     //   input_cache_hit  = SUM(cached_tokens)                 (input served from cache)
     //   input_cache_miss = SUM(input_tokens - cached_tokens)  (fresh input tokens)
     //   output_tokens    = SUM(output_tokens)                 (completion tokens)
-    let token_trend = match sql_forge!(
-        TokenTrendRow,
-        r#"
-        SELECT
-            g::date::text AS day,
-            COALESCE(SUM(t.input_tokens + t.output_tokens), 0)::bigint AS tokens,
-            COALESCE(SUM(t.cached_tokens), 0)::bigint AS input_cache_hit,
-            COALESCE(SUM(GREATEST(t.input_tokens - t.cached_tokens, 0)), 0)::bigint AS input_cache_miss,
-            COALESCE(SUM(t.output_tokens), 0)::bigint AS output_tokens
-        FROM generate_series(
-            (NOW() - INTERVAL '13 days')::date,
-            NOW()::date,
-            INTERVAL '1 day'
-        ) g
-        LEFT JOIN threads t ON t.created_at::date = g::date
-        GROUP BY g::date
-        ORDER BY g::date
-        "#,
-    )
-    .fetch_all(&state.pool)
-    .await
-    {
+    let token_trend = match token_trend_res {
         Ok(rows) => rows
             .into_iter()
             .map(|r| TokenTrendEntry {
@@ -424,30 +522,7 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
     };
 
     // ── 5. Recent activity (10 threads) ───────────────────────────────────
-    let recent = match sql_forge!(
-        OverviewRow,
-        r#"
-        SELECT
-            t.id,
-            t.channel_id,
-            t.id AS thread_id,
-            LEFT(COALESCE(m.content, ''), 200) AS content_preview,
-            COALESCE(t.status, 'unknown') AS status,
-            t.duration_ms AS processing_time_ms,
-            (t.input_tokens + t.output_tokens) AS total_tokens,
-            COALESCE(t.created_at, NOW()) AS created_at,
-            COALESCE(t.channel_id, 'unknown') AS channel_name,
-            t.model,
-            (SELECT COUNT(*) FROM messages sub WHERE sub.thread_id = t.id) AS thread_count
-        FROM threads t
-        JOIN messages m ON m.thread_id = t.id AND m.thread_sequence = 0
-        ORDER BY t.id DESC
-        LIMIT 10
-        "#,
-    )
-    .fetch_all(&state.pool)
-    .await
-    {
+    let recent = match recent_res {
         Ok(rows) => rows
             .into_iter()
             .map(|r| {
@@ -480,32 +555,7 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
     };
 
     // ── 6. Channel health ─────────────────────────────────────────────────
-    let channel_health = match sql_forge!(
-        ChannelHealthRow,
-        r#"
-        SELECT
-            COALESCE(t.channel_id, 'unknown') AS name,
-            COUNT(*) FILTER (
-                WHERE t.created_at >= date_trunc('day', NOW()) AND t.status != 'system'
-            )::bigint AS threads_today,
-            COALESCE(AVG(t.duration_ms) FILTER (WHERE t.status = 'completed')::bigint, 0) AS avg_duration,
-            CASE
-                WHEN COUNT(*) FILTER (WHERE t.status != 'system') > 0
-                THEN ROUND(
-                    COUNT(*) FILTER (WHERE t.status = 'completed')::numeric
-                    / GREATEST(COUNT(*) FILTER (WHERE t.status != 'system'), 1), 2
-                )::float8
-                ELSE 0
-            END AS success_rate,
-            COALESCE(MAX(t.created_at)::text, '') AS last_activity
-        FROM threads t
-        GROUP BY t.channel_id
-        ORDER BY threads_today DESC
-        "#,
-    )
-    .fetch_all(&state.pool)
-    .await
-    {
+    let channel_health = match channel_health_res {
         Ok(rows) => rows
             .into_iter()
             .map(|r| ChannelHealthEntry {
@@ -530,23 +580,7 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
     // name); the tool-call messages ('tool' / 'multi-tool') leave msg_subtype
     // NULL, which is why the previous msg_type='tool' query rendered
     // "unknown" for every row.
-    let top_tools = match sql_forge!(
-        TopToolRow,
-        r#"
-        SELECT
-            COALESCE(m.msg_subtype, 'unknown') AS tool,
-            COUNT(*)::bigint AS count
-        FROM messages m
-        WHERE m.msg_type = 'tool-result'
-            AND m.created_at >= NOW() - INTERVAL '7 days'
-        GROUP BY m.msg_subtype
-        ORDER BY count DESC
-        LIMIT 10
-        "#,
-    )
-    .fetch_all(&state.pool)
-    .await
-    {
+    let top_tools = match top_tools_res {
         Ok(rows) => rows
             .into_iter()
             .map(|r| TopToolEntry {
@@ -568,35 +602,7 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
     // 'moved'). Show the last changed tasks, newest first, with the board,
     // task name, CURRENT status (from kanban_tasks), tags and the
     // change timestamp.
-    let kanban_snapshot = match sql_forge!(
-        KanbanSnapshotRow,
-        r#"
-        SELECT board, task_id, title, status, tags, changed_at
-        FROM (
-            SELECT DISTINCT ON (h.kanban_task_id)
-                COALESCE(t.board, '') AS board,
-                h.kanban_task_id AS task_id,
-                COALESCE(t.title, '') AS title,
-                COALESCE(t.status, '') AS status,
-                COALESCE((
-                    SELECT string_agg(kt.name, ',' ORDER BY kt.name)
-                    FROM task_tags tt
-                    JOIN kanban_tags kt ON kt.id = tt.tag_id
-                    WHERE tt.task_id = h.kanban_task_id
-                ), '') AS tags,
-                h.created_at::text AS changed_at
-            FROM kanban_history h
-            JOIN kanban_tasks t ON t.id = h.kanban_task_id
-            WHERE h.action = 'moved'
-            ORDER BY h.kanban_task_id, h.created_at DESC, h.id DESC
-        ) sub
-        ORDER BY sub.changed_at::timestamptz DESC
-        LIMIT 10
-        "#,
-    )
-    .fetch_all(&state.pool)
-    .await
-    {
+    let kanban_snapshot = match kanban_snapshot_res {
         Ok(rows) => rows
             .into_iter()
             .map(|r| KanbanSnapshotEntry {

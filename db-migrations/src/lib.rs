@@ -931,6 +931,43 @@ async fn create_indexes(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // Messages: newest message per thread (threads list "last_message") and
+    // per-thread message counts. Without it both run a bitmap/index scan plus
+    // a sort over EVERY message of the thread on every list row.
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_messages_thread_id_desc
+            ON messages(thread_id, id DESC);
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Messages: sub-cause reverse lookup (threads list "merged_into_thread_id":
+    // WHERE msg_type='sub_cause' AND original_thread_id = ?). Without it the
+    // correlated subquery sequentially scans the whole messages table per list
+    // row (3.6 GB / 107k rows in production -> ~1.4 s for a 50-row page).
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_messages_subcause_original_thread
+            ON messages(original_thread_id) WHERE msg_type = 'sub_cause';
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Messages filter dropdowns (GET /messages/filters): the handler runs a
+    // SELECT DISTINCT per column over the WHOLE messages table. Without an
+    // index each one is a full heap scan, which dominates that endpoint on a
+    // large table (3.6 GB in production).
+    for stmt in [
+        r#"CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role);"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_messages_msg_type ON messages(msg_type);"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_messages_msg_subtype ON messages(msg_subtype);"#,
+    ] {
+        sqlx::query(stmt).execute(pool).await?;
+    }
+
     // Threads: channel + status queries
     sqlx::query(
         r#"

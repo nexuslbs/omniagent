@@ -184,7 +184,10 @@ async fn list_threads_handler(
     let cause = params.cause.unwrap_or_default();
 
     // ── Count ──
-    let total = match sql_forge!(
+    // COUNT and the page query are INDEPENDENT: build both futures first and
+    // await them together (tokio::join!) so the handler takes max(count,
+    // page) instead of count + page.
+    let count_fut = sql_forge!(
         CountRow,
         r#"
         SELECT COUNT(*) AS total
@@ -202,20 +205,45 @@ async fn list_threads_handler(
           :id = params.id.unwrap_or(0),
           :parent_id = params.parent_id.unwrap_or(0) )
     )
-    .fetch_one(&state.pool)
-    .await
-    {
-        Ok(row) => row.total.unwrap_or(0),
-        Err(e) => {
-            error!("[threads] count query failed: {:?}", e);
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to count threads");
-        }
-    };
+    .fetch_one(&state.pool);
 
-    // ── Data (two ORDER BY variants) ──
-    let threads = match sql_forge!(
+    // ── Data ──
+    let data_fut = sql_forge!(
         ThreadListRow,
         r#"
+        WITH page AS MATERIALIZED (
+            SELECT
+                t.id,
+                t.channel_id,
+                t.status,
+                t.cause,
+                t.profile,
+                t.provider,
+                t.model,
+                t.created_at,
+                t.ended_at,
+                t.duration_ms,
+                t.input_tokens,
+                t.output_tokens,
+                t.cached_tokens,
+                t.iterations,
+                t.parent_id,
+                t.plan,
+                t.started_at,
+                t.task_id,
+                t.schedule_task_id,
+                t.workflow_step,
+                t.workflow_id
+            FROM threads t
+            WHERE 1=1
+              AND (:status = '' OR t.status = ANY(string_to_array(:status, ',')))
+              AND (:cause = '' OR t.cause = :cause)
+              AND (:channel_id = '' OR t.channel_id = :channel_id)
+              AND (:id = 0::bigint OR t.id = :id)
+              AND (:parent_id = 0::bigint OR t.parent_id = :parent_id)
+            ORDER BY t.id DESC
+            LIMIT :limit_val OFFSET :offset_val
+        )
         SELECT
             t.id,
             t.channel_id,
@@ -233,7 +261,7 @@ async fn list_threads_handler(
             t.cached_tokens,
             t.iterations,
             t.parent_id,
-            (SELECT sc.thread_id FROM messages sc WHERE sc.msg_type = 'sub_cause' AND sc.original_thread_id = t.id LIMIT 1) AS merged_into_thread_id,
+            mi.thread_id AS merged_into_thread_id,
             t.plan,
             t.started_at,
             m0.content AS cause_content_preview,
@@ -245,19 +273,35 @@ async fn list_threads_handler(
             t.workflow_id AS workflow_id,
             m0.external_id,
             kt.board AS kanban_board,
-            COALESCE((SELECT COUNT(*) FROM messages sub WHERE sub.thread_id = t.id), 0) AS msg_count,
-            (SELECT content FROM messages sub2 WHERE sub2.thread_id = t.id ORDER BY sub2.id DESC LIMIT 1) AS last_message
-        FROM threads t
-        LEFT JOIN messages m0 ON m0.thread_id = t.id AND m0.thread_sequence = 0
+            COALESCE(cnt.msg_count, 0) AS msg_count,
+            lm.content AS last_message
+        FROM page t
+        LEFT JOIN LATERAL (
+            SELECT m.content, m.msg_type, m.msg_subtype, m.external_id
+            FROM messages m
+            WHERE m.thread_id = t.id AND m.thread_sequence = 0
+            LIMIT 1
+        ) m0 ON true
+        LEFT JOIN LATERAL (
+            SELECT sc.thread_id
+            FROM messages sc
+            WHERE sc.msg_type = 'sub_cause' AND sc.original_thread_id = t.id
+            LIMIT 1
+        ) mi ON true
+        LEFT JOIN LATERAL (
+            SELECT COUNT(*) AS msg_count
+            FROM messages sub
+            WHERE sub.thread_id = t.id
+        ) cnt ON true
+        LEFT JOIN LATERAL (
+            SELECT s2.content
+            FROM messages s2
+            WHERE s2.thread_id = t.id
+            ORDER BY s2.id DESC
+            LIMIT 1
+        ) lm ON true
         LEFT JOIN kanban_tasks kt ON kt.id = t.task_id
-        WHERE 1=1
-          AND (:status = '' OR t.status = ANY(string_to_array(:status, ',')))
-          AND (:cause = '' OR t.cause = :cause)
-          AND (:channel_id = '' OR t.channel_id = :channel_id)
-          AND (:id = 0::bigint OR t.id = :id)
-          AND (:parent_id = 0::bigint OR t.parent_id = :parent_id)
         ORDER BY t.id DESC
-        LIMIT :limit_val OFFSET :offset_val
         "#,
         ( :status = &status,
           :cause = &cause,
@@ -267,16 +311,23 @@ async fn list_threads_handler(
           :limit_val = limit,
           :offset_val = offset )
     )
-    .fetch_all(&state.pool)
-    .await
-    {
+    .fetch_all(&state.pool);
+
+    let (count_res, data_res) = tokio::join!(count_fut, data_fut);
+
+    let total = match count_res {
+        Ok(row) => row.total.unwrap_or(0),
+        Err(e) => {
+            error!("[threads] count query failed: {:?}", e);
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to count threads");
+        }
+    };
+
+    let threads = match data_res {
         Ok(rows) => rows,
         Err(e) => {
             error!("[threads] data query failed: {:?}", e);
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to fetch threads",
-            );
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch threads");
         }
     };
 

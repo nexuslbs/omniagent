@@ -268,7 +268,8 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
         .route("/actions/{id}/run", post(actions::run_action_handler))
         // ── Cron run endpoint ──
         .route("/run-cron/{schedule_id}", post(run_cron_handler))
-        .with_state(app_state);
+        .with_state(app_state)
+        .layer(axum::middleware::from_fn(timing_middleware));
 
     let addr = format!("{}:{}", config.host, config.port);
     info!("Starting HTTP server on {addr}");
@@ -1480,6 +1481,44 @@ async fn run_cron_handler(
 #[derive(Deserialize)]
 struct RunCronParams {
     force: Option<bool>,
+}
+
+// ---------------------------------------------------------------------------
+// Internal latency budget + timing middleware
+// ---------------------------------------------------------------------------
+
+/// Internal server-side latency budget: every API call must be handled in
+/// under this many milliseconds (DB + business logic + serialization,
+/// excluding client network time). The middleware below measures it.
+const LATENCY_BUDGET_MS: u128 = 500;
+
+/// Measures the time spent INSIDE the omniagent process serving a request and
+/// exposes it as the `x-response-time-ms` response header (server-side latency
+/// without network effects - the measurement surface for the per-endpoint
+/// latency inventory). Requests over [`LATENCY_BUDGET_MS`] are logged as
+/// warnings so slow endpoints stay visible.
+async fn timing_middleware(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let started = std::time::Instant::now();
+    let mut response = next.run(request).await;
+    let elapsed_ms = started.elapsed().as_millis();
+    if let Ok(value) = axum::http::HeaderValue::from_str(&elapsed_ms.to_string()) {
+        response.headers_mut().insert("x-response-time-ms", value);
+    }
+    if elapsed_ms > LATENCY_BUDGET_MS {
+        tracing::warn!(
+            "[latency] {} {} took {} ms (internal budget {} ms)",
+            method,
+            path,
+            elapsed_ms,
+            LATENCY_BUDGET_MS
+        );
+    }
+    response
 }
 
 #[cfg(test)]

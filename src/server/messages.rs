@@ -202,8 +202,18 @@ fn fmt_ts(ts: &chrono::DateTime<chrono::Utc>) -> String {
 // ---------------------------------------------------------------------------
 
 async fn filters_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // Channels with message count
-    let channels = match sql_forge!(
+    // Filter option queries: all queries below are INDEPENDENT, so run them
+    // concurrently (tokio::join!) - the handler costs one round trip
+    // instead of the sum of N round trips. Error semantics unchanged.
+    let (
+        channels_res,
+        roles_res,
+        types_res,
+        subtypes_res,
+        providers_res,
+        models_res,
+    ) = tokio::join!(
+        sql_forge!(
         ChannelCountRow,
         r#"
         SELECT t.channel_id AS id, t.channel_id AS name, COUNT(t.id) AS count
@@ -211,10 +221,36 @@ async fn filters_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
         GROUP BY t.channel_id
         ORDER BY t.channel_id
         "#,
-    )
-    .fetch_all(&state.pool)
-    .await
-    {
+)
+    .fetch_all(&state.pool),
+        sql_forge!(
+        RoleRow,
+        r#"SELECT DISTINCT role FROM messages WHERE role IS NOT NULL ORDER BY role"#,
+)
+    .fetch_all(&state.pool),
+        sql_forge!(
+        TypeRow,
+        r#"SELECT DISTINCT msg_type FROM messages WHERE msg_type IS NOT NULL ORDER BY msg_type"#,
+)
+    .fetch_all(&state.pool),
+        sql_forge!(
+        SubtypeRow,
+        r#"SELECT DISTINCT msg_subtype FROM messages WHERE msg_subtype IS NOT NULL AND msg_subtype != '' ORDER BY msg_subtype"#,
+)
+    .fetch_all(&state.pool),
+        sql_forge!(
+        ProviderRow,
+        r#"SELECT DISTINCT provider FROM threads WHERE provider IS NOT NULL ORDER BY provider"#,
+)
+    .fetch_all(&state.pool),
+        sql_forge!(
+        ModelRow,
+        r#"SELECT DISTINCT model FROM threads WHERE model IS NOT NULL ORDER BY model"#,
+)
+    .fetch_all(&state.pool),
+    );
+    // Channels with message count
+    let channels = match channels_res {
         Ok(rows) => rows
             .into_iter()
             .map(|r| ChannelFilterEntry {
@@ -233,13 +269,7 @@ async fn filters_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
     };
 
     // Roles
-    let roles = match sql_forge!(
-        RoleRow,
-        r#"SELECT DISTINCT role FROM messages WHERE role IS NOT NULL ORDER BY role"#,
-    )
-    .fetch_all(&state.pool)
-    .await
-    {
+    let roles = match roles_res {
         Ok(rows) => rows.into_iter().filter_map(|r| r.role).collect::<Vec<_>>(),
         Err(e) => {
             error!("[messages/filters] roles query failed: {:?}", e);
@@ -251,13 +281,7 @@ async fn filters_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
     };
 
     // Message types
-    let types = match sql_forge!(
-        TypeRow,
-        r#"SELECT DISTINCT msg_type FROM messages WHERE msg_type IS NOT NULL ORDER BY msg_type"#,
-    )
-    .fetch_all(&state.pool)
-    .await
-    {
+    let types = match types_res {
         Ok(rows) => rows
             .into_iter()
             .filter_map(|r| r.msg_type)
@@ -272,13 +296,7 @@ async fn filters_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
     };
 
     // Subtypes
-    let subtypes = match sql_forge!(
-        SubtypeRow,
-        r#"SELECT DISTINCT msg_subtype FROM messages WHERE msg_subtype IS NOT NULL AND msg_subtype != '' ORDER BY msg_subtype"#,
-    )
-    .fetch_all(&state.pool)
-    .await
-    {
+    let subtypes = match subtypes_res {
         Ok(rows) => rows
             .into_iter()
             .filter_map(|r| r.msg_subtype)
@@ -293,13 +311,7 @@ async fn filters_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
     };
 
     // Providers
-    let providers = match sql_forge!(
-        ProviderRow,
-        r#"SELECT DISTINCT provider FROM threads WHERE provider IS NOT NULL ORDER BY provider"#,
-    )
-    .fetch_all(&state.pool)
-    .await
-    {
+    let providers = match providers_res {
         Ok(rows) => rows
             .into_iter()
             .filter_map(|r| r.provider)
@@ -314,13 +326,7 @@ async fn filters_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
     };
 
     // Models
-    let models = match sql_forge!(
-        ModelRow,
-        r#"SELECT DISTINCT model FROM threads WHERE model IS NOT NULL ORDER BY model"#,
-    )
-    .fetch_all(&state.pool)
-    .await
-    {
+    let models = match models_res {
         Ok(rows) => rows.into_iter().filter_map(|r| r.model).collect::<Vec<_>>(),
         Err(e) => {
             error!("[messages/filters] models query failed: {:?}", e);
