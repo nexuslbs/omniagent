@@ -360,15 +360,16 @@ async fn schedule_to_entry(
     // Latest recorded run (schedule_runs): makes the outcome of a manual or
     // scheduled action run visible on the job response, so a trigger is
     // never indistinguishable from silence.
-    let latest_run: Option<(chrono::DateTime<chrono::Utc>, String, Option<i32>)> = sqlx::query_as(
-        "SELECT started_at, status, exit_code FROM schedule_runs \
+    let latest_run: Option<(chrono::DateTime<chrono::Utc>, String, Option<i32>)> =
+        sqlx::query_as(
+            "SELECT started_at, status, exit_code FROM schedule_runs \
              WHERE task_key = $1 ORDER BY started_at DESC LIMIT 1",
-    )
-    .bind(key)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
+        )
+        .bind(key)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
     let (last_run_at, last_run_status, last_run_exit_code) = match latest_run {
         Some((ts, status, exit_code)) => (Some(fmt_ts(&ts)), Some(status), exit_code),
         None => (None, None, None),
