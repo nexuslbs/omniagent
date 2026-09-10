@@ -1397,12 +1397,16 @@ async fn call_prompt_context(
         .iter()
         .map(|t| t.name.clone())
         .collect();
+    // V-5: forward the platform-declared formatting hint exactly like the
+    // agent executor does.
+    let platform_hint = crate::agent::helpers::platform_prompt_hint(app_context, platform).await;
     let mcp_call = McpToolCall {
         id: "preview-context".to_string(),
         name: prompt_tool_name,
         arguments: serde_json::json!({
             "profile_name": profile_name,
             "platform": platform,
+            "platform_hint": platform_hint,
             "user_message": user_message,
             "tool_names": tool_names,
             "thread_id": thread_id,

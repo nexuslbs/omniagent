@@ -106,21 +106,32 @@ fn build_active_profile_hint(profile_name: &str) -> String {
     format!("Active profile: {profile_name}.")
 }
 
-fn build_platform_hint(platform: &str) -> Option<&'static str> {
-    match platform {
-        "telegram" => Some("You are on a text messaging communication platform, Telegram. \
-Standard markdown is automatically converted to Telegram format. Supported: **bold**, \
-*italic*, ~~strikethrough~~, ||spoiler||, `inline code`, ```code blocks```, [links](url), \
-and ## headers. Telegram has NO table syntax: prefer bullet lists or labeled key: value \
-pairs over pipe tables (any tables you do emit are auto-rewritten into row-group bullets, \
-which you can produce directly for cleaner output). You can send media files natively: \
-to deliver a file to the user, include MEDIA:/absolute/path/to/file in your response. \
-Images (.png, .jpg, .webp) appear as photos, audio (.ogg) sends as voice bubbles, and \
-videos (.mp4) play inline. You can also include image URLs in markdown format ![alt](url) \
-and they will be sent as native photos."),
-        "mattermost" => Some("You are on a Mattermost messaging platform. Standard markdown formatting is supported: **bold**, *italic*, `code`, ```code blocks```, [links](url), headings, lists, tables, blockquotes. Mattermost supports most GFM (GitHub Flavored Markdown)."),
-        _ => None,
+/// Generic, platform-agnostic formatting fallback.
+///
+/// Used when a platform names itself but its plugin declares NO `prompt_hint`:
+/// the agent then still receives basic formatting guidance instead of silently
+/// losing it (audit V-5: the old catch-all returned a silent `None`).
+pub const GENERIC_PLATFORM_HINT: &str = "You are on a messaging platform. Use standard markdown formatting: **bold**, *italic*, `code`, ```code blocks```, [links](url), headings, lists, blockquotes. Avoid platform-specific syntax that may not be supported.";
+
+/// The formatting hint for the `platform` prompt section.
+///
+/// V-5: the hint is OWNED by the platform plugin, which advertises it as
+/// `capabilities.prompt_hint` in its `initialize` result; the core forwards it
+/// to this tool as `declared`. This function NEVER maps a platform NAME to a
+/// hint:
+///   1. a declared (non-empty) hint wins (the plugin owns its rules),
+///   2. otherwise a named platform gets the generic markdown fallback so a
+///      platform this tool has never heard of degrades gracefully,
+///   3. an unnamed platform (empty string) gets no section at all, keeping the
+///      historical output unchanged.
+fn build_platform_hint(platform: &str, declared: Option<&str>) -> Option<String> {
+    if let Some(hint) = declared.map(str::trim).filter(|h| !h.is_empty()) {
+        return Some(hint.to_string());
     }
+    if platform.trim().is_empty() {
+        return None;
+    }
+    Some(GENERIC_PLATFORM_HINT.to_string())
 }
 
 // ── Memory readings ─────────────────────────────────────────────────────
@@ -174,6 +185,7 @@ pub fn truncate_content_pub(content: &str, max_chars: usize) -> String {
 pub fn build_system_prompt(
     memory_store: &MemoryStore,
     platform: &str,
+    platform_hint: Option<&str>,
     system_message: Option<&str>,
     profile_name: &str,
     tool_names: &[String],
@@ -182,6 +194,7 @@ pub fn build_system_prompt(
     let parts = build_system_prompt_parts(
         memory_store,
         platform,
+        platform_hint,
         system_message,
         profile_name,
         tool_names,
@@ -194,6 +207,7 @@ pub fn build_system_prompt(
 pub fn build_system_prompt_parts(
     memory_store: &MemoryStore,
     platform: &str,
+    platform_hint: Option<&str>,
     system_message: Option<&str>,
     profile_name: &str,
     tool_names: &[String],
@@ -202,6 +216,7 @@ pub fn build_system_prompt_parts(
     build_system_prompt_sections(
         memory_store,
         platform,
+        platform_hint,
         system_message,
         profile_name,
         tool_names,
@@ -225,6 +240,7 @@ pub fn build_system_prompt_parts(
 pub fn build_system_prompt_sections(
     memory_store: &MemoryStore,
     platform: &str,
+    platform_hint: Option<&str>,
     system_message: Option<&str>,
     profile_name: &str,
     tool_names: &[String],
@@ -253,8 +269,8 @@ pub fn build_system_prompt_sections(
     }
 
     // Tier 3: Volatile (platform 200, memory last)
-    if let Some(hint) = build_platform_hint(platform) {
-        sections.push(("platform".to_string(), 200, hint.to_string()));
+    if let Some(hint) = build_platform_hint(platform, platform_hint) {
+        sections.push(("platform".to_string(), 200, hint));
     }
 
     let memory_section = read_memory_section(memory_store, config.memory_max_chars);
@@ -396,6 +412,7 @@ mod tests {
         let sections = build_system_prompt_sections(
             &store,
             "mattermost",
+            None,
             Some("system override"),
             "omni",
             &["fetch".to_string(), "filesystem_read".to_string()],
@@ -404,6 +421,7 @@ mod tests {
         let parts = build_system_prompt_parts(
             &store,
             "mattermost",
+            None,
             Some("system override"),
             "omni",
             &["fetch".to_string(), "filesystem_read".to_string()],
@@ -425,6 +443,7 @@ mod tests {
         let sections = build_system_prompt_sections(
             &store,
             "telegram",
+            None,
             None,
             "omni",
             &[],
@@ -452,6 +471,7 @@ mod tests {
             &store,
             "mattermost",
             None,
+            None,
             "omni",
             &[],
             &PromptBuilderConfig::default(),
@@ -478,6 +498,7 @@ mod tests {
             &store,
             "mattermost",
             None,
+            None,
             "omni",
             &[],
             &PromptBuilderConfig::default(),
@@ -502,7 +523,8 @@ mod tests {
         let store = MemoryStore::new(".");
         let sections = build_system_prompt_sections(
             &store,
-            "cli",
+            "",
+            None,
             Some("custom deployment msg"),
             "omni",
             &[],
@@ -533,6 +555,7 @@ mod clear_delete_directive_tests {
             &store,
             "mattermost",
             None,
+            None,
             "omni",
             &[],
             &PromptBuilderConfig::default(),
@@ -548,4 +571,96 @@ mod clear_delete_directive_tests {
             "clear/delete clause must demand execute + verify end state on the target"
         );
     }
+}
+
+#[cfg(test)]
+mod platform_hint_tests {
+    use super::*;
+
+    /// The exact string the Telegram platform plugin declares in its
+    /// `initialize` capabilities (previously hardcoded here).
+    const TELEGRAM_DECLARED_HINT: &str = "You are on a text messaging communication platform, Telegram. Standard markdown is automatically converted to Telegram format. Supported: **bold**, *italic*, ~~strikethrough~~, ||spoiler||, `inline code`, ```code blocks```, [links](url), and ## headers. Telegram has NO table syntax: prefer bullet lists or labeled key: value pairs over pipe tables (any tables you do emit are auto-rewritten into row-group bullets, which you can produce directly for cleaner output). You can send media files natively: to deliver a file to the user, include MEDIA:/absolute/path/to/file in your response. Images (.png, .jpg, .webp) appear as photos, audio (.ogg) sends as voice bubbles, and videos (.mp4) play inline. You can also include image URLs in markdown format ![alt](url) and they will be sent as native photos.";
+
+    fn platform_section(platform: &str, declared: Option<&str>) -> Option<String> {
+        let store = MemoryStore::new(".");
+        let sections = build_system_prompt_sections(
+            &store,
+            platform,
+            declared,
+            None,
+            "omni",
+            &[],
+            &PromptBuilderConfig::default(),
+        );
+        sections
+            .into_iter()
+            .find(|(name, _, _)| name == "platform")
+            .map(|(_, _, text)| text)
+    }
+
+    /// (a) The Telegram hint now arrives through the DESCRIPTOR path: the
+    /// string the platform plugin declares is rendered verbatim, and with
+    /// nothing declared it is NOT the plugin-owned text any more (the
+    /// hardcoded table is gone).
+    #[test]
+    fn telegram_hint_arrives_via_descriptor_path() {
+        assert_eq!(
+            platform_section("telegram", Some(TELEGRAM_DECLARED_HINT)).as_deref(),
+            Some(TELEGRAM_DECLARED_HINT)
+        );
+        let fallback = platform_section("telegram", None).expect("generic fallback");
+        assert_ne!(fallback, TELEGRAM_DECLARED_HINT);
+        assert_eq!(fallback, GENERIC_PLATFORM_HINT);
+    }
+
+    /// (b) A platform this tool has never heard of still renders ITS OWN
+    /// declared hint: no platform-name matching anywhere.
+    #[test]
+    fn unknown_platform_renders_its_declared_hint() {
+        let declared = "Use IRC colors and keep lines under 400 chars.";
+        assert_eq!(
+            platform_section("irc-fake", Some(declared)).as_deref(),
+            Some(declared)
+        );
+        // A whitespace-only declaration counts as "nothing declared".
+        assert_eq!(
+            platform_section("irc-fake", Some("   ")).as_deref(),
+            Some(GENERIC_PLATFORM_HINT)
+        );
+    }
+
+    /// (c) A named platform with no declared hint degrades to the generic
+    /// markdown note instead of silently losing all formatting guidance.
+    #[test]
+    fn platform_without_hint_gets_generic_fallback() {
+        assert_eq!(
+            platform_section("signal", None).as_deref(),
+            Some(GENERIC_PLATFORM_HINT)
+        );
+    }
+
+    /// (d) A platform-less run (empty platform name) keeps the historical
+    /// output: no platform section at all - unless the plugin declared one.
+    #[test]
+    fn platform_less_run_has_no_platform_section() {
+        assert_eq!(platform_section("", None), None);
+        assert_eq!(
+            platform_section("", Some("declared rules")).as_deref(),
+            Some("declared rules")
+        );
+    }
+
+    /// (e) byte-identical output for Mattermost: the plugin-declared string is
+    /// exactly what the old hardcoded table produced.
+    #[test]
+    fn mattermost_declared_hint_is_byte_identical() {
+        assert_eq!(
+            platform_section("mattermost", Some(MATTERMOST_DECLARED_HINT)).as_deref(),
+            Some(MATTERMOST_DECLARED_HINT)
+        );
+        assert!(MATTERMOST_DECLARED_HINT.contains("GitHub Flavored Markdown"));
+    }
+
+    /// The Mattermost string the plugin declares (previously hardcoded here).
+    const MATTERMOST_DECLARED_HINT: &str = "You are on a Mattermost messaging platform. Standard markdown formatting is supported: **bold**, *italic*, `code`, ```code blocks```, [links](url), headings, lists, tables, blockquotes. Mattermost supports most GFM (GitHub Flavored Markdown).";
 }

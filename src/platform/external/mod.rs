@@ -472,6 +472,17 @@ pub struct PlatformCapabilities {
     /// (`/new`).
     #[serde(default)]
     pub commands: HashMap<String, Vec<String>>,
+    /// PROMPT-FORMATTING capability: the platform's OWN natural-language
+    /// description of its formatting/rendering rules and limits (e.g. the
+    /// Telegram markdown/HTML subset and its 4096-char message limit, or
+    /// Mattermost GFM). The core forwards it to the prompt tool as
+    /// `platform_hint`; the prompt tool never keeps a platform-NAME to hint
+    /// table, so a platform it has never heard of still receives the
+    /// formatting guidance owned by the plugin that implements it. Absent
+    /// means "nothing declared": the prompt tool then falls back to a
+    /// generic markdown note for a named platform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_hint: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

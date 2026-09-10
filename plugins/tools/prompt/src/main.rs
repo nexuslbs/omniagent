@@ -1321,6 +1321,11 @@ async fn handle_generate_full(
 ) -> Result<(String, bool)> {
     let profile_name = extract_str(args, &meta, "profile_name").unwrap_or("omni");
     let platform = extract_str(args, &meta, "platform").unwrap_or("");
+    // V-5: the platform plugin OWNS its formatting hint: the core forwards
+    // the plugin-declared `capabilities.prompt_hint` as `platform_hint`.
+    // Absent means "nothing declared": a named platform then gets the
+    // generic markdown fallback and a platform-less run gets no section.
+    let platform_hint = args["platform_hint"].as_str();
     let system_message = args["system_message"].as_str();
     let user_message = args["user_message"].as_str().unwrap_or("");
     let tool_names: Vec<String> = args["tool_names"]
@@ -1351,6 +1356,7 @@ async fn handle_generate_full(
     let named_sections = crate::prompt_builder::build_system_prompt_sections(
         &memory_store,
         platform,
+        platform_hint,
         system_message,
         profile_name,
         &tool_names,
@@ -1938,6 +1944,10 @@ async fn main() -> Result<()> {
                         "platform": {
                             "type": "string",
                             "description": "Platform identifier (e.g. 'telegram', 'mattermost')"
+                        },
+                        "platform_hint": {
+                            "type": "string",
+                            "description": "Formatting hint declared by the platform plugin's initialize capabilities (audit V-5). Optional: when absent a named platform falls back to a generic markdown note."
                         },
                         "system_message": {
                             "type": "string",

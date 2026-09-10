@@ -116,6 +116,13 @@ pub(crate) async fn build_prompt_context(
     let template_name = resolve_template_name(thread, cause_msg);
 
     // ── Call the configured prompt plugin (sys-prompt-gen) ──
+    // V-5: the platform plugin OWNS its formatting hint; it advertises it as
+    // `capabilities.prompt_hint` in its initialize result and the core
+    // forwards it to the prompt tool. A platform that declares nothing sends
+    // null and the prompt tool uses its generic markdown fallback.
+    let platform_name = channel.platform.as_deref().unwrap_or("");
+    let platform_hint = crate::agent::helpers::platform_prompt_hint(&cfg.ctx, platform_name).await;
+
     let (parsed, plan) = {
         let prompt_tool_name = cfg.config_snapshot().prompt_tool_name;
         let mcp_call = McpToolCall {
@@ -123,7 +130,8 @@ pub(crate) async fn build_prompt_context(
             name: prompt_tool_name,
             arguments: serde_json::json!({
                 "profile_name": profile_name,
-                "platform": channel.platform.as_deref().unwrap_or(""),
+                "platform": platform_name,
+                "platform_hint": platform_hint,
                 "user_message": cause_msg.content,
                 "tool_names": tool_names,
                 "thread_id": thread.id,

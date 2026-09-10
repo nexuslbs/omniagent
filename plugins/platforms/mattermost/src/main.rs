@@ -2006,6 +2006,11 @@ async fn main() -> Result<()> {
 // Handler Functions
 // ---------------------------------------------------------------------------
 
+/// V-5: the formatting guidance this platform OWNS and advertises in its
+/// `initialize` capabilities as `prompt_hint`. The core forwards it to the
+/// prompt tool, so the prompt tool keeps no platform-name to hint table.
+const MATTERMOST_PROMPT_HINT: &str = "You are on a Mattermost messaging platform. Standard markdown formatting is supported: **bold**, *italic*, `code`, ```code blocks```, [links](url), headings, lists, tables, blockquotes. Mattermost supports most GFM (GitHub Flavored Markdown).";
+
 async fn handle_initialize(id: u64) -> PluginResponse {
     let result = serde_json::json!({
         "name": "mattermost",
@@ -2013,6 +2018,7 @@ async fn handle_initialize(id: u64) -> PluginResponse {
             "inbound": true,
             "outbound": true,
             "setup": true,
+            "prompt_hint": MATTERMOST_PROMPT_HINT,
             "commands": {
                 "new": ["/new", "$new", "//new"]
             },

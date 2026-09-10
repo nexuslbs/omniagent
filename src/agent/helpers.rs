@@ -372,6 +372,35 @@ fn quote_seq0_requested(capabilities: Option<&PlatformCapabilities>) -> bool {
     capabilities.is_some_and(|c| c.quote_seq0)
 }
 
+/// Whether the platform's capabilities DECLARE a formatting prompt hint.
+///
+/// Pure form of the lookup so the decision is testable without a live platform
+/// registry: a platform that declares no `prompt_hint` yields `None` and the
+/// CALLER (the prompt tool) applies its generic markdown fallback.
+fn declared_prompt_hint(capabilities: Option<&PlatformCapabilities>) -> Option<String> {
+    capabilities
+        .and_then(|c| c.prompt_hint.as_deref())
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .map(str::to_string)
+}
+
+/// The formatting prompt hint the platform DECLARES in its capabilities.
+///
+/// Capability-driven, never decided from the platform NAME: plugin platforms
+/// advertise `prompt_hint` in their `initialize` capabilities, platforms
+/// implemented in core declare it in
+/// [`crate::platform::builtin_capabilities`]. A platform that declares nothing
+/// returns `None`; the prompt tool is free to fall back to a generic note.
+pub(crate) async fn platform_prompt_hint(ctx: &AppContext, platform: &str) -> Option<String> {
+    let declared = {
+        let platforms = ctx.platforms.read().await;
+        platforms.get(platform).map(|p| p.capabilities())
+    };
+    let declared = declared.or_else(|| crate::platform::builtin_capabilities(platform));
+    declared_prompt_hint(declared.as_ref())
+}
+
 /// Invoke the configured redaction MCP tool on `content`.
 ///
 /// The configured tool name is qualified as `{server}_{tool}` (e.g.
@@ -1144,6 +1173,25 @@ mod reaction_tests {
 mod delivery_capability_tests {
     use super::*;
     use crate::platform::external::InitializeResult;
+
+    /// The formatting hint comes from the platform's DECLARED capability, never
+    /// from its name: a platform that advertises `prompt_hint` provides it, and
+    /// one that declares nothing provides none (the prompt tool then applies
+    /// its generic markdown fallback).
+    #[test]
+    fn prompt_hint_follows_declared_capability_not_platform_name() {
+        let declared = PlatformCapabilities {
+            prompt_hint: Some("  Use <b>html</b>  ".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            declared_prompt_hint(Some(&declared)).as_deref(),
+            Some("Use <b>html</b>")
+        );
+        let nothing = PlatformCapabilities::default();
+        assert_eq!(declared_prompt_hint(Some(&nothing)), None);
+        assert_eq!(declared_prompt_hint(None), None);
+    }
 
     /// The seq-0 quote is requested by a platform that DECLARES the capability,
     /// no matter what it is called: a fake platform named "irc" is quoted.
