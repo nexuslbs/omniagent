@@ -106,3 +106,19 @@ id_ed25519
 # Re-include the C9 scanner + installer (repo .gitignore ignores scripts/*)
 !scripts/secret-scan.py
 !scripts/install-pre-commit-secret-scan.sh
+
+# ─────────────────────────────────────────────
+# Never-commit secret guardrails, part 2 (external-plan X7): Playwright
+# per-site session state and secrets files. A storage-state file carries LIVE
+# cookies + localStorage for a logged-in site; a --secrets file carries the
+# typed credential values. Neither may be committed - share a session through
+# the secrets store instead (see the web-interaction skill).
+# ─────────────────────────────────────────────
+**/*storage-state*.json
+**/*storage_state*.json
+**/*storageState*.json
+**/*.auth.json
+**/sessions.json
+**/playwright-secrets.*
+**/pw-secrets.*
+!scripts/test_secret_scan.py

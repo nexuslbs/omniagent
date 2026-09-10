@@ -1,9 +1,14 @@
-# gitleaks config for omniagent (code-plan C9 never-commit guardrail).
+# gitleaks config for omniagent (code-plan C9 never-commit guardrail,
+# extended by external-plan X7: credential classes of the external tools).
+#
 # [extend] loads gitleaks' full default rule set; [allowlist] then excludes
 # committed source/test fixtures that reference secret formats WITHOUT live
 # values (mirrors scripts/secret-scan.py). New secrets anywhere else fail
 # `gitleaks detect`.
-title = "omniagent gitleaks config (code-plan C9)"
+#
+# C9 owner task: task_omnidev_code_plan_c9_roll_out_never_commit.
+# X7 owner task: task_omnidev_external_plan_x7_secrets_review_for.
+title = "omniagent gitleaks config (code-plan C9 + external-plan X7)"
 
 [extend]
 useDefault = true
@@ -16,4 +21,65 @@ paths = [
   '''plugins/tools/ssh/src/main.rs''',
   '''tests/api_tests.rs''',
   '''src/safety.rs''',
+  '''scripts/secret-scan\.py''',
+  '''scripts/test_secret_scan\.py''',
 ]
+# Documented PUBLIC RFC 6238 TOTP test vector (not a credential), used by the
+# external-tool robustness harness and printed in public RFCs.
+regexes = [
+  '''GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ''',
+]
+
+# --- external-plan X7: new credential classes (RE2-safe: no backreferences) ---
+
+[[rules]]
+id = "x7-email-app-password"
+description = "Email app password: grouped app password assigned to a himalaya password / password.command value (X1)"
+regex = '''(?im)^\s*password(?:\.command)?\s*=\s*["'][a-z]{4}[- ][a-z]{4}[- ][a-z]{4}[- ][a-z]{4}'''
+
+[[rules]]
+id = "x7-email-password-literal"
+description = "Email account password: literal password value in a himalaya-style config (X1)"
+regex = '''(?im)^\s*password\s*=\s*["'][^"'\n$]{8,}["']'''
+
+[[rules]]
+id = "x7-twilio-api-key"
+description = "Twilio API key SID (X2)"
+regex = '''\bSK[0-9a-fA-F]{32}\b'''
+
+[[rules]]
+id = "x7-twilio-account-sid"
+description = "Twilio account SID (X2)"
+regex = '''\bAC[0-9a-fA-F]{32}\b'''
+
+[[rules]]
+id = "x7-twilio-auth-token"
+description = "Twilio auth token: 32-hex value next to an auth-token key (X2)"
+regex = '''(?i)twilio[_-]?auth[_-]?token["'\s=:]+"?[0-9a-f]{32}'''
+
+[[rules]]
+id = "x7-modem-sim-pin"
+description = "SMS modem / SIM PIN: keyed on the sim|modem|sms prefix (X2)"
+regex = '''(?i)\b(sim|modem|sms)[_-]?pin\b["'\s=:]+"?\d{4,8}\b'''
+
+[[rules]]
+id = "x7-totp-base32-secret"
+description = "TOTP/HOTP base32 shared secret (X3)"
+regex = '''(?i)\b(totp|otp)[_-]?secret\b["'\s=:]+"?[A-Z2-7]{16,}'''
+
+[[rules]]
+id = "x7-totp-base32-json-secret"
+description = "TOTP base32 secret in a secrets-store JSON entry (X3)"
+regex = '''["']secret["']\s*:\s*["'][A-Z2-7]{16,}["']'''
+
+[[rules]]
+id = "x7-playwright-storage-state"
+description = "Playwright per-site storage state / session file (X4/X5): live cookies + localStorage must never be committed"
+path = '''(?i)(storage[-_]?state|playwright[-_]?state|sessions\.json|\.auth\.json)'''
+regex = '''[\s\S]'''
+
+[[rules]]
+id = "x7-secrets-file"
+description = "Credentials/secrets file (X7): typed credential values belong in the secrets store, not in the repo"
+path = '''(?i)(^|/)(secrets|secrets\.(txt|json)|\.secrets)$'''
+regex = '''[\s\S]'''

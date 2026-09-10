@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Never-commit secret scanner (code-plan C9 guardrail).
+"""Never-commit secret scanner (code-plan C9 + external-plan X7 guardrail).
 
 Detects secret-bearing file NAMES and high-signal secret CONTENT across
 the repository. Modes:
@@ -9,6 +9,20 @@ the repository. Modes:
 Exit code 0 = clean, 1 = findings. Findings print path + rule only;
 matched values are redacted and never echoed (plan 9.1: no secret
 printing in scripts/logs).
+
+C9 owner task: task_omnidev_code_plan_c9_roll_out_never_commit (code-plan
+section 9.1). External-plan X7 extends that guardrail with the credential
+classes the external-interaction plan introduces (plan page
+Projects/Omniagent/Omniagent-External-Improvement-Plan.md, candidate X7;
+code-plan section 9.5):
+  - email app passwords (himalaya password / password.command values, X1),
+  - SMS modem / SIM PINs and Twilio API keys / auth tokens (X2),
+  - TOTP / HOTP base32 shared secrets (X3),
+  - Playwright per-site storage-state files and --secrets values (X4/X5).
+The same rules are mirrored in the gitleaks config (`.gitleaks.toml`) in the
+repos that run the gitleaks CI job (omniagent, omni-deployer); where a repo
+has no CI, this pre-commit scanner is the enforcement point.
+Proof that the rules fire: `python3 scripts/test_secret_scan.py`.
 
 Usage: python3 scripts/secret-scan.py [--staged] [--repo PATH]
 """
@@ -23,8 +37,10 @@ KEY_EXT = (".pem", ".key", ".p12", ".pfx", ".jks", ".jceks",
 ENV_ALLOWED = (".example", ".sample", ".dist")
 SKIP_DIRS = {".git", ".git-cache", "node_modules", "target", "dist",
              "__pycache__", ".venv", "coverage", ".husky/_"}
-# This scanner and the hook installer legitimately contain rule text.
-SKIP_FILES = {"secret-scan.py", "install-pre-commit-secret-scan.sh"}
+# This scanner, its self-test and the hook installer legitimately contain
+# rule text / planted secret FORMATS (never live values).
+SKIP_FILES = {"secret-scan.py", "test_secret_scan.py",
+              "install-pre-commit-secret-scan.sh"}
 # Committed code/test/workflow/doc fixtures that reference secret formats
 # (header constants, variable interpolation like ${{ secrets.X }}, fake
 # test keys) but contain NO live secret values. Content rules are skipped
@@ -45,6 +61,15 @@ ALLOW_CONTENT = frozenset({
     "profiles/omni/wiki/log.md",
 })
 
+# Documented PUBLIC test vectors / example credentials that are NOT secrets.
+# RFC 6238 Appendix B TOTP vector: used by the external-tool robustness
+# harness (omni-deployer scripts/x6_robustness.py) and printed in public
+# RFCs. A content match whose text CONTAINS one of these values is skipped;
+# every other value still trips its rule.
+ALLOW_VALUES = (
+    "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+)
+
 CONTENT_RULES = [
     ("private-key-header",
      re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----")),
@@ -63,7 +88,49 @@ CONTENT_RULES = [
     # format placeholders like "x-access-token:{}".
     ("http-basic-token",
      re.compile(r"x-access-token[:=][ \t]*[A-Za-z0-9_\-.]{8,}")),
+    # --- external-plan X7: credential classes of the external tools ---
+    # Email app password (X1): a grouped app password (4x4, e.g. "abcd efgh
+    # ijkl mnop") assigned to `password` or `password.command` in a
+    # himalaya-style config. The group separator must repeat.
+    ("email-app-password",
+     re.compile(r"(?i)^[ \t]*password(?:\.command)?[ \t]*=[ \t]*[\"'][^\"'\n]*"
+                r"\b[a-z]{4}([ -])[a-z]{4}\1[a-z]{4}\1[a-z]{4}\b[^\"'\n]*[\"']",
+                re.M)),
+    # Any other literal password value (>=8 chars) in a himalaya-style
+    # config. `password.command = "pass show x"` and secrets-store / env
+    # references ($secret:NAME, ${VAR}) do not match: the key must be exactly
+    # `password` and the value must not start with `$`.
+    ("email-password-literal",
+     re.compile(r"(?i)^[ \t]*password[ \t]*=[ \t]*[\"'][^\"'\n$]{8,}[\"']",
+                re.M)),
+    # SMS backend (X2): Twilio API key SID (SK + 32 hex), account SID
+    # (AC + 32 hex) and a 32-hex auth token next to an auth-token key.
+    ("twilio-api-key",
+     re.compile(r"\bSK[0-9a-fA-F]{32}\b")),
+    ("twilio-account-sid",
+     re.compile(r"\bAC[0-9a-fA-F]{32}\b")),
+    ("twilio-auth-token",
+     re.compile(r"(?i)twilio[_-]?auth[_-]?token[ \t\"'=:]+[\"']?"
+                r"[0-9a-f]{32}")),
+    # SMS modem / SIM PIN (X2). Keyed on the sim/modem/sms prefix so an
+    # unrelated "pin" identifier does not trip.
+    ("modem-sim-pin",
+     re.compile(r"(?i)\b(sim|modem|sms)[_-]?pin\b[ \t\"'=:]+[\"']?\d{4,8}\b")),
+    # TOTP / HOTP base32 shared secret (X3): keyed on the secret name, or the
+    # secrets-store JSON layout {"secret":"<base32>",...}.
+    ("totp-base32-secret",
+     re.compile(r"(?i)\b(totp|otp)[_-]?secret\b[ \t\"'=:]+[\"']?"
+                r"[A-Z2-7]{16,}")),
+    ("totp-base32-json-secret",
+     re.compile(r"[\"']secret[\"'][ \t]*:[ \t]*[\"'][A-Z2-7]{16,}[\"']")),
 ]
+
+# File-name classes for the X7 web-session credentials: a Playwright
+# per-site storage-state file holds live cookies + localStorage and the
+# --secrets file holds the typed credential values; neither may be committed.
+STORAGE_STATE_MARKERS = ("storage-state", "storage_state", "storagestate",
+                         "playwright-state", "sessions.json")
+SECRETS_FILE_NAMES = ("secrets", "secrets.txt", "secrets.json", ".secrets")
 
 
 def name_rule(rel):
@@ -74,6 +141,12 @@ def name_rule(rel):
         return "key-material-file"
     if base == "secrets.env" or base.startswith("secrets.env."):
         return "secrets-env-file"
+    if base in SECRETS_FILE_NAMES:
+        return "secrets-file"
+    # Playwright per-site session state (cookies/localStorage) - X7/X5.
+    if (any(m in base for m in STORAGE_STATE_MARKERS)
+            or base.endswith(".auth.json")):
+        return "playwright-storage-state-file"
     if base.startswith(".env") or base.endswith(".env"):
         if base in (".env.example", ".env.sample", ".env.dist") or base.endswith(ENV_ALLOWED):
             return None
@@ -123,9 +196,14 @@ def scan():
             continue
         text = data.decode("utf-8", "replace")
         for rname, rx in CONTENT_RULES:
-            if rx.search(text):
-                findings.add((rel, rname))
-                break
+            m = rx.search(text)
+            if m is None:
+                continue
+            if any(v in m.group(0) for v in ALLOW_VALUES):
+                # Documented PUBLIC test vector, never a live credential.
+                continue
+            findings.add((rel, rname))
+            break
     for rel, rule in sorted(findings):
         print("SECRET-SCAN %s: %s (value redacted)" % (rule, rel))
     if findings:
