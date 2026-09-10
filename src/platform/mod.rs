@@ -33,6 +33,7 @@ pub fn builtin_capabilities(name: &str) -> Option<external::PlatformCapabilities
             inbound: true,
             outbound: true,
             quote_seq0: true,
+            ..Default::default()
         }),
         _ => None,
     }

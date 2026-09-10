@@ -840,18 +840,16 @@ impl Platform for ExternalPlatformClient {
                                                     );
 
                                                     // Handle /new BEFORE channel lookup: creates a fresh channel.
-                                                        // Command dispatch is platform-aware: Mattermost keeps its
-                                                        // historical `$new` / `//new` semantics unchanged; other external
-                                                        // platforms (Telegram, ...) use "/" prefixed commands ONLY, and
-                                                        // `$new` never triggers there (Mattermost syntax must not leak).
-                                                        let is_new_command = if plugin_name == "mattermost" {
-                                                            let t = inbound.text.trim_start();
-                                                            t.starts_with("$new") || t.starts_with("//new")
-                                                        } else {
-                                                            crate::commands::is_external_new_command(&inbound.text)
-                                                        };
-                                                        if is_new_command {
-                                                            let name = crate::commands::parse_new_command(&inbound.text)
+                                                    // The accepted prefixes are DECLARED by the platform plugin in its
+                                                    // initialize capabilities (`commands.new`); core never decides them
+                                                    // from the platform name. A plugin that declares nothing gets the
+                                                    // generic `/new` fallback.
+                                                    let caps = (*self.capabilities.lock()).clone().unwrap_or_default();
+                                                    let declared_new = caps.commands.get("new").map(|v| v.as_slice());
+                                                    if let Some(prefix) =
+                                                        crate::commands::match_new_command(&inbound.text, declared_new)
+                                                    {
+                                                        let name = crate::commands::parse_new_command(&inbound.text, prefix)
                                                             .ok()
                                                             .and_then(|cmd| cmd.name);
                                                         let reply = match crate::commands::handle_new_external(

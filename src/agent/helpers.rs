@@ -1153,6 +1153,7 @@ mod delivery_capability_tests {
             inbound: true,
             outbound: true,
             quote_seq0: true,
+            ..Default::default()
         };
         assert!(quote_seq0_requested(Some(&fake)));
     }
@@ -1166,6 +1167,7 @@ mod delivery_capability_tests {
             inbound: true,
             outbound: true,
             quote_seq0: false,
+            ..Default::default()
         };
         assert!(!quote_seq0_requested(Some(&no_quote)));
     }

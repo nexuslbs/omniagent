@@ -2013,6 +2013,9 @@ async fn handle_initialize(id: u64) -> PluginResponse {
             "inbound": true,
             "outbound": true,
             "setup": true,
+            "commands": {
+                "new": ["/new", "$new", "//new"]
+            },
         }
     });
     make_success(id, result)

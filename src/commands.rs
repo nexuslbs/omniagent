@@ -149,25 +149,67 @@ pub fn format_model_status(provider: Option<&str>, model: Option<&str>) -> Strin
 // NewCommand: parsed result for `/new`
 // ---------------------------------------------------------------------------
 
-/// Parsed `/new` command. Valid forms: `/new [name]`, `$new [name]`.
+/// Parsed `/new` command. Valid forms: `<prefix> [name]`, where `<prefix>` is
+/// one of the command prefixes the platform plugin DECLARED (see
+/// [`match_new_command`]).
 #[derive(Debug, Clone)]
 pub struct NewCommand {
-    /// Optional channel name: `$new <name>` creates/updates a channel keyed
+    /// Optional channel name: `<prefix> <name>` creates/updates a channel keyed
     /// exactly `<name>`; absent -> the caller derives `{platform}-{first8}`.
     pub name: Option<String>,
 }
 
-#[allow(dead_code)]
-/// Parse a `/new` command text. The optional first argument is the channel
-/// name (`/new`, `$new`, `/new mm-kanban`, `$new mm-kanban`).
-pub fn parse_new_command(input: &str) -> AppResult<NewCommand> {
+/// Generic fallback prefixes for the `new` command, used when a platform
+/// plugin declares no `commands.new` capability (today's non-Mattermost
+/// behaviour: the Telegram Bot API style `/new`).
+pub const DEFAULT_NEW_COMMAND_PREFIXES: &[&str] = &["/new"];
+
+/// True when `text` is exactly `prefix`, or starts with `prefix` followed by
+/// whitespace. Token-exact, so `/newsletter` is NOT `/new`.
+fn matches_command_token(text: &str, prefix: &str) -> bool {
+    if prefix.is_empty() {
+        return false;
+    }
+    match text.strip_prefix(prefix) {
+        Some(rest) => rest.is_empty() || rest.starts_with(char::is_whitespace),
+        None => false,
+    }
+}
+
+/// Match `text` against the command `prefixes` DECLARED by a platform plugin
+/// (capability `commands.<name>`). Returns the longest matching prefix, or
+/// `None` when the text is not that command. Core only matches what the plugin
+/// advertised: it never decides which platform owns which prefix.
+pub fn match_command_prefix<'p>(
+    text: &str,
+    prefixes: impl IntoIterator<Item = &'p str>,
+) -> Option<&'p str> {
+    let trimmed = text.trim_start();
+    prefixes
+        .into_iter()
+        .filter(|prefix| matches_command_token(trimmed, prefix))
+        .max_by_key(|prefix| prefix.len())
+}
+
+/// The `new`-command prefix matched by `text` on a platform that declared
+/// `declared` prefixes (`capabilities.commands.new`), falling back to
+/// [`DEFAULT_NEW_COMMAND_PREFIXES`] when the plugin declared none.
+pub fn match_new_command<'p>(text: &str, declared: Option<&'p [String]>) -> Option<&'p str> {
+    match declared {
+        Some(prefixes) if !prefixes.is_empty() => {
+            match_command_prefix(text, prefixes.iter().map(String::as_str))
+        }
+        _ => match_command_prefix(text, DEFAULT_NEW_COMMAND_PREFIXES.iter().copied()),
+    }
+}
+
+/// Parse a `/new` command text that already matched `prefix` (a prefix
+/// declared by the platform plugin; see [`match_new_command`]). The optional
+/// first argument is the channel name (`/new`, `/new mm-kanban`,
+/// `$new mm-kanban`).
+pub fn parse_new_command(input: &str, prefix: &str) -> AppResult<NewCommand> {
     let trimmed = input.trim();
-    let rest = trimmed
-        .strip_prefix("//new")
-        .or_else(|| trimmed.strip_prefix("/new"))
-        .or_else(|| trimmed.strip_prefix("$new"))
-        .unwrap_or(trimmed)
-        .trim();
+    let rest = trimmed.strip_prefix(prefix).unwrap_or(trimmed).trim();
     let name = if rest.is_empty() {
         None
     } else {
@@ -178,17 +220,6 @@ pub fn parse_new_command(input: &str) -> AppResult<NewCommand> {
         Some(rest.to_string())
     };
     Ok(NewCommand { name })
-}
-
-/// True when `text` is a `/new` or `//new` command for EXTERNAL platforms
-/// (Telegram and other non-Mattermost platforms).
-///
-/// External platform commands start with "/" (Telegram Bot API style).
-/// `$new` is Mattermost-only syntax and must never trigger here: a user
-/// typing `$new` in a Telegram chat is not issuing a command.
-pub fn is_external_new_command(text: &str) -> bool {
-    let t = text.trim_start();
-    t == "/new" || t.starts_with("/new ") || t == "//new" || t.starts_with("//new ")
 }
 
 // ---------------------------------------------------------------------------
@@ -276,8 +307,8 @@ pub fn parse_profile_command(input: &str) -> AppResult<ProfileCommand> {
 /// Execute `/new` for an external platform: creates a channel with
 /// resource_identifier = external_channel_id / platform resource identifier.
 /// When `name` is provided (non-empty) it is used VERBATIM as the channel
-/// key/name (e.g. `$new mm-kanban` -> key `mm-kanban`); otherwise the name
-/// is derived as `{platform}-{first8}` (backwards compat for bare `$new`).
+/// key/name (e.g. `/new mm-kanban` -> key `mm-kanban`); otherwise the name
+/// is derived as `{platform}-{first8}` (backwards compat for a bare command).
 pub async fn handle_new_external(
     pool: &PgPool,
     platform: &str,
@@ -429,53 +460,85 @@ mod tests {
 
     #[test]
     fn test_parse_new() {
-        let cmd = parse_new_command("//new").unwrap();
+        let cmd = parse_new_command("//new", "//new").unwrap();
         assert!(cmd.name.is_none());
     }
 
     #[test]
     fn test_parse_new_with_name() {
-        let cmd = parse_new_command("//new mm-kanban").unwrap();
+        let cmd = parse_new_command("//new mm-kanban", "//new").unwrap();
         assert_eq!(cmd.name.as_deref(), Some("mm-kanban"));
 
-        let cmd = parse_new_command("$new mm-kanban").unwrap();
+        let cmd = parse_new_command("$new mm-kanban", "$new").unwrap();
         assert_eq!(cmd.name.as_deref(), Some("mm-kanban"));
 
-        let cmd = parse_new_command("  $new  mm-kanban  ").unwrap();
+        let cmd = parse_new_command("  $new  mm-kanban  ", "$new").unwrap();
         assert_eq!(cmd.name.as_deref(), Some("mm-kanban"));
     }
 
     #[test]
     fn test_parse_new_too_many_args() {
-        let cmd = parse_new_command("//new foo bar");
+        let cmd = parse_new_command("//new foo bar", "//new");
         assert!(cmd.is_err());
     }
 
     #[test]
     fn test_parse_new_whitespace() {
-        let cmd = parse_new_command("  //new  ").unwrap();
+        let cmd = parse_new_command("  //new  ", "//new").unwrap();
         assert!(cmd.name.is_none());
     }
 
+    /// A plugin that declares nothing gets the generic `/new` fallback.
     #[test]
-    fn test_is_external_new_command() {
-        // "/" prefixed commands are recognized (Telegram Bot API style).
-        assert!(is_external_new_command("/new"));
-        assert!(is_external_new_command("/new telegram"));
-        assert!(is_external_new_command("/new  telegram"));
-        assert!(is_external_new_command("  /new telegram"));
-        assert!(is_external_new_command("//new"));
-        assert!(is_external_new_command("//new telegram"));
-        // "$new" is Mattermost syntax: NEVER a command on external platforms.
-        assert!(!is_external_new_command("$new"));
-        assert!(!is_external_new_command("$new telegram"));
-        assert!(!is_external_new_command("  $new telegram"));
-        // Other text is not a command (precise token match).
-        assert!(!is_external_new_command("hello world"));
-        assert!(!is_external_new_command("/newsletter"));
-        assert!(!is_external_new_command("/newer"));
-        assert!(!is_external_new_command("/newbie"));
-        assert!(!is_external_new_command(""));
+    fn test_match_new_command_default_fallback() {
+        assert_eq!(match_new_command("/new", None), Some("/new"));
+        assert_eq!(match_new_command("/new telegram", None), Some("/new"));
+        assert_eq!(match_new_command("  /new telegram", None), Some("/new"));
+        // `$new` is only a command for a plugin that DECLARES it.
+        assert_eq!(match_new_command("$new", None), None);
+        assert_eq!(match_new_command("$new telegram", None), None);
+        assert_eq!(match_new_command("/newsletter", None), None);
+        assert_eq!(match_new_command("", None), None);
+        // An empty declaration is the same as no declaration.
+        let empty: Vec<String> = vec![];
+        assert_eq!(match_new_command("/new", Some(&empty)), Some("/new"));
+    }
+
+    /// Mattermost declares its historical prefixes; telegram declares `/new`.
+    #[test]
+    fn test_match_new_command_declared_prefixes() {
+        let mattermost: Vec<String> = ["/new", "$new", "//new"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(match_new_command("$new", Some(&mattermost)), Some("$new"));
+        assert_eq!(
+            match_new_command("$new mm-kanban", Some(&mattermost)),
+            Some("$new")
+        );
+        assert_eq!(
+            match_new_command("  //new foo", Some(&mattermost)),
+            Some("//new")
+        );
+        assert_eq!(match_new_command("/new", Some(&mattermost)), Some("/new"));
+
+        let telegram: Vec<String> = vec!["/new".to_string()];
+        assert_eq!(match_new_command("/new x", Some(&telegram)), Some("/new"));
+        // `$new x` on a plugin declaring only `/new` is NOT a command.
+        assert_eq!(match_new_command("$new x", Some(&telegram)), None);
+    }
+
+    /// A third, fake platform declares its own syntax; core honours it verbatim.
+    #[test]
+    fn test_match_new_command_third_fake_platform() {
+        let fake: Vec<String> = vec!["!new".to_string()];
+        assert_eq!(match_new_command("!new chat", Some(&fake)), Some("!new"));
+        assert_eq!(match_new_command("!new", Some(&fake)), Some("!new"));
+        // The declared set is the ONLY accepted syntax for that platform.
+        assert_eq!(match_new_command("/new chat", Some(&fake)), None);
+        assert_eq!(match_new_command("$new chat", Some(&fake)), None);
+        // Token-exact: `!newsletter` is not `!new`.
+        assert_eq!(match_new_command("!newsletter", Some(&fake)), None);
     }
 
     // ── /channel tests ───────────────────────────────────────────────────

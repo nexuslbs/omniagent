@@ -463,6 +463,15 @@ pub struct PlatformCapabilities {
     /// to false so every existing plugin keeps its current behaviour.
     #[serde(default)]
     pub quote_seq0: bool,
+    /// INBOUND COMMAND capability: the channel-command prefixes this platform
+    /// accepts, keyed by command name, e.g. `{"new": ["/new", "$new", "//new"]}`
+    /// (mattermost) or `{"new": ["/new"]}` (telegram). The plugin DECLARES its
+    /// own syntax here; core matches the inbound text against these prefixes
+    /// and never decides which platform owns which prefix. Absent or empty
+    /// means the plugin declares nothing, so core uses its generic fallback
+    /// (`/new`).
+    #[serde(default)]
+    pub commands: HashMap<String, Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
