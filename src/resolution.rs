@@ -355,7 +355,9 @@ pub fn resolve_channel_identity(data_dir: &str, def: &ChannelDef) -> ResolvedCha
 /// re-resolve it).
 ///
 /// Chain: thread-stamped → channel → profile → global settings → env
-/// (LLM_PROVIDER/LLM_MODEL with openai/gpt-4 fallbacks).
+/// (LLM_PROVIDER/LLM_MODEL). No provider or model default is invented at this
+/// level: when no level supplies a provider, resolution fails with an explicit
+/// "No LLM provider configured" error (see `resolve_thread_identity`).
 ///
 /// The canonical resolver is `crate::db::threads::resolve_thread_identity`
 /// (it returns profile + provider + model); this struct is the
