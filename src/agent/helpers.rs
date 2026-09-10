@@ -536,26 +536,23 @@ pub async fn enqueue_delivery(
     }
 }
 
-/// Enqueue a reaction to a platform message.
+/// Build the outbound reaction envelope for a thread status.
 ///
-/// Sends an emoji for the thread's final status (e.g. ":white_check_mark:")
-/// to the platform. The caller is responsible for mapping status → emoji.
-pub async fn enqueue_reaction(
-    ctx: &AppContext,
-    platform: &str,
+/// The envelope's `content` is the RAW thread status name (`"processing"`,
+/// `"completed"`, `"skipped"`, `"merged"`, ...). Core stays platform
+/// agnostic: it never translates a status into an emoji or into a
+/// Mattermost-style shortcode. Each platform plugin owns the mapping from
+/// the status name to its own concrete reaction, including its own default
+/// for a status it does not know. See `enqueue_status_reaction`.
+pub(crate) fn reaction_envelope(
     resource_identifier: &str,
     external_id: &str,
-    final_status: &str,
-) {
-    let sender = match ctx.platform_senders.read().await.get(platform) {
-        Some(s) => s.clone(),
-        None => return,
-    };
-
-    let envelope = OutboundEnvelope {
+    status: &str,
+) -> OutboundEnvelope {
+    OutboundEnvelope {
         message_id: 0,
         resource_identifier: resource_identifier.to_string(),
-        content: final_status.to_string(),
+        content: status.to_string(),
         msg_type: "reaction".to_string(),
         msg_subtype: None,
         thread_id: 0,
@@ -566,24 +563,31 @@ pub async fn enqueue_reaction(
         is_final: false,
         is_summary: false,
         is_user_thread: false,
-    };
-
-    if let Err(e) = sender.try_send(envelope) {
-        tracing::warn!("Failed to enqueue reaction: {:?}", e);
     }
 }
 
-/// Map a final thread status to the reaction emoji sent on the cause message.
-/// The platform plugin receives the raw emoji shortcode: Mattermost strips the
-/// colons, Telegram maps the known shortcodes to unicode emoji.
-pub fn status_reaction_emoji(status: &str) -> &str {
-    match status {
-        "completed" => ":white_check_mark:",
-        "failed" => ":x:",
-        "interrupted" => ":broken_heart:",
-        "skipped" => ":o:",
-        "merged" => ":handshake:",
-        other => other,
+/// Enqueue a reaction to a platform message.
+///
+/// `status` is the thread STATUS NAME (the string stored in `threads.status`:
+/// "processing", "completed", "failed", "interrupted", "skipped", "merged",
+/// ...). The platform plugin owns the status -> reaction mapping and its
+/// default fallback; core passes the raw status name through unchanged.
+pub async fn enqueue_reaction(
+    ctx: &AppContext,
+    platform: &str,
+    resource_identifier: &str,
+    external_id: &str,
+    status: &str,
+) {
+    let sender = match ctx.platform_senders.read().await.get(platform) {
+        Some(s) => s.clone(),
+        None => return,
+    };
+
+    let envelope = reaction_envelope(resource_identifier, external_id, status);
+
+    if let Err(e) = sender.try_send(envelope) {
+        tracing::warn!("Failed to enqueue reaction: {:?}", e);
     }
 }
 
@@ -649,8 +653,9 @@ pub(crate) async fn enqueue_status_reaction(
         );
         return;
     };
-    let emoji = status_reaction_emoji(status);
-    enqueue_reaction(ctx, platform, resource, &ext_id, emoji).await;
+    // The plugin maps the status name to its own reaction (with its own
+    // default fallback); core forwards the raw status name unchanged.
+    enqueue_reaction(ctx, platform, resource, &ext_id, status).await;
 }
 
 /// Single terminal-finalization choke point for ALL terminal thread states.
@@ -1041,13 +1046,37 @@ mod reaction_tests {
     use super::*;
 
     #[test]
-    fn status_reaction_emoji_maps_all_terminal_states() {
-        assert_eq!(status_reaction_emoji("merged"), ":handshake:");
-        assert_eq!(status_reaction_emoji("skipped"), ":o:");
-        assert_eq!(status_reaction_emoji("completed"), ":white_check_mark:");
-        assert_eq!(status_reaction_emoji("failed"), ":x:");
-        assert_eq!(status_reaction_emoji("interrupted"), ":broken_heart:");
-        assert_eq!(status_reaction_emoji("custom"), "custom");
+    fn reaction_envelope_carries_raw_status_name() {
+        // Every status (terminal or not, known or not) is handed to the
+        // platform plugin as its RAW status name: no emoji, no Mattermost
+        // shortcode, no plugin-specific translation anywhere in the core
+        // reaction path.
+        for status in [
+            "processing",
+            "pending",
+            "completed",
+            "failed",
+            "interrupted",
+            "skipped",
+            "merged",
+            "some_future_status",
+        ] {
+            let env = reaction_envelope("chan-1", "post-1", status);
+            assert_eq!(env.msg_type, "reaction");
+            assert_eq!(env.content, status);
+            assert_eq!(env.resource_identifier, "chan-1");
+            assert_eq!(env.cause_external_id.as_deref(), Some("post-1"));
+            assert!(
+                !env.content.contains(':'),
+                "shortcode leaked: {}",
+                env.content
+            );
+            assert!(
+                !env.content.contains("white_check_mark"),
+                "emoji shortcode leaked: {}",
+                env.content
+            );
+        }
     }
 
     #[test]

@@ -1036,10 +1036,19 @@ struct TypingParams {
 }
 
 /// Parameters for the react method.
+///
+/// `status` is the RAW thread status name sent by the core ("processing",
+/// "completed", "failed", "interrupted", "skipped", "merged", ...); this
+/// plugin owns the status -> reaction mapping. `emoji` is the legacy field an
+/// older core still sends (Mattermost shortcode); it is kept for the rollout
+/// window.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReactParams {
     resource_identifier: String,
     external_id: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
     emoji: String,
 }
 
@@ -2183,6 +2192,36 @@ async fn handle_typing(
     }
 }
 
+/// Default reaction for a status this plugin does not know.
+///
+/// Mattermost `createReaction` takes an emoji NAME (no colons). A status with
+/// no explicit mapping (e.g. a new thread status added later) still gets a
+/// reaction: the default, never silence.
+const DEFAULT_REACTION: &str = "eyes";
+
+/// Map a thread STATUS name to a Mattermost emoji name.
+///
+/// The plugin owns this mapping; core only sends the raw status name. The
+/// shortcode arms keep a legacy core (which still sent Mattermost shortcodes)
+/// working during the rollout window.
+fn reaction_for_status(status: &str) -> &'static str {
+    match status {
+        "processing" | "pending" => "thumbsup",
+        "completed" => "white_check_mark",
+        "failed" => "x",
+        "interrupted" => "broken_heart",
+        "skipped" => "o",
+        "merged" => "handshake",
+        ":white_check_mark:" => "white_check_mark",
+        ":x:" => "x",
+        ":broken_heart:" => "broken_heart",
+        ":o:" => "o",
+        ":handshake:" => "handshake",
+        ":+1:" | ":thumbsup:" | ":thumbs_up:" => "thumbsup",
+        _ => DEFAULT_REACTION,
+    }
+}
+
 async fn handle_react(
     id: u64,
     client: &MattermostClient,
@@ -2225,9 +2264,17 @@ async fn handle_react(
             },
         }
     };
-    let emoji = params.emoji.trim_matches(':').to_string();
+    // Core sends the raw STATUS name; the legacy `emoji` field (older core)
+    // is the fallback. The plugin maps it to a Mattermost emoji name and
+    // never drops the reaction: unknown statuses use DEFAULT_REACTION.
+    let raw = if params.status.is_empty() {
+        params.emoji.trim()
+    } else {
+        params.status.trim()
+    };
+    let emoji = reaction_for_status(raw);
     match client
-        .create_reaction(&params.external_id, &bot_user_id, &emoji)
+        .create_reaction(&params.external_id, &bot_user_id, emoji)
         .await
     {
         Ok(_) => make_success(id, serde_json::json!({"reacted": true})),
@@ -3939,6 +3986,37 @@ mod tests {
     use super::*;
     use parking_lot::Mutex;
     use std::sync::Arc;
+
+    #[test]
+    fn reaction_for_status_maps_every_status_and_defaults() {
+        // The plugin owns the status -> reaction mapping: every status the
+        // core can send maps to a Mattermost emoji NAME.
+        for (status, expected) in [
+            ("processing", "thumbsup"),
+            ("pending", "thumbsup"),
+            ("completed", "white_check_mark"),
+            ("failed", "x"),
+            ("interrupted", "broken_heart"),
+            ("skipped", "o"),
+            ("merged", "handshake"),
+        ] {
+            assert_eq!(reaction_for_status(status), expected, "status {}", status);
+        }
+        // A status with no explicit mapping (a future/new thread status, an
+        // empty value, or an unknown legacy shortcode) NEVER drops the
+        // reaction: it falls back to the plugin default.
+        for unknown in ["some_future_status", "", ":not_a_real_emoji:"] {
+            assert_eq!(reaction_for_status(unknown), DEFAULT_REACTION);
+        }
+        // Legacy shortcodes from an older core keep working (rollout window).
+        assert_eq!(reaction_for_status(":handshake:"), "handshake");
+        assert_eq!(reaction_for_status(":+1:"), "thumbsup");
+        // createReaction rejects names containing colons: nothing this
+        // function returns can be a shortcode.
+        for status in ["processing", "completed", "some_future_status"] {
+            assert!(!reaction_for_status(status).contains(':'));
+        }
+    }
 
     /// Deserialize a PluginConfig that still carries the legacy `host`/
     /// `port` keys (all other fields fall back to their serde defaults).

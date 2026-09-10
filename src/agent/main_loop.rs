@@ -1318,7 +1318,7 @@ Previous plan:\n{}",
                             );
                         }
                         // Send the merged reaction to the platform for the
-                        // pending thread (merged => ":handshake:"). Uses the
+                        // pending thread (merged => "merged"). Uses the
                         // shared choke-point resolution: only a REAL
                         // cause-message target is used (never synthetic
                         // hook/cron ids, never empty).

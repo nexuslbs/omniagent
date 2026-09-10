@@ -659,11 +659,16 @@ pub fn build_typing_request(id: u64, params: &TypingParams) -> String {
 }
 
 /// Parameters for the react method.
+///
+/// `status` is the RAW thread status name ("processing", "completed",
+/// "failed", "interrupted", "skipped", "merged", ...). The receiving
+/// platform plugin owns the status -> reaction mapping and its own default
+/// fallback; core never sends an emoji or a Mattermost shortcode here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReactParams {
     pub resource_identifier: String,
     pub external_id: String,
-    pub emoji: String,
+    pub status: String,
 }
 
 /// Build a react request JSON string.

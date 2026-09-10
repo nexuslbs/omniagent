@@ -380,7 +380,7 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                             channel_id, active_id
                         );
                         // All terminal states send the status reaction: the
-                        // cancelled in-flight thread was skipped, enqueue :o:.
+                        // cancelled in-flight thread was skipped, enqueue "skipped".
                         let channel =
                             crate::db::channels::get_channel_by_id(&cfg.pool, &channel_id)
                                 .await

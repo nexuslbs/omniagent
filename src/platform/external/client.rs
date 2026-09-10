@@ -605,16 +605,16 @@ impl Platform for ExternalPlatformClient {
                             let reactor_params = ReactParams {
                                 resource_identifier: envelope.resource_identifier,
                                 external_id: envelope.cause_external_id.unwrap_or_default(),
-                                emoji: envelope.content,
+                                status: envelope.content,
                             };
                             let id = next_id_val;
                             next_id_val += 1;
                             let req = build_react_request(id, &reactor_params);
 
                             tracing::debug!(
-                                "Sending react request to '{}' (emoji={})",
+                                "Sending react request to '{}' (status={})",
                                 plugin_name,
-                                reactor_params.emoji,
+                                reactor_params.status,
                             );
 
                             if let Err(e) = stdin.write_all(req.as_bytes()).await {
@@ -788,8 +788,9 @@ impl Platform for ExternalPlatformClient {
                                                             e
                                                         }).ok();
                                                         // For system-originated threads (kanban, cron, etc.),
-                                                        // immediately send a +1 reaction to acknowledge receipt
-                                                        // but only for the seq-0 (first) message in the thread.
+                                                        // immediately send the "processing" STATUS reaction (the
+                                                        // plugin maps it) to acknowledge receipt, but only for the
+                                                        // seq-0 (first) message in the thread.
                                                         if let Some(resource) = res {
                                                             if !is_user && seq == 0 {
                                                                 let _ = send_react(
@@ -797,7 +798,7 @@ impl Platform for ExternalPlatformClient {
                                                                     &mut next_id_val,
                                                                     &resource,
                                                                     &ext_id,
-                                                                    ":+1:",
+                                                                    "processing",
                                                                 ).await;
                                                             }
                                                         }
@@ -1060,19 +1061,20 @@ impl Platform for ExternalPlatformClient {
                                                                 },
                                                             ).await {
                                                                 // success: message and thread created
-                                                                // Send :o: if the thread was auto-skipped (closed channel),
-                                                                // :+1: otherwise (normal acknowledgment)
-                                                                let react_emoji = if thread.status == "skipped" {
-                                                                    ":o:"
+                                                                // Send the raw STATUS name: "skipped" when the thread was
+                                                                // auto-skipped (closed channel), "processing" otherwise
+                                                                // (normal acknowledgment). The plugin maps the name.
+                                                                let react_status = if thread.status == "skipped" {
+                                                                    "skipped"
                                                                 } else {
-                                                                    ":+1:"
+                                                                    "processing"
                                                                 };
                                                                 let _ = send_react(
                                                                     &mut stdin,
                                                                     &mut next_id_val,
                                                                     &inbound.resource_identifier,
                                                                     &inbound.external_id,
-                                                                    react_emoji,
+                                                                    react_status,
                                                                 ).await;
                                                             } else {
                                                                 tracing::error!("Failed to create thread for inbound message from '{}'", plugin_name);
@@ -1813,20 +1815,23 @@ async fn handle_external_profile_command(
     }
 }
 
-/// Send a reaction to a platform message via the plugin's stdin.
+/// Send a status reaction to a platform message via the plugin's stdin.
+///
+/// `status` is the RAW thread status name ("processing", "completed", ...);
+/// the receiving platform plugin owns the status -> reaction mapping.
 async fn send_react(
     stdin: &mut ChildStdin,
     next_id: &mut u64,
     resource_identifier: &str,
     external_id: &str,
-    emoji: &str,
+    status: &str,
 ) {
     let id = *next_id;
     *next_id += 1;
     let params = ReactParams {
         resource_identifier: resource_identifier.to_string(),
         external_id: external_id.to_string(),
-        emoji: emoji.to_string(),
+        status: status.to_string(),
     };
     let req = build_react_request(id, &params);
     if let Err(e) = stdin.write_all(req.as_bytes()).await {

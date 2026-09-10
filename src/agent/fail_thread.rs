@@ -104,7 +104,7 @@ pub(crate) async fn fail_thread(
 
     crate::agent::kanban_updater::update_kanban_status(cfg, thread, "failed").await;
 
-    // Deliver the error message back to the user's platform (the :x: reaction
+    // Deliver the error message back to the user's platform (the "failed" reaction
     // was already enqueued by finalize_thread above on a REAL, resolvable
     // cause-message target).
     if let Some(channel) = channel {
@@ -671,7 +671,7 @@ pub(crate) async fn fail_thread_tool(
     let saved = crate::db::messages::create_message(&ctx.pool, &err_msg).await?;
 
     // Fetch the channel for reaction delivery; finalize_thread resolves a
-    // REAL cause-message target and enqueues the :x: reaction.
+    // REAL cause-message target and enqueues the "failed" reaction.
     let channel = crate::db::channels::get_channel_by_id(&ctx.pool, &thread.channel_id)
         .await
         .ok()
@@ -715,7 +715,7 @@ pub(crate) async fn fail_thread_tool(
 
     let transition = apply_fail_step_transition(ctx, thread, step).await;
 
-    // 5. Deliver the error message (mirrors fail_thread). The :x: reaction
+    // 5. Deliver the error message (mirrors fail_thread). The "failed" reaction
     //    was already enqueued by finalize_thread above with a REAL,
     //    resolvable cause-message target. Pass the RAW cause external_id
     //    (None or synthetic) so enqueue_delivery resolves the real reply
