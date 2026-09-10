@@ -448,7 +448,7 @@ pub struct InitializeResult {
 }
 
 /// Capabilities advertised by a platform plugin.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlatformCapabilities {
     /// Whether the plugin can receive inbound messages from the external service.
     #[serde(default)]
@@ -456,6 +456,13 @@ pub struct PlatformCapabilities {
     /// Whether the plugin can send outbound messages to the external service.
     #[serde(default)]
     pub outbound: bool,
+    /// DELIVERY capability: whether the core should quote the thread's seq-0
+    /// (cause) message above the final summary. Platforms that render native
+    /// reply threads (telegram, mattermost) leave it false; text surfaces with
+    /// no reply threading (the built-in CLI transport) declare true. Defaults
+    /// to false so every existing plugin keeps its current behaviour.
+    #[serde(default)]
+    pub quote_seq0: bool,
 }
 
 // ---------------------------------------------------------------------------

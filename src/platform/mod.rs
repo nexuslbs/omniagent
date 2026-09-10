@@ -20,6 +20,24 @@ pub mod queue;
 use queue::outbound_channel;
 pub use queue::{OutboundEnvelope, OutboundReceiver, OutboundSender};
 
+/// Delivery capabilities of the platforms implemented INSIDE the core (there
+/// is no plugin process for them). This is the core-side counterpart of a
+/// plugin's `initialize` capabilities: the CLI transport is a plain text
+/// stream with no reply threading, so it declares `quote_seq0`; every plugin
+/// platform declares its own capabilities in the initialize handshake.
+///
+/// Returns `None` for a platform name the core does not implement.
+pub fn builtin_capabilities(name: &str) -> Option<external::PlatformCapabilities> {
+    match name {
+        "cli" => Some(external::PlatformCapabilities {
+            inbound: true,
+            outbound: true,
+            quote_seq0: true,
+        }),
+        _ => None,
+    }
+}
+
 /// A platform that can receive messages from external sources and send
 /// responses back to them.
 #[async_trait]
@@ -49,6 +67,16 @@ pub trait Platform: Send + Sync + std::fmt::Debug {
             self.name()
         )))
     }
+
+    /// Delivery capabilities this platform declares.
+    ///
+    /// Plugin platforms return what their `initialize` result advertised;
+    /// implementations inside the core override this when they need a
+    /// non-default profile. The default keeps the historical behaviour:
+    /// nothing declared, so no seq-0 quoting.
+    fn capabilities(&self) -> external::PlatformCapabilities {
+        external::PlatformCapabilities::default()
+    }
 }
 
 #[async_trait]
@@ -67,6 +95,10 @@ impl<T: Platform + Send + Sync + ?Sized> Platform for Arc<T> {
 
     async fn read_file(&self, file_id: &str, server_url: &str) -> AppResult<Vec<u8>> {
         (**self).read_file(file_id, server_url).await
+    }
+
+    fn capabilities(&self) -> external::PlatformCapabilities {
+        (**self).capabilities()
     }
 }
 

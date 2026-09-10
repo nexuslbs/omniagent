@@ -5,6 +5,7 @@ use crate::db::types as queries;
 use crate::db::types::{Channel, CompleteThreadStats, Message, MessageNew, Thread};
 use crate::llm::{ChatMessage, Usage};
 use crate::mcp::AppContext;
+use crate::platform::external::PlatformCapabilities;
 use crate::platform::queue::OutboundEnvelope;
 
 /// Merge cumulative usage with a new usage value.
@@ -348,6 +349,29 @@ pub(crate) fn needs_cause_external_id_lookup(
     thread_sequence > 0 && cause_external_id.is_none_or(is_synthetic_external_id)
 }
 
+/// Whether `platform` asks the delivery path to quote the thread's seq-0
+/// (cause) message above the final summary.
+///
+/// Capability-driven, never decided from the platform NAME: plugin platforms
+/// advertise `quote_seq0` in their `initialize` capabilities, platforms
+/// implemented in core declare it in
+/// [`crate::platform::builtin_capabilities`]. A platform that declares nothing
+/// keeps the historical behaviour (no quote).
+async fn platform_quote_seq0(ctx: &AppContext, platform: &str) -> bool {
+    let declared = {
+        let platforms = ctx.platforms.read().await;
+        platforms.get(platform).map(|p| p.capabilities())
+    };
+    let declared = declared.or_else(|| crate::platform::builtin_capabilities(platform));
+    quote_seq0_requested(declared.as_ref())
+}
+
+/// Pure form of the delivery decision: does the DECLARED capability set request
+/// the seq-0 quote? Absent capabilities mean "nothing declared", so no quote.
+fn quote_seq0_requested(capabilities: Option<&PlatformCapabilities>) -> bool {
+    capabilities.is_some_and(|c| c.quote_seq0)
+}
+
 /// Invoke the configured redaction MCP tool on `content`.
 ///
 /// The configured tool name is qualified as `{server}_{tool}` (e.g.
@@ -451,8 +475,11 @@ pub async fn enqueue_delivery(
             "[{} - {} - Thread: #{}]\n\n{}",
             saved.msg_type, subtype, saved.thread_id, saved.content
         )
-    } else if saved.msg_type == "summary" && platform == "cli" {
-        // Quote the seq-0 message for CLI delivery (not needed for Telegram: it uses reply threading)
+    } else if saved.msg_type == "summary" && platform_quote_seq0(ctx, &platform).await {
+        // Quote the seq-0 message when the platform's DECLARED capabilities
+        // ask for it (`quote_seq0`): text surfaces without reply threading
+        // (the built-in CLI transport) declare it, platforms with native reply
+        // threading (telegram, mattermost) leave it off.
         match queries::get_cause_message(&ctx.pool, saved.thread_id).await {
             Ok(Some(cause)) => {
                 let cause_trimmed: String = cause.content.chars().take(100).collect();
@@ -1110,5 +1137,69 @@ mod reaction_tests {
             real_external_id(None, Some(real.to_string())),
             Some(real.to_string())
         );
+    }
+}
+
+#[cfg(test)]
+mod delivery_capability_tests {
+    use super::*;
+    use crate::platform::external::InitializeResult;
+
+    /// The seq-0 quote is requested by a platform that DECLARES the capability,
+    /// no matter what it is called: a fake platform named "irc" is quoted.
+    #[test]
+    fn seq0_quote_follows_declared_capability_not_platform_name() {
+        let fake = PlatformCapabilities {
+            inbound: true,
+            outbound: true,
+            quote_seq0: true,
+        };
+        assert!(quote_seq0_requested(Some(&fake)));
+    }
+
+    /// Nothing declared (plugins that advertise only inbound/outbound, e.g.
+    /// telegram/mattermost) keeps today's behaviour: no quote.
+    #[test]
+    fn seq0_quote_absent_or_false_declaration_is_not_quoted() {
+        assert!(!quote_seq0_requested(None));
+        let no_quote = PlatformCapabilities {
+            inbound: true,
+            outbound: true,
+            quote_seq0: false,
+        };
+        assert!(!quote_seq0_requested(Some(&no_quote)));
+    }
+
+    /// The built-in CLI transport declares the capability in core; the delivery
+    /// decision reads that declaration instead of comparing platform names.
+    #[test]
+    fn cli_declares_quote_seq0_as_a_builtin_capability() {
+        let cli = crate::platform::builtin_capabilities("cli").expect("cli built-in");
+        assert!(quote_seq0_requested(Some(&cli)));
+        assert!(
+            crate::platform::builtin_capabilities("irc").is_none(),
+            "core must not invent capabilities for unknown platforms"
+        );
+    }
+
+    /// Protocol compat: the field is optional, so an initialize result that
+    /// predates it parses with quote_seq0 = false; a plugin CAN request the
+    /// quote without being named "cli".
+    #[test]
+    fn quote_seq0_is_an_optional_initialize_capability() {
+        let legacy: InitializeResult = serde_json::from_value(serde_json::json!({
+            "name": "telegram",
+            "capabilities": {"inbound": true, "outbound": true}
+        }))
+        .expect("legacy initialize result must parse");
+        assert!(!legacy.capabilities.quote_seq0);
+
+        let fake: InitializeResult = serde_json::from_value(serde_json::json!({
+            "name": "irc",
+            "capabilities": {"inbound": true, "outbound": true, "quote_seq0": true}
+        }))
+        .expect("capability-aware initialize result must parse");
+        assert!(fake.capabilities.quote_seq0);
+        assert!(quote_seq0_requested(Some(&fake.capabilities)));
     }
 }

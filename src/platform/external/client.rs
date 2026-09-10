@@ -10,8 +10,8 @@ use crate::err_str;
 use crate::error::{AppResult, ErrorContext};
 use crate::platform::external::{
     build_deliver_request, build_initialize_request, build_react_request, build_typing_request,
-    parse_response, DeliverParams, DeliverResult, InitializeResult, PlatformPluginConfig,
-    PluginResponse, ReactParams, TypingParams,
+    parse_response, DeliverParams, DeliverResult, InitializeResult, PlatformCapabilities,
+    PlatformPluginConfig, PluginResponse, ReactParams, TypingParams,
 };
 use crate::platform::{OutboundReceiver, Platform};
 use async_trait::async_trait;
@@ -102,7 +102,7 @@ pub struct ExternalPlatformClient {
     /// Plugin name from initialize response (cached).
     plugin_name: Arc<StdMutex<Option<String>>>,
     /// Plugin capabilities from initialize response (cached).
-    capabilities: Arc<StdMutex<Option<(bool, bool)>>>, // (inbound, outbound)
+    capabilities: Arc<StdMutex<Option<PlatformCapabilities>>>,
     /// Next request id.
     next_id: AtomicU64,
     /// Circuit breaker state.
@@ -298,17 +298,15 @@ impl ExternalPlatformClient {
                 let init_result: InitializeResult =
                     serde_json::from_value(result).ctx("Failed to parse initialize result")?;
                 tracing::info!(
-                    "Platform plugin '{}' initialized: name={}, inbound={}, outbound={}",
+                    "Platform plugin '{}' initialized: name={}, inbound={}, outbound={}, quote_seq0={}",
                     self.name,
                     init_result.name,
                     init_result.capabilities.inbound,
                     init_result.capabilities.outbound,
+                    init_result.capabilities.quote_seq0,
                 );
                 *self.plugin_name.lock() = Some(init_result.name.clone());
-                *self.capabilities.lock() = Some((
-                    init_result.capabilities.inbound,
-                    init_result.capabilities.outbound,
-                ));
+                *self.capabilities.lock() = Some(init_result.capabilities.clone());
                 Ok(init_result)
             }
             PluginResponse::Error { error, .. } => Err(err_str!(
@@ -323,6 +321,13 @@ impl ExternalPlatformClient {
 
 #[async_trait]
 impl Platform for ExternalPlatformClient {
+    /// Capabilities declared by the plugin in its `initialize` result.
+    /// Before the handshake completes (or when the plugin declares nothing)
+    /// this is the default set: no seq-0 quoting.
+    fn capabilities(&self) -> PlatformCapabilities {
+        (*self.capabilities.lock()).clone().unwrap_or_default()
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
