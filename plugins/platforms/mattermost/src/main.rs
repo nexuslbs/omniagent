@@ -127,22 +127,38 @@ impl MattermostClient {
     }
 
     /// Send typing indicator (shows "bot is typing..." in the channel/thread).
+    ///
+    /// Mattermost 10.x only exposes the current endpoint
+    /// `POST /api/v4/users/me/typing` with the target channel in the BODY; the
+    /// legacy `POST /api/v4/channels/{channel_id}/typing` route was removed and
+    /// answers 404, which silently suppressed the indicator (the old code only
+    /// returned `Ok(false)` without any log). `parent_id` scopes the indicator
+    /// to a Mattermost thread (its root post id); absent = channel level.
     async fn send_typing(&self, channel_id: &str, parent_id: Option<&str>) -> Result<bool> {
-        let mut body = serde_json::json!({});
+        let mut body = serde_json::json!({ "channel_id": channel_id });
         if let Some(pid) = parent_id {
             body["parent_id"] = serde_json::json!(pid);
         }
         let resp = self
             .http_client
-            .post(format!(
-                "{}/api/v4/channels/{}/typing",
-                self.api_base, channel_id
-            ))
+            .post(format!("{}/api/v4/users/me/typing", self.api_base))
             .header("Authorization", &self.auth_header)
             .json(&body)
             .send()
             .await?;
-        Ok(resp.status().is_success())
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                "Typing indicator failed ({}): channel={} parent={:?} body={}",
+                status,
+                channel_id,
+                parent_id,
+                text
+            );
+        }
+        Ok(status.is_success())
     }
 
     /// Add a reaction (emoji) to a post.
@@ -4250,5 +4266,103 @@ mod tests {
             r#"{"server_url":"http://m:8065","first_last_only":"banana"}"#
         )
         .is_err());
+    }
+
+    // ── typing indicator endpoint (channel-level and thread-scoped) ─────────
+    //
+    // Mattermost 10.x removed `POST /api/v4/channels/{channel_id}/typing`
+    // (it answers 404, which silently killed the "is typing" indicator); the
+    // current route is `POST /api/v4/users/me/typing` with the channel in the
+    // request BODY, plus `parent_id` when the processing thread lives inside a
+    // Mattermost thread. These tests pin the request the plugin really sends.
+
+    /// Minimal HTTP server that records the (path, body) of every request and
+    /// answers with the pre-configured statuses, one per request in order.
+    fn start_capture_server(statuses: Vec<u16>) -> (String, Arc<Mutex<Vec<(String, String)>>>) {
+        let captured: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind capture server");
+        let addr = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for status in statuses {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut buf = vec![0u8; 8192];
+                let n = std::io::Read::read(&mut stream, &mut buf).unwrap_or(0);
+                let raw = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = raw
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or_default()
+                    .to_string();
+                let body = raw
+                    .split("\r\n\r\n")
+                    .nth(1)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                sink.lock().push((path, body));
+                let reason = match status {
+                    200 => "OK",
+                    404 => "Not Found",
+                    _ => "Error",
+                };
+                let resp = format!(
+                    "HTTP/1.1 {} {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    status, reason
+                );
+                std::io::Write::write_all(&mut stream, resp.as_bytes()).expect("write resp");
+            }
+        });
+        (addr, captured)
+    }
+
+    #[tokio::test]
+    async fn send_typing_uses_users_me_endpoint_with_channel_in_body() {
+        let (addr, captured) = start_capture_server(vec![200, 200]);
+        let client = MattermostClient::new(&addr, "test-token");
+
+        // Channel level (top-level thread): channel_id only.
+        let sent = client
+            .send_typing("chan-1", None)
+            .await
+            .expect("send_typing");
+        assert!(sent, "HTTP 200 must be reported as sent");
+        // Inside a Mattermost thread: parent_id scopes the indicator.
+        let sent = client
+            .send_typing("chan-1", Some("root-post-9"))
+            .await
+            .expect("send_typing");
+        assert!(sent, "HTTP 200 must be reported as sent");
+
+        let got = captured.lock().clone();
+        assert_eq!(got.len(), 2);
+        for (path, _) in &got {
+            assert_eq!(
+                path, "/api/v4/users/me/typing",
+                "mattermost 10.x removed /api/v4/channels/{{id}}/typing (404)"
+            );
+        }
+        let top: serde_json::Value = serde_json::from_str(&got[0].1).expect("json body");
+        assert_eq!(top["channel_id"], "chan-1");
+        assert!(
+            top.get("parent_id").is_none(),
+            "channel-level typing must not set parent_id"
+        );
+        let threaded: serde_json::Value = serde_json::from_str(&got[1].1).expect("json body");
+        assert_eq!(threaded["channel_id"], "chan-1");
+        assert_eq!(threaded["parent_id"], "root-post-9");
+    }
+
+    #[tokio::test]
+    async fn send_typing_reports_false_on_mattermost_error() {
+        let (addr, captured) = start_capture_server(vec![404]);
+        let client = MattermostClient::new(&addr, "test-token");
+        let sent = client
+            .send_typing("chan-1", None)
+            .await
+            .expect("send_typing");
+        assert!(!sent, "a 404 must be reported as NOT sent");
+        assert_eq!(captured.lock()[0].0, "/api/v4/users/me/typing");
     }
 }
