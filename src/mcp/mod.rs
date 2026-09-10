@@ -1123,16 +1123,92 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
     prev[b_len]
 }
 
+/// Default base URL of the core omniagent HTTP API (the historical hardcoded
+/// value), used when neither `CORE_API_BASE_URL` nor `HOST`/`PORT` are set.
+const DEFAULT_CORE_API_BASE_URL: &str = "http://localhost:8080";
+
+/// Resolve the base URL of the core omniagent HTTP API (audit V-8).
+///
+/// Resolution order:
+/// 1. `CORE_API_BASE_URL` env var when set and non-empty (explicit override:
+///    reverse proxy, non-default port, remote API),
+/// 2. `HOST` + `PORT` env vars - the same vars `AgentConfig::from_env` reads
+///    and the settings page exposes. A wildcard bind address (`0.0.0.0`,
+///    `::`) is not dialable, so it is mapped to `127.0.0.1`/`[::1]`; `PORT`
+///    defaults to `8080`,
+/// 3. [`DEFAULT_CORE_API_BASE_URL`] (`http://localhost:8080`).
+///
+/// A trailing `/` is trimmed so the result can be concatenated with an API
+/// path that already starts with `/`.
+pub(crate) fn core_api_base_url() -> String {
+    fn env_non_empty(name: &str) -> Option<String> {
+        std::env::var(name)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    }
+    core_api_base_url_from(
+        env_non_empty("CORE_API_BASE_URL").as_deref(),
+        env_non_empty("HOST").as_deref(),
+        env_non_empty("PORT").as_deref(),
+    )
+}
+
+/// Pure resolution logic behind [`core_api_base_url`] (unit-testable without
+/// mutating the process environment).
+fn core_api_base_url_from(
+    explicit: Option<&str>,
+    host: Option<&str>,
+    port: Option<&str>,
+) -> String {
+    if let Some(explicit) = explicit.map(str::trim).filter(|v| !v.is_empty()) {
+        return explicit.trim_end_matches('/').to_string();
+    }
+    let host = host
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| match v {
+            "0.0.0.0" => "127.0.0.1".to_string(),
+            "::" | "[::]" => "[::1]".to_string(),
+            other => other.to_string(),
+        })
+        .unwrap_or_else(|| "localhost".to_string());
+    let port = port
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("8080");
+    format!("http://{}:{}", host, port)
+}
+
+/// Join a resolved core API base URL with an API path (audit V-8). The
+/// request URL of the `omniagent-api` tool is built here so it can be unit
+/// tested without spinning up the HTTP handler.
+fn core_api_url(base_url: &str, path: &str) -> String {
+    if path.starts_with('/') {
+        format!("{}{}", base_url, path)
+    } else {
+        format!("{}/{}", base_url, path)
+    }
+}
+
 /// Build the `omniagent-api` tool: generic fetch-like HTTP client for the
-/// core omniagent API (localhost:8080). Replaces the cron/kanban plugin MCP
+/// core omniagent API. Replaces the cron/kanban plugin MCP
 /// tools with ONE generic tool: method + path + optional JSON body. Covers
 /// kanban task CRUD (/kanban/tasks...), schedule CRUD (/schedule... including
 /// DELETE /schedule/{id}), run-cron (/schedule/{id}/run), review
 /// (/kanban/tasks/{id}/review), plugins and actions endpoints.
+///
+/// The core API base URL is resolved once by [`core_api_base_url`] and used
+/// BOTH in the tool description and in the request URL (audit V-8: the
+/// `localhost:8080` literal used to be hardcoded in both places).
 fn omniagent_api_tool() -> McpTool {
+    let base_url = core_api_base_url();
     McpTool {
         name: tool_qualify("builtin", "omniagent_api"),
-        description: "Call the core omniagent HTTP API (localhost:8080). Specify an HTTP method, an API path and an optional JSON body; returns the response body as text. Covers kanban task CRUD (/kanban/tasks...), schedule CRUD (/schedule, /schedule/{id} incl. DELETE), run-cron (/schedule/{id}/run), review (/kanban/tasks/{id}/review), plugins and actions endpoints. This replaces the old kanban_*/cron_* plugin tools.".to_string(),
+        description: format!(
+            "Call the core omniagent HTTP API ({}). Specify an HTTP method, an API path and an optional JSON body; returns the response body as text. Covers kanban task CRUD (/kanban/tasks...), schedule CRUD (/schedule, /schedule/{{id}} incl. DELETE), run-cron (/schedule/{{id}}/run), review (/kanban/tasks/{{id}}/review), plugins and actions endpoints. This replaces the old kanban_*/cron_* plugin tools.",
+            base_url
+        ),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -1154,7 +1230,8 @@ fn omniagent_api_tool() -> McpTool {
         }),
         server_name: None,
         timeout_secs: Some(30),
-        handler: std::sync::Arc::new(|args: Value, _ctx: crate::mcp::AppContext| {
+        handler: std::sync::Arc::new(move |args: Value, _ctx: crate::mcp::AppContext| {
+            let base_url = base_url.clone();
             Box::pin(async move {
                 let method = args
                     .get("method")
@@ -1174,7 +1251,7 @@ fn omniagent_api_tool() -> McpTool {
                         is_error: true,
                     });
                 }
-                let url = format!("http://localhost:8080{}", path);
+                let url = core_api_url(&base_url, &path);
                 let client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(30))
                     .build()
@@ -1253,6 +1330,94 @@ fn fail_thread_tool() -> McpTool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // ─── core_api_base_url tests (audit V-8) ───
+
+    #[test]
+    fn test_core_api_base_url_default_is_localhost_8080() {
+        assert_eq!(
+            core_api_base_url_from(None, None, None),
+            DEFAULT_CORE_API_BASE_URL
+        );
+    }
+
+    #[test]
+    fn test_core_api_base_url_uses_host_and_port_env() {
+        assert_eq!(
+            core_api_base_url_from(None, Some("127.0.0.1"), Some("9999")),
+            "http://127.0.0.1:9999"
+        );
+    }
+
+    #[test]
+    fn test_core_api_base_url_port_defaults_when_only_host_set() {
+        assert_eq!(
+            core_api_base_url_from(None, Some("api.internal"), None),
+            "http://api.internal:8080"
+        );
+    }
+
+    #[test]
+    fn test_core_api_base_url_wildcard_bind_address_is_dialable() {
+        assert_eq!(
+            core_api_base_url_from(None, Some("0.0.0.0"), Some("8080")),
+            "http://127.0.0.1:8080"
+        );
+        assert_eq!(
+            core_api_base_url_from(None, Some("::"), None),
+            "http://[::1]:8080"
+        );
+    }
+
+    #[test]
+    fn test_core_api_base_url_explicit_override_wins_and_trims_slash() {
+        assert_eq!(
+            core_api_base_url_from(
+                Some("http://api.internal:9000/"),
+                Some("127.0.0.1"),
+                Some("9999")
+            ),
+            "http://api.internal:9000"
+        );
+    }
+
+    #[test]
+    fn test_core_api_url_uses_resolved_base_url_and_appends_path() {
+        // V-8 verification: HOST=127.0.0.1 PORT=9999 must yield
+        // http://127.0.0.1:9999/... - never localhost:8080.
+        let base = core_api_base_url_from(None, Some("127.0.0.1"), Some("9999"));
+        assert_eq!(
+            core_api_url(&base, "/kanban/tasks"),
+            "http://127.0.0.1:9999/kanban/tasks"
+        );
+        assert_eq!(
+            core_api_url(&base, "kanban/tasks"),
+            "http://127.0.0.1:9999/kanban/tasks"
+        );
+        assert!(!core_api_url(&base, "/schedule").contains("localhost:8080"));
+    }
+
+    #[test]
+    fn test_core_api_url_default_base() {
+        let base = core_api_base_url_from(None, None, None);
+        assert_eq!(
+            core_api_url(&base, "/kanban/tasks"),
+            "http://localhost:8080/kanban/tasks"
+        );
+    }
+
+    #[test]
+    fn test_omniagent_api_tool_description_uses_resolved_base_url() {
+        // Description and request URL must agree on the resolved base URL.
+        let base = core_api_base_url();
+        let desc = omniagent_api_tool().description;
+        assert!(
+            desc.contains(&base),
+            "description {:?} does not contain base URL {:?}",
+            desc,
+            base
+        );
+    }
 
     // ─── truncate_content tests ───
 
