@@ -375,6 +375,16 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
+            "malformed_response_tool".into(),
+            SettingMeta {
+                field_type: "select".into(),
+                description: "Name of the MCP tool to call to detect PROVIDER-SPECIFIC malformed LLM response forms (e.g. DeepSeek DSML text-mode tool-call markup) in the assistant's last message and to return the cleaned text. The core uses the tool's malformed verdict (plus its cleaned text and continuation_intent) to decide the terminal summary; empty (default) = the core's built-in provider-neutral heuristic. Example: llm-response-hygiene_classify (the omni-plugins llm-response-hygiene tool)".into(),
+                options: None,
+                readonly: false,
+                default: Some("".into()),
+            },
+        ),
+        (
             "git_sync_tool".into(),
             SettingMeta {
                 field_type: "select".into(),
@@ -756,6 +766,7 @@ fn writable_setting_keys() -> std::collections::HashSet<&'static str> {
         "prompt_generate_tool",
         "prompt_compact_messages_tool",
         "redaction_tool",
+        "malformed_response_tool",
         "git_sync_tool",
         "delete_after_days",
         "kanban_dispatcher_interval",
@@ -851,6 +862,7 @@ pub async fn get_settings_handler(State(state): State<Arc<AppState>>) -> Json<Se
         "prompt_generate_tool",
         "prompt_compact_messages_tool",
         "redaction_tool",
+        "malformed_response_tool",
         "git_sync_tool",
     ] {
         if let Some((_, _, ref mut meta)) = defs

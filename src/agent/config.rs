@@ -121,6 +121,12 @@ pub struct AgentConfig {
     /// and tool output before delivery. Empty (default) = no redaction at
     /// all. Example: "redaction_redact" (the omni-plugins redaction tool).
     pub redaction_tool: String,
+    /// MCP tool name for detecting PROVIDER-SPECIFIC malformed LLM response
+    /// forms (e.g. DeepSeek DSML text-mode tool-call markup) in the assistant's
+    /// last message, and for returning the cleaned text. Empty (default) = the
+    /// core's built-in provider-neutral heuristic is used (back-compat).
+    /// Example: "llm-response-hygiene_classify" (the omni-plugins tool).
+    pub malformed_response_tool: String,
 
     /// Cumulative char budget for appended sub-prompts per running thread
     /// (settings `sub_prompt_max_chars`; 0 disables appends).
@@ -293,6 +299,7 @@ impl AgentConfig {
                 "prompt_compact-messages",
             ),
             redaction_tool: get("redaction_tool", ""),
+            malformed_response_tool: get("malformed_response_tool", ""),
             sub_prompt_max_chars: get("sub_prompt_max_chars", "4000").parse().unwrap_or(4000),
             sub_prompt_iteration_percent: get("sub_prompt_iteration_percent", "50")
                 .parse()
@@ -413,6 +420,7 @@ impl AgentConfig {
                 "prompt_compact-messages",
             ),
             redaction_tool: get("redaction_tool", ""),
+            malformed_response_tool: get("malformed_response_tool", ""),
             sub_prompt_max_chars: get("sub_prompt_max_chars", "4000").parse().unwrap_or(4000),
             sub_prompt_iteration_percent: get("sub_prompt_iteration_percent", "50")
                 .parse()
@@ -500,6 +508,7 @@ mod tests {
             prompt_tool_name: "prompt_generate".to_string(),
             compact_messages_tool_name: "prompt_compact-messages".to_string(),
             redaction_tool: String::new(),
+            malformed_response_tool: String::new(),
             sub_prompt_max_chars: 4000,
             sub_prompt_iteration_percent: 50,
             token_budget_hard: 200000,
@@ -559,7 +568,7 @@ mod tests {
 
     #[test]
     fn test_agent_config_complete_field_count() {
-        // AgentConfig has 40 fields. This test verifies all are present,
+        // AgentConfig has 41 fields. This test verifies all are present,
         // by constructing a minimal config and checking all fields are accessible.
         let cfg = AgentConfig {
             llm_api_key: String::new(),
@@ -578,6 +587,7 @@ mod tests {
             prompt_tool_name: String::new(),
             compact_messages_tool_name: String::new(),
             redaction_tool: String::new(),
+            malformed_response_tool: String::new(),
             sub_prompt_max_chars: 0,
             sub_prompt_iteration_percent: 0,
             token_budget_hard: 0,

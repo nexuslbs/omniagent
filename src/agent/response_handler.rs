@@ -1,8 +1,8 @@
 use crate::agent::config::AgentContext;
 use crate::agent::helpers;
+use crate::agent::response_hygiene;
 use crate::agent::terminal_summary::{
-    deterministic_activity_summary, deterministic_interrupted_summary, is_continuation_intent,
-    sanitize_terminal_content,
+    deterministic_activity_summary, deterministic_interrupted_summary,
 };
 use crate::db::types as queries;
 use crate::db::types::{CompleteThreadStats, Message, MessageNew, Thread};
@@ -159,15 +159,18 @@ pub(crate) async fn handle_response(
         };
 
         // Terminal-content hygiene (interrupted threads must end with a PROPER
-        // summary; thread 1596). DeepSeek in text-tool mode sometimes answers
-        // the summary prompt (tools:None) with a raw DSML/XML tool-call block
-        // or with continuation prose ("I'll update the subtasks..."). Persist
-        // neither: strip tool-call markup, and when nothing coherent remains or
-        // the text is only continuation intent, fall back to the deterministic
-        // digest-based summary so the terminal message is always a genuine,
-        // well-formed summary with no pending tool-call intent.
-        let cleaned = sanitize_terminal_content(&summary_text);
-        if cleaned.trim().is_empty() || is_continuation_intent(&cleaned) {
+        // summary; thread 1596). A provider in text-tool mode sometimes answers
+        // the summary prompt (tools:None) with raw PROVIDER-SPECIFIC tool-call
+        // markup (DeepSeek DSML/XML) or with continuation prose ("I'll update
+        // the subtasks..."). Persist neither: the global setting
+        // `malformed_response_tool` names the MCP tool that owns that detection
+        // (empty default = the core's built-in provider-neutral heuristic), and
+        // when nothing coherent remains or the text is only continuation intent
+        // we fall back to the deterministic digest-based summary so the
+        // terminal message is always a genuine, well-formed summary with no
+        // pending tool-call intent.
+        let hygiene = response_hygiene::assess(&cfg.ctx, &summary_text, true).await;
+        if hygiene.fallback {
             summary_text = deterministic_interrupted_summary(
                 &cause_msg.content,
                 build_tool_evidence_digest(messages).as_deref(),
@@ -175,11 +178,11 @@ pub(crate) async fn handle_response(
                 iter_limit,
             );
             info!(
-                "[summary] thread {}: summary response was empty/DSML/continuation-only; using deterministic interrupted summary",
-                thread.id
+                "[summary] thread {}: summary response was empty/malformed/continuation-only (via_tool={}, malformed={}); using deterministic interrupted summary",
+                thread.id, hygiene.via_tool, hygiene.malformed
             );
         } else {
-            summary_text = cleaned;
+            summary_text = hygiene.cleaned;
         }
         let summary_msg = MessageNew {
             thread_id: thread.id,
@@ -263,18 +266,19 @@ pub(crate) async fn handle_response(
                     }
                 };
             // Terminal-content hygiene: same protection as the interrupted path
-            // (thread 1596): never persist DSML/XML tool-call markup or
-            // continuation prose as the activity summary.
-            let cleaned = sanitize_terminal_content(&summary_text);
-            if cleaned.trim().is_empty() || is_continuation_intent(&cleaned) {
+            // (thread 1596): never persist provider-specific tool-call markup or
+            // continuation prose as the activity summary. The configured
+            // `malformed_response_tool` (when set) owns that detection.
+            let hygiene = response_hygiene::assess(&cfg.ctx, &summary_text, true).await;
+            if hygiene.fallback {
                 summary_text =
                     deterministic_activity_summary(&cause_msg.content, Some(digest.as_str()));
                 info!(
-                    "[summary] thread {}: empty-final summary response was empty/DSML/continuation-only; using deterministic activity summary",
-                    thread.id
+                    "[summary] thread {}: empty-final summary response was empty/malformed/continuation-only (via_tool={}, malformed={}); using deterministic activity summary",
+                    thread.id, hygiene.via_tool, hygiene.malformed
                 );
             } else {
-                summary_text = cleaned;
+                summary_text = hygiene.cleaned;
             }
             let summary_msg = MessageNew {
                 thread_id: thread.id,
@@ -353,16 +357,18 @@ pub(crate) async fn handle_response(
         }
     } else {
         // Normal completion: the agent's final message IS the summary. Hygiene
-        // still applies: the model occasionally emits a raw DSML/XML tool-call
-        // block as its "final answer" content (threads 1550/1588 persisted
-        // exactly that as their last message). Strip tool-call markup so it is
-        // never persisted or parsed as a terminal summary, falling back to the
+        // still applies: a model occasionally emits PROVIDER-SPECIFIC malformed
+        // tool-call markup as its "final answer" content (threads 1550/1588
+        // persisted exactly that as their last message). The configured
+        // `malformed_response_tool` (when set) owns that detection; otherwise
+        // the core's built-in heuristic is used. Either way the markup is never
+        // persisted or parsed as a terminal summary, falling back to the
         // deterministic digest summary when the whole "final" text was markup.
-        let cleaned_final = sanitize_terminal_content(&final_content);
-        let final_text = if cleaned_final.trim().is_empty() {
+        let hygiene = response_hygiene::assess(&cfg.ctx, &final_content, false).await;
+        let final_text = if hygiene.fallback {
             info!(
-                "[summary] thread {}: final content was DSML/XML tool-call markup only; using deterministic interrupted summary",
-                thread.id
+                "[summary] thread {}: final content was malformed tool-call markup only (via_tool={}, malformed={}); using deterministic interrupted summary",
+                thread.id, hygiene.via_tool, hygiene.malformed
             );
             deterministic_interrupted_summary(
                 &cause_msg.content,
@@ -371,7 +377,7 @@ pub(crate) async fn handle_response(
                 iter_limit,
             )
         } else {
-            cleaned_final
+            hygiene.cleaned
         };
         let agent_msg = MessageNew {
             thread_id: thread.id,
