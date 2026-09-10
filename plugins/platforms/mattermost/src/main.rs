@@ -1073,11 +1073,14 @@ struct PluginConfig {
     access_token_name: Option<String>,
     #[serde(default = "default_connection_mode")]
     connection_mode: String,
-    #[serde(default = "default_polling_enabled")]
+    #[serde(
+        default = "default_polling_enabled",
+        deserialize_with = "deserialize_bool_from_string_or_bool"
+    )]
     polling_enabled: bool,
     #[serde(
         default = "default_polling_interval",
-        deserialize_with = "deserialize_u64_from_string_or_number"
+        deserialize_with = "deserialize_polling_interval"
     )]
     polling_interval: u64,
     // channel_ids removed: plugin auto-discovers channels from omniagent channel records
@@ -1099,7 +1102,7 @@ struct PluginConfig {
     test_password: Option<String>,
     #[serde(
         default = "default_max_download_bytes",
-        deserialize_with = "deserialize_u64_from_string_or_number"
+        deserialize_with = "deserialize_max_download_bytes"
     )]
     max_download_bytes: u64,
     /// When true, deliver only the thread's FIRST (seq-0) and FINAL messages
@@ -1150,12 +1153,14 @@ fn default_bot_user() -> String {
 }
 
 /// Deserialize a u64 that may be a number, a string, or empty (use default).
-fn deserialize_u64_from_string_or_number<'de, D>(deserializer: D) -> Result<u64, D::Error>
+fn deserialize_u64_or_default<'de, D>(deserializer: D, default: u64) -> Result<u64, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     use serde::de;
-    struct U64OrString;
+    struct U64OrString {
+        default: u64,
+    }
     impl<'de> de::Visitor<'de> for U64OrString {
         type Value = u64;
         fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -1165,14 +1170,47 @@ where
             Ok(v)
         }
         fn visit_str<E: de::Error>(self, v: &str) -> Result<u64, E> {
+            let v = v.trim();
             if v.is_empty() {
-                Ok(default_polling_interval())
+                // Untouched optional field persisted by the dashboard.
+                Ok(self.default)
             } else {
                 v.parse::<u64>().map_err(de::Error::custom)
             }
         }
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<u64, E> {
+            u64::try_from(v).map_err(de::Error::custom)
+        }
+        fn visit_f64<E: de::Error>(self, v: f64) -> Result<u64, E> {
+            if v < 0.0 || v.fract() != 0.0 {
+                return Err(de::Error::custom("expected a whole non-negative number"));
+            }
+            Ok(v as u64)
+        }
+        fn visit_unit<E: de::Error>(self) -> Result<u64, E> {
+            Ok(self.default)
+        }
     }
-    deserializer.deserialize_any(U64OrString)
+    deserializer.deserialize_any(U64OrString { default })
+}
+
+/// `polling_interval`: a blank value means "not set" -> plugin default.
+fn deserialize_polling_interval<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_u64_or_default(deserializer, default_polling_interval())
+}
+
+/// `max_download_bytes`: a blank value means "not set" -> plugin default.
+/// This must NOT reuse the polling-interval default: a single shared visitor
+/// returning `default_polling_interval()` for blank input would silently cap
+/// downloads at a few bytes.
+fn deserialize_max_download_bytes<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_u64_or_default(deserializer, default_max_download_bytes())
 }
 
 /// Deserialize a bool that may be a real boolean or a string ("true", "on",
@@ -3836,6 +3874,52 @@ mod tests {
         let plain: PluginConfig =
             serde_json::from_str(r#"{"server_url":"http://mattermost:8065"}"#).unwrap();
         assert_eq!(plain.agent_api_base(), "http://localhost:8080");
+    }
+
+    /// Regression (prod incident 2026-09-09): the core sends the FLAT
+    /// plugins.yml map as `HashMap<String,String>`, so a dashboard-saved
+    /// config reaches the plugin with every scalar stringified ("false") and
+    /// untouched optional fields as empty strings. That used to abort
+    /// `configure` with `invalid type: string "false", expected a boolean`
+    /// and killed the mattermost platform in production.
+    #[test]
+    fn config_accepts_stringified_and_blank_values() {
+        let cfg: PluginConfig = serde_json::from_value(serde_json::json!({
+            "server_url": "http://mattermost:8065",
+            "access_token_name": "MATTERMOST_ACCESS_TOKEN",
+            "connection_mode": "",
+            "polling_enabled": "false",
+            "polling_interval": "",
+            "max_download_bytes": "",
+            "first_last_only": "false",
+        }))
+        .expect("stringified/blank config must deserialize");
+        assert!(!cfg.polling_enabled);
+        assert_eq!(cfg.polling_interval, default_polling_interval());
+        assert_eq!(cfg.max_download_bytes, default_max_download_bytes());
+        assert!(!cfg.first_last_only);
+
+        // Real booleans and numbers keep working, and truthy dashboard
+        // spellings ("on") are accepted too.
+        let typed: PluginConfig = serde_json::from_value(serde_json::json!({
+            "polling_enabled": true,
+            "polling_interval": 7,
+            "max_download_bytes": 1024,
+            "first_last_only": true,
+        }))
+        .unwrap();
+        assert!(typed.polling_enabled);
+        assert_eq!(typed.polling_interval, 7);
+        assert_eq!(typed.max_download_bytes, 1024);
+        assert!(typed.first_last_only);
+
+        let forms: PluginConfig = serde_json::from_value(serde_json::json!({
+            "polling_enabled": "on",
+            "first_last_only": "1",
+        }))
+        .unwrap();
+        assert!(forms.polling_enabled);
+        assert!(forms.first_last_only);
     }
 
     // ── set_agent_secret status-code tests ───────────────────────────────────
