@@ -1204,4 +1204,69 @@ mod delivery_capability_tests {
         assert!(fake.capabilities.quote_seq0);
         assert!(quote_seq0_requested(Some(&fake.capabilities)));
     }
+
+    /// Wire-format round trip (audit V-3): the REAL initialize results emitted
+    /// by the mattermost/telegram plugins decide the `/new` dispatch, and a
+    /// plugin that declares nothing keeps the generic `/new` fallback.
+    #[test]
+    fn initialize_commands_capability_drives_new_command_matching() {
+        let mattermost: InitializeResult = serde_json::from_value(serde_json::json!({
+            "name": "mattermost",
+            "capabilities": {
+                "inbound": true,
+                "outbound": true,
+                "setup": true,
+                "commands": {"new": ["/new", "$new", "//new"]}
+            }
+        }))
+        .expect("mattermost initialize result must parse");
+        let mm = mattermost
+            .capabilities
+            .commands
+            .get("new")
+            .map(|v| v.as_slice());
+        assert_eq!(
+            crate::commands::match_new_command("$new mm-kanban", mm),
+            Some("$new")
+        );
+        assert_eq!(
+            crate::commands::match_new_command("//new", mm),
+            Some("//new")
+        );
+        assert_eq!(crate::commands::match_new_command("/new", mm), Some("/new"));
+
+        let telegram: InitializeResult = serde_json::from_value(serde_json::json!({
+            "name": "telegram",
+            "capabilities": {"inbound": true, "outbound": true, "commands": {"new": ["/new"]}}
+        }))
+        .expect("telegram initialize result must parse");
+        let tg = telegram
+            .capabilities
+            .commands
+            .get("new")
+            .map(|v| v.as_slice());
+        assert_eq!(
+            crate::commands::match_new_command("/new x", tg),
+            Some("/new")
+        );
+        assert_eq!(crate::commands::match_new_command("$new x", tg), None);
+
+        // Compat: an older plugin declares nothing -> generic `/new` only.
+        let legacy: InitializeResult = serde_json::from_value(serde_json::json!({
+            "name": "irc",
+            "capabilities": {"inbound": true, "outbound": true}
+        }))
+        .expect("legacy initialize result must parse");
+        assert!(legacy.capabilities.commands.is_empty());
+        let none = legacy
+            .capabilities
+            .commands
+            .get("new")
+            .map(|v| v.as_slice());
+        assert_eq!(
+            crate::commands::match_new_command("/new", none),
+            Some("/new")
+        );
+        assert_eq!(crate::commands::match_new_command("$new", none), None);
+    }
 }
