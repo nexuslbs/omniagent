@@ -1262,36 +1262,57 @@ async fn handle_commit_and_push(args: Value) -> Result<(String, bool)> {
         branch_out.trim()
     };
 
-    // Build push URL with token
-    let push_url = if remote_url.starts_with("https://") {
+    // Authenticate the NAMED remote `origin` per invocation with
+    // `-c url.<token-url>.insteadOf=<orig-url>` (the same mechanism as
+    // `run_command --use_auth`; the repo's own .git/config is never touched).
+    // Pushing to a NAMED remote is what makes git update
+    // refs/remotes/origin/<branch>; the previous explicit-URL push
+    // (`git push <url> HEAD:<branch>`) did not, so a successful push left
+    // `git status` / the dashboard ahead indicator reporting commits to push
+    // forever (production incident 2026-09-10, telegram thread 1696).
+    let mut auth_cfg: Vec<String> = Vec::new();
+    if remote_url.starts_with("https://") {
         let rest = remote_url
             .split_once("://")
             .map(|(_, r)| r)
             .unwrap_or(&remote_url);
-        format!("https://x-access-token:{}@{}", token, rest)
-    } else {
-        remote_url.clone()
-    };
+        let host_path = rest.split('/').next().unwrap_or(rest);
+        auth_cfg.push("-c".to_string());
+        auth_cfg.push(build_instead_of_override(&token, host_path));
+    }
 
-    let (_push_stdout, push_stderr, push_rc) = run_git(
-        &["push", &push_url, &format!("HEAD:{}", branch)],
+    let (head_out, _, head_rc) = run_git(&["rev-parse", "HEAD"], Some(&repo_dir), 15).await;
+    let head_sha = head_out.trim().to_string();
+
+    let (_push_stdout, push_stderr, push_rc) = run_git_with_config(
+        &auth_cfg,
+        &["push", "origin", &format!("HEAD:{}", branch)],
         Some(&repo_dir),
         120,
     )
     .await;
 
     if push_rc != 0 {
-        // Truncate stderr for display
-        let truncated = if push_stderr.len() > 500 {
-            format!("{}... [truncated]", &push_stderr[..500])
-        } else {
-            push_stderr.clone()
-        };
-        return Ok((format!("Push failed: {}", truncated), true));
+        return Ok((
+            format!("Push failed: {}", truncate_for_display(&push_stderr)),
+            true,
+        ));
     }
 
-    // Update local tracking refs
-    run_git(&["fetch", "origin", "--quiet"], Some(&repo_dir), 30).await;
+    // Reconcile the remote-tracking ref with the push that just landed, so
+    // `git status` (and every "commits to push" reader) agrees with GitHub.
+    let refresh = if head_rc == 0 && !head_sha.is_empty() {
+        refresh_remote_tracking_ref(&repo_dir, branch, &head_sha, &auth_cfg).await
+    } else {
+        RefRefresh {
+            ok: false,
+            note: format!(
+                "WARNING: could not read local HEAD; refs/remotes/origin/{} not verified - \
+                 git status and the dashboard may still report commits to push",
+                branch
+            ),
+        }
+    };
 
     let note = if commit_note.is_empty() {
         "Committed and pushed".to_string()
@@ -1306,10 +1327,10 @@ async fn handle_commit_and_push(args: Value) -> Result<(String, bool)> {
                 .canonicalize()
                 .map(|p| p.display().to_string())
                 .unwrap_or(repo_dir),
-            "note": note
+            "note": format!("{} ({})", note, refresh.note)
         })
         .to_string(),
-        false,
+        !refresh.ok,
     ))
 }
 
@@ -1368,6 +1389,140 @@ fn build_instead_of_override(token: &str, host_path: &str) -> String {
     let token_url = format!("https://x-access-token:{}@{}", token, host_path);
     let orig_url = format!("https://{}", host_path);
     format!("url.{}.insteadOf={}", token_url, orig_url)
+}
+
+/// Truncate a git message for display (500 chars, same policy as the other
+/// git handlers).
+fn truncate_for_display(s: &str) -> String {
+    if s.len() > 500 {
+        format!("{}... [truncated]", &s[..500])
+    } else {
+        s.to_string()
+    }
+}
+
+/// Run `git` with leading `-c <cfg>` config overrides, so a token can be
+/// injected for ONE invocation (`-c url.<token-url>.insteadOf=<url>`) without
+/// ever writing it into the repo's `.git/config`.
+async fn run_git_with_config(
+    cfg: &[String],
+    args: &[&str],
+    cwd: Option<&str>,
+    timeout_secs: u64,
+) -> (String, String, i32) {
+    let mut all: Vec<&str> = Vec::with_capacity(cfg.len() + args.len());
+    all.extend(cfg.iter().map(|s| s.as_str()));
+    all.extend(args.iter().copied());
+    run_git(&all, cwd, timeout_secs).await
+}
+
+/// Current value of `refs/remotes/origin/<branch>` (None when it does not
+/// exist).
+async fn remote_tracking_ref(repo_dir: &str, branch: &str) -> Option<String> {
+    let refname = format!("refs/remotes/origin/{}", branch);
+    let (out, _, rc) = run_git(
+        &["rev-parse", "--verify", "--quiet", &refname],
+        Some(repo_dir),
+        15,
+    )
+    .await;
+    let sha = out.trim().to_string();
+    if rc == 0 && !sha.is_empty() {
+        Some(sha)
+    } else {
+        None
+    }
+}
+
+/// Outcome of the post-push remote-tracking refresh: whether
+/// `refs/remotes/origin/<branch>` now reflects the pushed commit, plus a
+/// human-readable note for the tool output (a WARNING when it does not).
+pub(crate) struct RefRefresh {
+    pub(crate) ok: bool,
+    pub(crate) note: String,
+}
+
+/// Make `refs/remotes/origin/<branch>` reflect `head_sha`, which the caller
+/// has just pushed SUCCESSFULLY (push exit code verified) to the named remote
+/// `origin`.
+///
+/// A named-remote push normally updates the remote-tracking ref, so this is
+/// usually a cheap no-op check. It is NOT a no-op when the push went through
+/// an explicit URL (`git push <url> HEAD:<branch>`, the old git_sync path) or
+/// when the repo has no fetch refspec: the tracking ref then stays N commits
+/// behind HEAD forever and `git status` / the dashboard ahead indicator
+/// reports "N commits to push" even though GitHub has everything (production
+/// incident 2026-09-10, telegram thread 1696).
+///
+/// Repair order: authenticated `fetch origin` (exit code CHECKED, never
+/// silently discarded), then `update-ref` as a fallback - safe because the
+/// push it mirrors was verified above. If neither reconciles the ref the
+/// caller is told (ok=false plus a WARNING note), so the tool can never claim
+/// a clean sync while the UI disagrees.
+pub(crate) async fn refresh_remote_tracking_ref(
+    repo_dir: &str,
+    branch: &str,
+    head_sha: &str,
+    auth_cfg: &[String],
+) -> RefRefresh {
+    let refname = format!("refs/remotes/origin/{}", branch);
+    let short = &head_sha[..head_sha.len().min(7)];
+
+    if remote_tracking_ref(repo_dir, branch).await.as_deref() == Some(head_sha) {
+        return RefRefresh {
+            ok: true,
+            note: format!("origin/{} at {}", branch, short),
+        };
+    }
+
+    // Authenticated refresh with the SAME token as the push; exit code checked.
+    let (_, fetch_err, fetch_rc) = run_git_with_config(
+        auth_cfg,
+        &["fetch", "origin", "--quiet"],
+        Some(repo_dir),
+        120,
+    )
+    .await;
+    if fetch_rc == 0 && remote_tracking_ref(repo_dir, branch).await.as_deref() == Some(head_sha) {
+        return RefRefresh {
+            ok: true,
+            note: format!("origin/{} at {}", branch, short),
+        };
+    }
+
+    // Fallback: the push above was verified, so head_sha IS on the remote.
+    // Point the ref `git status` reads at it directly.
+    let (_, up_err, up_rc) = run_git(&["update-ref", &refname, head_sha], Some(repo_dir), 15).await;
+    if up_rc == 0 && remote_tracking_ref(repo_dir, branch).await.as_deref() == Some(head_sha) {
+        let warn = if fetch_rc != 0 {
+            format!(
+                "; warning: authenticated fetch failed: {}",
+                truncate_for_display(&fetch_err)
+            )
+        } else {
+            String::new()
+        };
+        return RefRefresh {
+            ok: true,
+            note: format!("origin/{} refreshed to {}{}", branch, short, warn),
+        };
+    }
+
+    let fetch_msg = if fetch_rc != 0 {
+        truncate_for_display(&fetch_err)
+    } else {
+        "ref still stale after a successful fetch".to_string()
+    };
+    RefRefresh {
+        ok: false,
+        note: format!(
+            "WARNING: could not refresh refs/remotes/origin/{} (fetch: {}; update-ref: {}) - \
+             git status and the dashboard may still report commits to push",
+            branch,
+            fetch_msg,
+            truncate_for_display(&up_err),
+        ),
+    }
 }
 
 /// `run_command`: run an arbitrary git command in a repository.

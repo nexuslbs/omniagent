@@ -10,12 +10,25 @@
 //! `500 Pull failed: Command failed: git pull --rebase
 //! https://x-access-token:ghs_...` error when a previously minted token has
 //! expired.
+//!
+//! Truthful remote-tracking state (production incident 2026-09-10, telegram
+//! thread 1696): the push goes to the NAMED remote `origin` (with the token
+//! injected per invocation via `-c url.<token>.insteadOf=<origin>`, never
+//! written into the repo's `.git/config`), because only a named-remote push
+//! makes git update `refs/remotes/origin/<branch>` - which is what
+//! `git status` and the dashboard ahead indicator read. After the push the
+//! tracking ref is reconciled (authenticated fetch with a CHECKED exit code,
+//! then `update-ref` as a fallback) so a successful sync can never leave the
+//! UI reporting "N commits to push".
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::Value;
 use std::path::Path;
 
-use crate::{get_github_token, run_git, validate_repo_within_workspace, CONFIG, TOKEN_CACHE};
+use crate::{
+    build_instead_of_override, get_github_token, refresh_remote_tracking_ref, run_git,
+    run_git_with_config, validate_repo_within_workspace, RefRefresh, CONFIG, TOKEN_CACHE,
+};
 
 /// Classify a git stderr blob as an authentication/authorization failure
 /// (expired or revoked token). When this matches, retrying once with a
@@ -49,36 +62,40 @@ fn truncate_err(s: &str) -> String {
 
 /// One full sync pass (fetch -> pull --rebase -> push) for `repo_dir`.
 ///
-/// `remote_url` is the origin remote as configured. When it is https the
-/// token is embedded in the per-invocation URL (the repo's own .git/config
-/// is never modified); local-path remotes (tests) run without a token.
-async fn sync_pass(repo_dir: &str, remote_url: &str, token: Option<&str>) -> Result<()> {
-    let auth_url = if remote_url.starts_with("https://") {
-        let token = token.context("internal error: https remote requires a token")?;
-        let rest = remote_url
-            .split_once("://")
-            .map(|(_, r)| r)
-            .unwrap_or(remote_url);
-        format!("https://x-access-token:{}@{}", token, rest)
-    } else {
-        remote_url.to_string()
-    };
-
+/// `auth_cfg` carries the per-invocation `-c url.<token-url>.insteadOf=<url>`
+/// override that authenticates the NAMED remote `origin` without ever writing
+/// the token into the repo's `.git/config`. It is empty for local-path remotes
+/// (tests) that need no token.
+///
+/// Returns the branch that was synced (the caller needs it to reconcile
+/// `refs/remotes/origin/<branch>`).
+async fn sync_pass(repo_dir: &str, auth_cfg: &[String]) -> Result<String> {
     let (branch_out, _, _) =
         run_git(&["rev-parse", "--abbrev-ref", "HEAD"], Some(repo_dir), 15).await;
     let branch = branch_out.trim();
     let branch = if branch.is_empty() { "main" } else { branch };
 
-    let (_, err, rc) = run_git(&["fetch", &auth_url], Some(repo_dir), 120).await;
+    let (_, err, rc) =
+        run_git_with_config(auth_cfg, &["fetch", "origin"], Some(repo_dir), 120).await;
     if rc != 0 {
         anyhow::bail!("Fetch failed: {}", truncate_err(&err));
     }
-    let (_, err, rc) = run_git(&["pull", "--rebase", &auth_url], Some(repo_dir), 120).await;
+    let (_, err, rc) = run_git_with_config(
+        auth_cfg,
+        &["pull", "--rebase", "origin"],
+        Some(repo_dir),
+        120,
+    )
+    .await;
     if rc != 0 {
         anyhow::bail!("Pull failed: {}", truncate_err(&err));
     }
-    let (_, err, rc) = run_git(
-        &["push", &auth_url, &format!("HEAD:{}", branch)],
+    // Push to the NAMED remote: an explicit-URL push (`git push <url>
+    // HEAD:<branch>`) does NOT update refs/remotes/origin/<branch>, so the
+    // dashboard kept showing "N commits to push" after a successful sync.
+    let (_, err, rc) = run_git_with_config(
+        auth_cfg,
+        &["push", "origin", &format!("HEAD:{}", branch)],
         Some(repo_dir),
         120,
     )
@@ -86,7 +103,7 @@ async fn sync_pass(repo_dir: &str, remote_url: &str, token: Option<&str>) -> Res
     if rc != 0 {
         anyhow::bail!("Push failed: {}", truncate_err(&err));
     }
-    Ok(())
+    Ok(branch.to_string())
 }
 
 /// `git_sync`: pull/rebase/push the repo's origin (the canonical sync used
@@ -154,21 +171,49 @@ pub async fn handle_git_sync(args: Value) -> Result<(String, bool)> {
             String::new()
         };
 
-        match sync_pass(
-            &repo_dir,
-            &remote_url,
-            if needs_token { Some(&token) } else { None },
-        )
-        .await
-        {
-            Ok(()) => {
-                let _ = run_git(&["fetch", "origin", "--quiet"], Some(&repo_dir), 30).await;
+        // Auth injection: `-c url.<token-url>.insteadOf=<origin-url>` for this
+        // invocation only (the repo's .git/config is never modified).
+        let auth_cfg: Vec<String> = if needs_token {
+            let rest = remote_url
+                .split_once("://")
+                .map(|(_, r)| r)
+                .unwrap_or(&remote_url);
+            let host_path = rest.split('/').next().unwrap_or(rest);
+            vec![
+                "-c".to_string(),
+                build_instead_of_override(&token, host_path),
+            ]
+        } else {
+            Vec::new()
+        };
+
+        match sync_pass(&repo_dir, &auth_cfg).await {
+            Ok(branch) => {
+                // Make `refs/remotes/origin/<branch>` agree with the push that
+                // just landed, so `git status` / the dashboard ahead indicator
+                // cannot keep reporting commits that are already on GitHub.
+                let (head_out, _, head_rc) =
+                    run_git(&["rev-parse", "HEAD"], Some(&repo_dir), 15).await;
+                let head_sha = head_out.trim().to_string();
+                let refresh = if head_rc == 0 && !head_sha.is_empty() {
+                    refresh_remote_tracking_ref(&repo_dir, &branch, &head_sha, &auth_cfg).await
+                } else {
+                    RefRefresh {
+                        ok: false,
+                        note: format!(
+                            "WARNING: could not read local HEAD; refs/remotes/origin/{} not \
+                             verified - git status and the dashboard may still report commits to \
+                             push",
+                            branch
+                        ),
+                    }
+                };
                 return Ok((
                     format!(
-                        "Sync complete: fetched, pulled (rebase) and pushed HEAD on {}",
-                        repo_dir
+                        "Sync complete: fetched, pulled (rebase) and pushed HEAD on {} ({})",
+                        repo_dir, refresh.note
                     ),
-                    false,
+                    !refresh.ok,
                 ));
             }
             Err(e) => {
@@ -349,6 +394,88 @@ mod tests {
             "{}",
             out
         );
+
+        drop(_g);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Regression (production incident 2026-09-10, telegram thread 1696): the
+    /// dashboard kept showing "2 commits to push" although the sync endpoint
+    /// had pushed them to GitHub, because the push went to an explicit URL
+    /// and the post-push `fetch origin --quiet` (unauthenticated, exit code
+    /// discarded) never moved `refs/remotes/origin/<branch>`.
+    ///
+    /// The repo's fetch refspec is removed so that even a *successful*
+    /// `git fetch origin` cannot refresh `origin/main`: the tracking ref can
+    /// then only become truthful if the sync explicitly reconciles it after
+    /// the push. With the old explicit-URL push this test fails (ahead == 1);
+    /// it passes once the ref is reconciled.
+    #[tokio::test]
+    async fn sync_refreshes_remote_tracking_ref() {
+        let base = test_base("trackref");
+        let _g = crate::tests::set_ws(base.to_str().unwrap()).await;
+        let (work, bare) = make_repo_pair(&base).await;
+
+        // No fetch refspec: `git fetch origin` updates FETCH_HEAD only.
+        git(
+            &["config", "--unset-all", "remote.origin.fetch"],
+            work.to_str().unwrap(),
+        )
+        .await;
+
+        // A local commit that only the sync will push.
+        std::fs::write(work.join("file.txt"), "one\ntwo\n").unwrap();
+        git(&["add", "-A"], work.to_str().unwrap()).await;
+        git(&["commit", "-m", "local ahead"], work.to_str().unwrap()).await;
+
+        // Sanity: the tracking ref is behind before the sync.
+        let (before, _, _) = git(
+            &["rev-list", "--count", "origin/main..HEAD"],
+            work.to_str().unwrap(),
+        )
+        .await;
+        assert_eq!(before.trim(), "1", "test setup should be 1 commit ahead");
+
+        let (msg, is_error) = handle_git_sync(serde_json::json!({
+            "repo_dir": work.to_str().unwrap(),
+        }))
+        .await
+        .expect("sync must return Ok, not Err");
+        assert!(!is_error, "sync should succeed: {}", msg);
+        assert!(msg.contains("Sync complete"), "{}", msg);
+
+        // The commit REALLY reached the remote...
+        let (head, _, _) = git(&["rev-parse", "HEAD"], work.to_str().unwrap()).await;
+        let (remote_head, _, _) =
+            git(&["rev-parse", "refs/heads/main"], bare.to_str().unwrap()).await;
+        assert_eq!(
+            head.trim(),
+            remote_head.trim(),
+            "push did not land on the remote: {}",
+            msg
+        );
+
+        // ... and the LOCAL remote-tracking ref reflects it, so neither
+        // `git status` nor the dashboard reports work that is already pushed.
+        let (ahead, _, rc) = git(
+            &["rev-list", "--count", "origin/main..HEAD"],
+            work.to_str().unwrap(),
+        )
+        .await;
+        assert_eq!(rc, 0);
+        assert_eq!(
+            ahead.trim(),
+            "0",
+            "remote-tracking ref stale after a successful sync (ahead={}, msg={})",
+            ahead,
+            msg
+        );
+        let (tracking, _, _) = git(
+            &["rev-parse", "refs/remotes/origin/main"],
+            work.to_str().unwrap(),
+        )
+        .await;
+        assert_eq!(tracking.trim(), head.trim());
 
         drop(_g);
         let _ = std::fs::remove_dir_all(&base);
