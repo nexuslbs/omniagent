@@ -910,4 +910,45 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    #[test]
+    fn test_build_react_request_carries_status_name_only() {
+        // Plugin-facing contract: the react request carries the RAW thread
+        // STATUS name in `params.status`. No emoji, no Mattermost shortcode,
+        // no plugin-specific translation anywhere in the core reaction path.
+        for status in [
+            "processing",
+            "pending",
+            "completed",
+            "failed",
+            "interrupted",
+            "skipped",
+            "merged",
+            "some_future_status",
+        ] {
+            let params = ReactParams {
+                resource_identifier: "chan-1".to_string(),
+                external_id: "post-1".to_string(),
+                status: status.to_string(),
+            };
+            let req = build_react_request(7, &params);
+            let parsed: PluginRequest = serde_json::from_str(&req).unwrap();
+            assert_eq!(parsed.method, "react");
+            let pv = parsed.params.as_ref().expect("react params");
+            assert_eq!(
+                pv.get("status").and_then(|v| v.as_str()),
+                Some(status),
+                "the plugin must receive the raw status name"
+            );
+            assert!(
+                pv.get("emoji").is_none(),
+                "the legacy emoji field must not be sent by the new core"
+            );
+            assert!(
+                !req.contains("white_check_mark") && !req.contains("handshake"),
+                "no shortcode may leak into the react request: {}",
+                req
+            );
+        }
+    }
 }
