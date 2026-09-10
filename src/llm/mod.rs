@@ -66,6 +66,16 @@ pub struct ProviderMetadata {
     pub default_model: String,
     /// Whether this provider supports reasoning/thinking tokens in responses.
     pub supports_reasoning: bool,
+    /// DECLARED auth style (`bearer` | `api_key_header`); None -> derive from
+    /// the API mode. Declared in the plugin manifest or models.yml, never
+    /// inferred from the provider name (audit V-1).
+    pub auth_style: Option<String>,
+    /// DECLARED API-key header name (used with `auth_style: api_key_header`).
+    pub api_key_header_name: Option<String>,
+    /// DECLARED extra API-version header `(name, value)`.
+    pub api_version_header: Option<(String, String)>,
+    /// DECLARED `thinking` request-param flag (`anthropic_messages` mode).
+    pub thinking_param: Option<bool>,
 }
 
 /// Extract default_model from a provider plugin manifest's config_schema.
@@ -137,6 +147,21 @@ fn read_provider_manifest(manifest_path: &Path) -> Option<(String, ProviderMetad
         .get("supports_reasoning")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    // Request-shaping capability fields (optional; models.yml can override).
+    let auth_style = manifest
+        .get("auth_style")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let api_key_header_name = manifest
+        .get("api_key_header_name")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let api_version_header = manifest.get("api_version_header").and_then(|v| {
+        let name = v.get("name").and_then(|n| n.as_str())?;
+        let value = v.get("value").and_then(|x| x.as_str())?;
+        Some((name.to_string(), value.to_string()))
+    });
+    let thinking_param = manifest.get("thinking_param").and_then(|v| v.as_bool());
     Some((
         name.clone(),
         ProviderMetadata {
@@ -146,6 +171,10 @@ fn read_provider_manifest(manifest_path: &Path) -> Option<(String, ProviderMetad
             api_modes,
             default_model,
             supports_reasoning,
+            auth_style,
+            api_key_header_name,
+            api_version_header,
+            thinking_param,
         },
     ))
 }
@@ -424,6 +453,146 @@ pub fn resolve_llm_api_key(provider_key: Option<&str>) -> AppResult<String> {
         .ok_or_else(|| Error::Message(
             "LLM provider key not set. Set the api_key in the provider's plugin config (providers.yml).".to_string()
         ))
+}
+
+// ---------------------------------------------------------------------------
+// Request shaping: auth style + request params declared per provider
+// ---------------------------------------------------------------------------
+
+/// Default header name carrying the API key for [`AuthStyle::ApiKeyHeader`].
+pub const DEFAULT_API_KEY_HEADER: &str = "x-api-key";
+/// Default API-version header name for Anthropic-style endpoints.
+pub const DEFAULT_API_VERSION_HEADER: &str = "anthropic-version";
+/// Default API-version header value for Anthropic-style endpoints.
+pub const DEFAULT_API_VERSION: &str = "2023-06-01";
+
+/// How a provider expects the API key to be presented on each request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthStyle {
+    /// `Authorization: Bearer <key>` (OpenAI-compatible gateways).
+    Bearer,
+    /// A named key header (`x-api-key: <key>` by default) plus an optional
+    /// API-version header, as used by the Anthropic Messages API.
+    ApiKeyHeader,
+}
+
+impl AuthStyle {
+    /// Parse the models.yml / plugin-manifest spelling.
+    pub fn parse_style(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "bearer" => Some(AuthStyle::Bearer),
+            "api_key_header" => Some(AuthStyle::ApiKeyHeader),
+            _ => None,
+        }
+    }
+}
+
+/// The resolved request shape of a provider: how the API key is sent and
+/// whether the Anthropic `thinking` param is included.
+///
+/// Resolved from DECLARED capability fields (plugin manifest, overridden by
+/// models.yml `providers.<name>`) with an API-mode derived fallback. The
+/// provider NAME is never consulted (audit V-1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestShaping {
+    pub auth_style: AuthStyle,
+    pub api_key_header_name: String,
+    pub api_version_header: Option<(String, String)>,
+    pub thinking_param: bool,
+}
+
+impl RequestShaping {
+    /// Back-compat defaults derived from the API MODE only (never from the
+    /// provider name): `anthropic_messages` keeps the historical Anthropic
+    /// header style (`x-api-key` + `anthropic-version`), every other mode uses
+    /// `Authorization: Bearer`. `thinking` is on by default only for the
+    /// API-key-header (native Anthropic) style, which reproduces the previous
+    /// name-based behavior for both `anthropic` and for Bearer gateways in
+    /// anthropic mode.
+    pub fn from_api_mode(api_mode: ApiMode) -> Self {
+        let auth_style = match api_mode {
+            ApiMode::AnthropicMessages => AuthStyle::ApiKeyHeader,
+            ApiMode::ChatCompletions => AuthStyle::Bearer,
+        };
+        let api_version_header = match auth_style {
+            AuthStyle::ApiKeyHeader => Some((
+                DEFAULT_API_VERSION_HEADER.to_string(),
+                DEFAULT_API_VERSION.to_string(),
+            )),
+            AuthStyle::Bearer => None,
+        };
+        Self {
+            auth_style,
+            api_key_header_name: DEFAULT_API_KEY_HEADER.to_string(),
+            api_version_header,
+            thinking_param: auth_style == AuthStyle::ApiKeyHeader,
+        }
+    }
+
+    /// Resolve the request shape from a provider's DECLARED fields, falling
+    /// back to [`Self::from_api_mode`] per absent field. `declared` is plain
+    /// metadata: there is deliberately no provider-name input.
+    pub fn resolve(declared: Option<&ProviderMetadata>, api_mode: ApiMode) -> Self {
+        let mut shaping = Self::from_api_mode(api_mode);
+        let Some(meta) = declared else {
+            return shaping;
+        };
+        if let Some(style) = meta.auth_style.as_deref().and_then(AuthStyle::parse_style) {
+            shaping.auth_style = style;
+            if style == AuthStyle::Bearer && meta.api_version_header.is_none() {
+                // The mode default version header only belongs to the
+                // Anthropic-style envelope.
+                shaping.api_version_header = None;
+            }
+        }
+        if let Some(name) = meta
+            .api_key_header_name
+            .as_ref()
+            .filter(|n| !n.trim().is_empty())
+        {
+            shaping.api_key_header_name = name.clone();
+        }
+        if let Some((name, value)) = meta.api_version_header.as_ref() {
+            shaping.api_version_header = Some((name.clone(), value.clone()));
+        }
+        shaping.thinking_param = match meta.thinking_param {
+            Some(declared) => declared,
+            None => shaping.auth_style == AuthStyle::ApiKeyHeader,
+        };
+        shaping
+    }
+
+    /// Resolve for a provider name from the provider metadata cache (plugin
+    /// manifest merged with models.yml overrides).
+    pub fn for_provider(provider: &str, api_mode: ApiMode) -> Self {
+        let declared = PROVIDER_METADATA.read().get(provider).cloned();
+        Self::resolve(declared.as_ref(), api_mode)
+    }
+
+    /// The auth header pairs to attach to an outgoing request.
+    pub fn auth_header_pairs(&self, api_key: &str) -> Vec<(String, String)> {
+        match self.auth_style {
+            AuthStyle::Bearer => vec![("Authorization".to_string(), format!("Bearer {api_key}"))],
+            AuthStyle::ApiKeyHeader => {
+                let mut pairs = vec![(self.api_key_header_name.clone(), api_key.to_string())];
+                if let Some((name, value)) = &self.api_version_header {
+                    pairs.push((name.clone(), value.clone()));
+                }
+                pairs
+            }
+        }
+    }
+
+    /// Attach the resolved auth headers to a request builder.
+    pub fn apply_auth(
+        &self,
+        req: reqwest::RequestBuilder,
+        api_key: &str,
+    ) -> reqwest::RequestBuilder {
+        self.auth_header_pairs(api_key)
+            .into_iter()
+            .fold(req, |r, (name, value)| r.header(name, value))
+    }
 }
 
 /// Default User-Agent sent on every outgoing provider HTTP request so that
@@ -1141,11 +1310,14 @@ impl LLMClient {
             }
         }
 
+        // Auth headers come from the provider's DECLARED request shape
+        // (models.yml / plugin manifest), never from its name (audit V-1).
+        // The default for chat_completions is Bearer.
+        let shaping = RequestShaping::for_provider(&self.config.provider.0, self.config.api_mode);
         let resp = send_with_transport_retry(
             self.with_provider_headers(
-                self.client
-                    .post(&url)
-                    .header("Authorization", format!("Bearer {}", self.config.api_key))
+                shaping
+                    .apply_auth(self.client.post(&url), &self.config.api_key)
                     .header("Content-Type", "application/json"),
             )
             .json(&body),
@@ -1343,31 +1515,23 @@ impl LLMClient {
             body["system"] = serde_json::Value::String(s);
         }
 
-        // Enable thinking if we want to capture reasoning (only for Anthropic provider)
-        if self.config.provider.0 == "anthropic" {
+        // Request shape (auth style + thinking param) is resolved from the
+        // provider's DECLARED capability fields, never from its name (V-1).
+        let shaping = RequestShaping::for_provider(&self.config.provider.0, self.config.api_mode);
+
+        // Enable thinking if the resolved request shape asks for it.
+        if shaping.thinking_param {
             body["thinking"] = serde_json::json!({
                 "type": "enabled",
                 "budget_tokens": request.max_tokens.unwrap_or(32000),
             });
         }
 
-        // Build request: auth header differs by provider
-        let mut req = self
-            .client
-            .post(&url)
+        // Build request: auth headers come from the resolved request shape
+        // (declared auth_style / api_key_header_name / api_version_header).
+        let req = shaping
+            .apply_auth(self.client.post(&url), &self.config.api_key)
             .header("Content-Type", "application/json");
-
-        match self.config.provider.0.as_str() {
-            "anthropic" => {
-                req = req
-                    .header("x-api-key", &self.config.api_key)
-                    .header("anthropic-version", "2023-06-01");
-            }
-            // OpenCode Go / OpenAI in Anthropic mode use Bearer token
-            _ => {
-                req = req.header("Authorization", format!("Bearer {}", self.config.api_key));
-            }
-        }
 
         let req = self.with_provider_headers(req);
 
@@ -2112,6 +2276,130 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod request_shaping_tests {
+    use super::*;
+
+    fn meta(name: &str) -> ProviderMetadata {
+        ProviderMetadata {
+            name: name.to_string(),
+            default_base_url: String::new(),
+            api_mode: "anthropic_messages".to_string(),
+            api_modes: std::collections::HashMap::new(),
+            default_model: String::new(),
+            supports_reasoning: false,
+            auth_style: None,
+            api_key_header_name: None,
+            api_version_header: None,
+            thinking_param: None,
+        }
+    }
+
+    fn pairs(shaping: &RequestShaping) -> Vec<(String, String)> {
+        shaping.auth_header_pairs("k")
+    }
+
+    // Audit V-1: a provider whose NAME is not "anthropic" gets the
+    // Anthropic-style auth purely because it DECLARED auth_style:
+    // api_key_header.
+    #[test]
+    fn declared_api_key_header_wins_regardless_of_provider_name() {
+        let mut m = meta("anthropic-proxy");
+        m.auth_style = Some("api_key_header".to_string());
+        let shaping = RequestShaping::resolve(Some(&m), ApiMode::AnthropicMessages);
+        assert_eq!(shaping.auth_style, AuthStyle::ApiKeyHeader);
+        assert_eq!(shaping.api_key_header_name, "x-api-key");
+        assert_eq!(
+            pairs(&shaping),
+            vec![
+                ("x-api-key".to_string(), "k".to_string()),
+                ("anthropic-version".to_string(), "2023-06-01".to_string()),
+            ]
+        );
+    }
+
+    // ... and a provider literally NAMED "anthropic" that declares Bearer
+    // gets Bearer (and no thinking): the name never decides request shape.
+    #[test]
+    fn declared_bearer_wins_even_for_the_anthropic_name() {
+        let mut m = meta("anthropic");
+        m.auth_style = Some("bearer".to_string());
+        let shaping = RequestShaping::resolve(Some(&m), ApiMode::AnthropicMessages);
+        assert_eq!(shaping.auth_style, AuthStyle::Bearer);
+        assert_eq!(shaping.api_version_header, None);
+        assert_eq!(
+            pairs(&shaping),
+            vec![("Authorization".to_string(), "Bearer k".to_string())]
+        );
+        assert!(!shaping.thinking_param);
+    }
+
+    // Back-compat: undeclared fields are derived from the API MODE, so an
+    // anthropic_messages provider behaves exactly like the old "anthropic"
+    // branch and a chat_completions provider like Bearer, whatever its name.
+    #[test]
+    fn undeclared_defaults_come_from_api_mode() {
+        let m = meta("some-gateway");
+        let anthropic = RequestShaping::resolve(Some(&m), ApiMode::AnthropicMessages);
+        assert_eq!(anthropic.auth_style, AuthStyle::ApiKeyHeader);
+        assert_eq!(
+            pairs(&anthropic),
+            vec![
+                ("x-api-key".to_string(), "k".to_string()),
+                ("anthropic-version".to_string(), "2023-06-01".to_string()),
+            ]
+        );
+        assert!(anthropic.thinking_param);
+
+        let openai = RequestShaping::resolve(Some(&m), ApiMode::ChatCompletions);
+        assert_eq!(openai.auth_style, AuthStyle::Bearer);
+        assert_eq!(openai.api_version_header, None);
+        assert_eq!(
+            pairs(&openai),
+            vec![("Authorization".to_string(), "Bearer k".to_string())]
+        );
+        assert!(!openai.thinking_param);
+
+        // No metadata at all (unknown provider) still uses the mode default.
+        let unknown = RequestShaping::resolve(None, ApiMode::ChatCompletions);
+        assert_eq!(unknown.auth_style, AuthStyle::Bearer);
+        assert_eq!(
+            pairs(&unknown),
+            vec![("Authorization".to_string(), "Bearer k".to_string())]
+        );
+    }
+
+    // Explicit declarations override every default, including the version
+    // header name/value and the thinking flag.
+    #[test]
+    fn explicit_fields_override_the_defaults() {
+        let mut m = meta("my-proxy");
+        m.auth_style = Some("api_key_header".to_string());
+        m.api_key_header_name = Some("X-Api-Key".to_string());
+        m.api_version_header = Some(("anthropic-version".to_string(), "2024-01-01".to_string()));
+        m.thinking_param = Some(false);
+        let shaping = RequestShaping::resolve(Some(&m), ApiMode::AnthropicMessages);
+        assert_eq!(
+            pairs(&shaping),
+            vec![
+                ("X-Api-Key".to_string(), "k".to_string()),
+                ("anthropic-version".to_string(), "2024-01-01".to_string()),
+            ]
+        );
+        assert!(!shaping.thinking_param, "declared thinking_param wins");
+    }
+
+    #[test]
+    fn auth_style_parse_rejects_unknown_values() {
+        assert_eq!(AuthStyle::parse_style("BEARER"), Some(AuthStyle::Bearer));
+        assert_eq!(
+            AuthStyle::parse_style(" api_key_header "),
+            Some(AuthStyle::ApiKeyHeader)
+        );
+        assert_eq!(AuthStyle::parse_style("basic"), None);
+    }
+}
 #[cfg(test)]
 mod usage_parse_tests {
     use super::*;
@@ -2153,3 +2441,4 @@ mod usage_parse_tests {
         assert_eq!(u.cached_tokens, None);
     }
 }
+

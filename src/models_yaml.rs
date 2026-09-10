@@ -12,6 +12,13 @@
 //!     plugin: false                     # no plugin: builtin chat_completions/anthropic support
 //!     api_mode: "chat_completions"
 //!     supports_reasoning: true
+//!     # Request-shaping capability fields (audit V-1): core derives the auth
+//!     # header style and the Anthropic `thinking` param from these DECLARED
+//!     # fields, never from the provider NAME.
+//!     auth_style: "bearer"                 # bearer | api_key_header
+//!     api_key_header_name: "x-api-key"     # used with auth_style: api_key_header
+//!     api_version_header: { name: "anthropic-version", value: "2023-06-01" }
+//!     thinking_param: false                # send the Anthropic `thinking` param
 //!     default_base_url: "http://noop-provider:9090/v1"
 //!     refresh_url: "https://api.deepseek.com/v1/models"
 //!     default_model: "test-model-1"
@@ -123,6 +130,29 @@ pub struct ProviderOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
 
+    /// Request-shaping capability fields (audit V-1): core derives the auth
+    /// header style and the Anthropic `thinking` request param from these
+    /// DECLARED fields instead of the provider NAME. Absent fields fall back
+    /// to the `api_mode` default (see `llm::RequestShaping`).
+    ///
+    /// `auth_style`: `bearer` (`Authorization: Bearer <key>`) or
+    /// `api_key_header` (a named key header, e.g. `x-api-key`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_style: Option<String>,
+    /// Header name carrying the API key when `auth_style: api_key_header`.
+    /// Default: `x-api-key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_header_name: Option<String>,
+    /// Extra API-version header sent with every request, e.g.
+    /// `{ name: "anthropic-version", value: "2023-06-01" }`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_version_header: Option<ApiVersionHeader>,
+    /// Whether to send the Anthropic `thinking` request param (used in
+    /// `anthropic_messages` mode). Default: on for the API-key-header
+    /// (native Anthropic) auth style, off for Bearer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_param: Option<bool>,
+
     /// Custom HTTP headers attached to every request to this provider. Each
     /// value is a literal string or a typed value resolved at request time
     /// (`{ type: channel }` -> channel name, `{ type: profile }` -> profile
@@ -145,6 +175,14 @@ pub struct ProviderOverride {
     /// Per-model overrides (highest precedence for every resolved value).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_config: Option<BTreeMap<String, ModelConfig>>,
+}
+
+/// `api_version_header: { name, value }` in models.yml: an API-version header
+/// attached to every request for this provider (e.g. `anthropic-version`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApiVersionHeader {
+    pub name: String,
+    pub value: String,
 }
 
 /// Per-model settings in models.yml (`model_config.<model>`).
@@ -578,6 +616,13 @@ pub fn apply_provider_overrides(
                 api_modes: std::collections::HashMap::new(),
                 default_model: ov.default_model.clone().unwrap_or_default(),
                 supports_reasoning: ov.supports_reasoning.unwrap_or(false),
+                auth_style: ov.auth_style.clone(),
+                api_key_header_name: ov.api_key_header_name.clone(),
+                api_version_header: ov
+                    .api_version_header
+                    .as_ref()
+                    .map(|h| (h.name.clone(), h.value.clone())),
+                thinking_param: ov.thinking_param,
             });
         if let Some(v) = &ov.api_mode {
             meta.api_mode = v.clone();
@@ -591,6 +636,18 @@ pub fn apply_provider_overrides(
         if let Some(v) = &ov.default_model {
             meta.default_model = v.clone();
         }
+        if let Some(v) = &ov.auth_style {
+            meta.auth_style = Some(v.clone());
+        }
+        if let Some(v) = &ov.api_key_header_name {
+            meta.api_key_header_name = Some(v.clone());
+        }
+        if let Some(v) = &ov.api_version_header {
+            meta.api_version_header = Some((v.name.clone(), v.value.clone()));
+        }
+        if let Some(v) = ov.thinking_param {
+            meta.thinking_param = Some(v);
+        }
     }
 }
 
@@ -602,6 +659,32 @@ pub fn validate_models_file(file: &ModelsFile) -> AppResult<()> {
             return Err(Error::Message(
                 "models.yml: provider name must not be empty".into(),
             ));
+        }
+        if let Some(style) = &ov.auth_style {
+            if style != "bearer" && style != "api_key_header" {
+                return Err(Error::Message(format!(
+                    "models.yml: provider '{}' has invalid auth_style '{}' (expected 'bearer' or 'api_key_header')",
+                    name, style
+                )));
+            }
+        }
+        if ov.auth_style.as_deref() == Some("api_key_header") {
+            if let Some(n) = &ov.api_key_header_name {
+                if n.trim().is_empty() {
+                    return Err(Error::Message(format!(
+                        "models.yml: provider '{}' has an empty api_key_header_name",
+                        name
+                    )));
+                }
+            }
+        }
+        if let Some(vh) = &ov.api_version_header {
+            if vh.name.trim().is_empty() || vh.value.trim().is_empty() {
+                return Err(Error::Message(format!(
+                    "models.yml: provider '{}' has an incomplete api_version_header (name and value are required)",
+                    name
+                )));
+            }
         }
         if let Some(models) = &ov.models {
             for m in models {
@@ -633,6 +716,77 @@ pub fn validate_models_file(file: &ModelsFile) -> AppResult<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_provider_request_shaping_fields_parse_overlay_and_validate() {
+        let dir = std::env::temp_dir().join(format!(
+            "omnidev-modelsyml-request-shaping-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cfg_dir = dir.join("config");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join("models.yml"),
+            r#"
+providers:
+  anthropic-proxy:
+    plugin: false
+    api_mode: "anthropic_messages"
+    auth_style: "api_key_header"
+    api_key_header_name: "X-Api-Key"
+    api_version_header:
+      name: "anthropic-version"
+      value: "2023-06-01"
+    thinking_param: false
+  gateway:
+    plugin: false
+    api_mode: "anthropic_messages"
+    auth_style: "bearer"
+"#,
+        )
+        .unwrap();
+
+        let data_dir = dir.to_str().unwrap();
+        let file = crate::models_yaml::load_models_file(data_dir).unwrap();
+        crate::models_yaml::validate_models_file(&file).unwrap();
+
+        let proxy = file.providers.get("anthropic-proxy").unwrap();
+        assert_eq!(proxy.auth_style.as_deref(), Some("api_key_header"));
+        assert_eq!(proxy.api_key_header_name.as_deref(), Some("X-Api-Key"));
+        assert_eq!(proxy.thinking_param, Some(false));
+        assert_eq!(
+            proxy.api_version_header.as_ref().map(|h| h.name.as_str()),
+            Some("anthropic-version")
+        );
+
+        // The overlay carries the DECLARED fields into the provider metadata
+        // that the request builder reads (no provider name involved).
+        let mut map = std::collections::HashMap::new();
+        crate::models_yaml::apply_provider_overrides(data_dir, &mut map);
+        let meta = map.get("anthropic-proxy").unwrap();
+        assert_eq!(meta.auth_style.as_deref(), Some("api_key_header"));
+        assert_eq!(meta.api_key_header_name.as_deref(), Some("X-Api-Key"));
+        assert_eq!(
+            meta.api_version_header,
+            Some(("anthropic-version".to_string(), "2023-06-01".to_string()))
+        );
+        assert_eq!(meta.thinking_param, Some(false));
+        assert_eq!(
+            map.get("gateway").unwrap().auth_style.as_deref(),
+            Some("bearer")
+        );
+
+        // An unknown auth_style is rejected before the file is written.
+        let mut bad = file.clone();
+        bad.providers.get_mut("gateway").unwrap().auth_style = Some("basic".to_string());
+        assert!(
+            crate::models_yaml::validate_models_file(&bad).is_err(),
+            "unknown auth_style must be rejected"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn test_header_value_parses_literal_and_typed() {
         let lit: crate::models_yaml::HeaderValue =

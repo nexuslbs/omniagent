@@ -5,6 +5,7 @@
   "description": "DeepSeek API provider",
   "default_base_url": "https://api.deepseek.com/v1",
   "api_mode": "chat_completions",
+  "auth_style": "bearer",
   "supports_reasoning": true,
   "config_schema": [
     { "key": "api_key", "label": "API Key", "type": "secret", "required": false, "description": "Set in providers.yml or directly" },
