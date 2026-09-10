@@ -747,7 +747,6 @@ pub fn resolve_env_vars(value: &str) -> String {
     value.to_string()
 }
 
-
 /// Resolve the executable for a manifest-declared plugin entrypoint.
 ///
 /// Paths are resolved inside the plugin directory first (that is where the

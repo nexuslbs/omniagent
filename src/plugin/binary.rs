@@ -671,8 +671,14 @@ mod tests {
         let m = manifest(BINARY_MANIFEST);
         let art = resolve_artifact(m.binary.as_ref().unwrap(), "engram").unwrap();
         assert!(art.url.starts_with("https://github.com/"), "{}", art.url);
-        assert!(!art.url.contains('{'), "unexpanded placeholder: {}", art.url);
-        assert!(art.url.contains(&format!("{}_{}", os_name(), go_arch_name())));
+        assert!(
+            !art.url.contains('{'),
+            "unexpanded placeholder: {}",
+            art.url
+        );
+        assert!(art
+            .url
+            .contains(&format!("{}_{}", os_name(), go_arch_name())));
         assert!(art.url.contains("1.20.0"));
         assert_eq!(art.file_name, "engram");
         assert_eq!(art.member, "engram");
@@ -748,8 +754,14 @@ mod tests {
 
     #[test]
     fn format_inference_from_url() {
-        assert_eq!(BinaryFormat::infer("https://x/y.tgz?a=1"), BinaryFormat::TarGz);
-        assert_eq!(BinaryFormat::infer("https://x/y.tar.gz"), BinaryFormat::TarGz);
+        assert_eq!(
+            BinaryFormat::infer("https://x/y.tgz?a=1"),
+            BinaryFormat::TarGz
+        );
+        assert_eq!(
+            BinaryFormat::infer("https://x/y.tar.gz"),
+            BinaryFormat::TarGz
+        );
         assert_eq!(BinaryFormat::infer("https://x/y.zip"), BinaryFormat::Zip);
         assert_eq!(BinaryFormat::infer("https://x/y"), BinaryFormat::Raw);
     }
@@ -777,7 +789,8 @@ mod tests {
     #[test]
     fn install_bytes_places_executable_and_reinstall_replaces_it() {
         let dir = temp_dir("place");
-        let art = resolve_artifact(&bin_decl("https://example.com/engram", None), "engram").unwrap();
+        let art =
+            resolve_artifact(&bin_decl("https://example.com/engram", None), "engram").unwrap();
         let first = install_bytes(&dir, &art, b"#!/bin/sh\necho first\n").unwrap();
         assert!(std::path::Path::new(&first.path).is_file());
         assert_eq!(first.file, "engram");
