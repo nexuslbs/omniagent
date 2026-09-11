@@ -67,11 +67,41 @@ where
     if p.model.as_deref().is_none_or(|s| s.trim().is_empty()) {
         err_msg!("Cannot create thread: model is empty");
     }
+
+    // First-match toolset resolution for the new thread
+    // (`workflow_role > workflow > task > channel > profile`), mirroring the
+    // template chain: the FIRST DEFINED level wins outright (this is NOT an
+    // intersection with lower levels) and no level defined means "all tools".
+    // The TASK level is supplied by the caller (`p.toolset`: kanban task
+    // column / `tasks.yml` entry); the other levels are read from the config
+    // files. A missing config dir or yml file degrades to "this level defines
+    // nothing" - it never takes tools away from a thread. An undefined toolset
+    // id is NOT rejected here (the thread must exist and fail with a message):
+    // the executor fails it with the explicit text naming the id and level.
+    let data_dir = crate::channels_yaml::data_dir()
+        .or_else(crate::profiles_yaml::data_dir)
+        .unwrap_or(".");
+    let task_owner = p
+        .task_id
+        .clone()
+        .or_else(|| p.schedule_task_id.clone())
+        .unwrap_or_else(|| "task".to_string());
+    let resolved_toolset: Option<String> =
+        crate::toolsets::resolve_for_thread(&crate::toolsets::ThreadToolsetSources {
+            data_dir,
+            profile: Some(profile),
+            channel_id: Some(channel_id),
+            task: Some((task_owner, p.toolset.clone())),
+            workflow_id: p.workflow_id.as_deref(),
+            workflow_step: p.workflow_step.as_deref(),
+        })
+        .map(|resolved| resolved.id);
+
     let row: ThreadDb = sql_forge!(
         ThreadDb,
         r#"
-        INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, schedule_task_id, plan, parent_id, workflow_id, workflow_step, template, task_type, hook_caused)
-        VALUES (:status, :cause, :channel_id, :profile, NULLIF(:provider, '')::text, NULLIF(:model, '')::text, NULLIF(:task_id, '')::text, NULLIF(:schedule_task_id, '')::text, :plan, NULLIF(:parent_id, -1::bigint)::bigint, NULLIF(:workflow_id, '')::text, NULLIF(:workflow_step, '')::text, NULLIF(:template, '')::text, :task_type, :hook_caused)
+        INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, schedule_task_id, plan, parent_id, workflow_id, workflow_step, template, toolset, task_type, hook_caused)
+        VALUES (:status, :cause, :channel_id, :profile, NULLIF(:provider, '')::text, NULLIF(:model, '')::text, NULLIF(:task_id, '')::text, NULLIF(:schedule_task_id, '')::text, :plan, NULLIF(:parent_id, -1::bigint)::bigint, NULLIF(:workflow_id, '')::text, NULLIF(:workflow_step, '')::text, NULLIF(:template, '')::text, NULLIF(:toolset, '')::text, :task_type, :hook_caused)
         RETURNING
             id, status, cause, channel_id, profile, provider, model, task_id, schedule_task_id,
             input_tokens, cached_tokens, output_tokens, duration_ms,
@@ -83,9 +113,10 @@ where
             parent_id,
             iterations,
             workflow_step,
-            template
+            template,
+            toolset
         "#,
-        ( :status = status, :cause = cause, :channel_id = channel_id, :profile = profile, :provider = p.provider.as_deref().unwrap_or(""), :model = p.model.as_deref().unwrap_or(""), :task_id = p.task_id.as_deref().unwrap_or(""), :schedule_task_id = p.schedule_task_id.as_deref().unwrap_or(""), :plan = p.plan, :parent_id = p.parent_id.unwrap_or(-1i64), :workflow_id = p.workflow_id.as_deref().unwrap_or(""), :workflow_step = p.workflow_step.as_deref().unwrap_or(""), :template = p.template.as_deref().unwrap_or(""), :task_type = p.task_id.as_ref().map(|_| "kanban").unwrap_or(""), :hook_caused = p.hook_caused )
+        ( :status = status, :cause = cause, :channel_id = channel_id, :profile = profile, :provider = p.provider.as_deref().unwrap_or(""), :model = p.model.as_deref().unwrap_or(""), :task_id = p.task_id.as_deref().unwrap_or(""), :schedule_task_id = p.schedule_task_id.as_deref().unwrap_or(""), :plan = p.plan, :parent_id = p.parent_id.unwrap_or(-1i64), :workflow_id = p.workflow_id.as_deref().unwrap_or(""), :workflow_step = p.workflow_step.as_deref().unwrap_or(""), :template = p.template.as_deref().unwrap_or(""), :toolset = resolved_toolset.as_deref().unwrap_or(""), :task_type = p.task_id.as_ref().map(|_| "kanban").unwrap_or(""), :hook_caused = p.hook_caused )
     )
     .fetch_one(executor)
     .await?;
@@ -338,13 +369,14 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
             workflow_step: Option<String>,
             plan: bool,
             template: Option<String>,
+            toolset: Option<String>,
         }
 
         let t: Option<SkipRow> = sql_forge!(
             SkipRow,
             r#"
             SELECT id, cause, channel_id, profile, provider, model, task_id, workflow_id, workflow_step,
-                   plan, template
+                   plan, template, toolset
             FROM threads
             WHERE id = :id
             "#,
@@ -400,6 +432,7 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
                             workflow_id: t.workflow_id.clone(),
                             workflow_step: t.workflow_step.clone(),
                             template: t.template.clone(),
+                            toolset: t.toolset.clone(),
                             hook_caused: false,
                         },
                     )
@@ -750,6 +783,7 @@ pub async fn create_thread_with_cause(
             plan,
             parent_id: resolved_parent_id,
             template: p.template.clone(),
+            toolset: p.toolset.clone(),
             workflow_id: p.workflow_id.clone(),
             workflow_step: p.workflow_step.clone(),
             hook_caused: p.hook_caused,
@@ -812,7 +846,8 @@ pub async fn find_pending_threads_by_channel(
             parent_id,
             iterations,
             workflow_step,
-            template
+            template,
+            toolset
         FROM threads
         WHERE channel_id = :channel_id AND status = 'pending'
         ORDER BY created_at ASC
@@ -952,11 +987,12 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: &str) -> AppResult<
         workflow_step: Option<String>,
         plan: bool,
         template: Option<String>,
+        toolset: Option<String>,
     }
     let threads: Vec<SkipRow> = sql_forge!(
         SkipRow,
         "SELECT id, cause, channel_id, profile, provider, model, task_id,
-                workflow_id, workflow_step, plan, template
+                workflow_id, workflow_step, plan, template, toolset
          FROM threads
          WHERE channel_id = :channel_id AND status IN ('pending', 'processing')
          ORDER BY id",
@@ -1003,6 +1039,7 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: &str) -> AppResult<
                             workflow_id: t.workflow_id.clone(),
                             workflow_step: t.workflow_step.clone(),
                             template: t.template.clone(),
+                            toolset: t.toolset.clone(),
                             hook_caused: false,
                         },
                     )
@@ -1398,6 +1435,7 @@ struct KanbanDispatchRow {
     template: Option<String>,
     plan: Option<bool>,
     workflow_id: Option<String>,
+    pub toolset: Option<String>,
     board: Option<String>,
 }
 
@@ -1411,7 +1449,7 @@ pub(crate) async fn create_kanban_step_thread(
     let task = match sql_forge!(
         KanbanDispatchRow,
         r#"
-        SELECT id, title, body, status, archived, channel_id, profile, template, plan, workflow_id, board
+        SELECT id, title, body, status, archived, channel_id, profile, template, toolset, plan, workflow_id, board
         FROM kanban_tasks WHERE id = :task_id
         "#,
         ( :task_id = task_id )
@@ -1629,6 +1667,7 @@ pub(crate) async fn create_kanban_step_thread(
         msg_subtype: Some(task.id.clone()),
         task_plan: plan,
         template: resolved_template,
+        toolset: task.toolset.clone(),
         workflow_id: workflow_id.clone(),
         workflow_step: Some(status.to_string()),
         hook_caused: false,
@@ -1742,6 +1781,7 @@ async fn fail_kanban_thread_no_board(
         msg_subtype: Some(task.id.clone()),
         task_plan: task.plan,
         template: resolved_template,
+        toolset: task.toolset.clone(),
         workflow_id: task.workflow_id.clone(),
         workflow_step: Some(status.to_string()),
         hook_caused: false,
@@ -2003,7 +2043,8 @@ pub async fn get_completed_seq0_threads_since(
                     parent_id,
                     iterations,
                     workflow_step,
-                    template
+                    template,
+                    toolset
                 FROM threads
                 WHERE channel_id = :channel_id
                   AND status = 'completed'
@@ -2033,7 +2074,8 @@ pub async fn get_completed_seq0_threads_since(
                     parent_id,
                     iterations,
                     workflow_step,
-                    template
+                    template,
+                    toolset
                 FROM threads
                 WHERE channel_id = :channel_id
                   AND status = 'completed'
@@ -2063,7 +2105,8 @@ pub async fn get_completed_seq0_threads_since(
                     parent_id,
                     iterations,
                     workflow_step,
-                    template
+                    template,
+                    toolset
                 FROM threads
                 WHERE channel_id = :channel_id
                   AND status = 'completed'
@@ -2099,7 +2142,7 @@ pub async fn get_thread_by_id(pool: &PgPool, thread_id: i64) -> AppResult<Option
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
             COALESCE(TO_CHAR(started_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "started_at",
             COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "ended_at",
-            terminal, plan, parent_id, iterations, workflow_step, template
+            terminal, plan, parent_id, iterations, workflow_step, template, toolset
         FROM threads
         WHERE id = :thread_id
         "#,
@@ -2896,7 +2939,8 @@ pub async fn list_appendable_pending_threads(
             parent_id,
             iterations,
             workflow_step,
-            template
+            template,
+            toolset
         FROM threads t
         WHERE t.channel_id = :channel_id
           AND t.profile = :profile

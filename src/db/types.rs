@@ -40,6 +40,8 @@ pub struct ThreadDb {
     pub workflow_step: Option<String>,
     #[sqlx(default)]
     pub template: Option<String>,
+    #[sqlx(default)]
+    pub toolset: Option<String>,
 }
 
 impl TryFrom<ThreadDb> for Thread {
@@ -100,6 +102,7 @@ impl TryFrom<ThreadDb> for Thread {
             iterations: db.iterations,
             workflow_step: db.workflow_step,
             template: db.template.filter(|t| !t.is_empty()),
+            toolset: db.toolset.filter(|t| !t.is_empty()),
         })
     }
 }
@@ -208,6 +211,10 @@ pub struct CreateThreadParams {
     pub workflow_step: Option<String>,
     pub template: Option<String>,
     pub hook_caused: bool,
+    /// TASK-level toolset candidate (kanban task column, `tasks.yml`
+    /// schedule entry or hook definition). Thread creation combines it
+    /// with the workflow role / workflow / channel / profile levels.
+    pub toolset: Option<String>,
 }
 
 /// Stats for completing a thread.
@@ -239,6 +246,10 @@ pub struct ThreadCauseParams {
     pub msg_subtype: Option<String>,
     pub task_plan: Option<bool>,
     pub template: Option<String>,
+    /// TASK-level toolset candidate (kanban task column, `tasks.yml` schedule
+    /// entry or hook definition). Thread creation combines it with the
+    /// workflow role / workflow / channel / profile levels, first match wins.
+    pub toolset: Option<String>,
     pub workflow_id: Option<String>,
     pub workflow_step: Option<String>,
     pub hook_caused: bool,
@@ -399,6 +410,9 @@ pub struct Thread {
     pub workflow_step: Option<String>,
     #[sqlx(default)]
     pub template: Option<String>,
+    /// Resolved toolset id of this thread (`config/toolsets.yml`):
+    /// `None` = every tool is allowed, `Some(id)` = only that toolset's tools.
+    pub toolset: Option<String>,
 }
 
 #[allow(dead_code)]

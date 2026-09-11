@@ -281,12 +281,25 @@ pub async fn insert_kanban_history(
     Ok(())
 }
 
+/// The toolset id defined by a kanban task (`kanban_tasks.toolset`); `None`
+/// when the task defines none or does not exist. Used as the TASK level of the
+/// first-match toolset resolution (`workflow_role > workflow > task > channel
+/// > profile`) when a step thread is spawned.
+pub async fn task_toolset(pool: &PgPool, task_id: &str) -> AppResult<Option<String>> {
+    let row: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT toolset FROM kanban_tasks WHERE id = $1")
+            .bind(task_id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.and_then(|r| r.0))
+}
+
 /// Fetch a single kanban task row by id.
 pub async fn get_kanban_task(pool: &PgPool, task_id: &str) -> AppResult<Option<KanbanTaskDb>> {
     let rows = sql_forge!(
         KanbanTaskDb,
         r#"
-        SELECT id, title, body, status, priority, assignee, profile, template, archived, position, channel_id, plan,
+        SELECT id, title, body, status, priority, assignee, profile, template, toolset, archived, position, channel_id, plan,
                goal_phase, goal_blocked_code, goal_blocked_message, goal_max_rounds, goal_revision,
                created_at, updated_at
         FROM kanban_tasks
@@ -309,6 +322,7 @@ pub struct KanbanTaskDb {
     pub assignee: Option<String>,
     pub profile: Option<String>,
     pub template: Option<String>,
+    pub toolset: Option<String>,
     pub archived: Option<bool>,
     pub position: Option<i32>,
     pub channel_id: Option<String>,

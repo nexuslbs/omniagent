@@ -30,5 +30,6 @@ pub mod server;
 pub mod status_wait;
 pub mod subtask;
 pub mod tasks_yaml;
+pub mod toolsets;
 pub mod vectorizer;
 pub mod workflows;

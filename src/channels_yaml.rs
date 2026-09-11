@@ -116,6 +116,11 @@ pub struct ChannelDef {
     pub plan: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
+    /// Channel-level toolset id (`config/toolsets.yml`). OPTIONAL: applies to
+    /// every thread of this channel that has no higher-priority toolset
+    /// (workflow role / workflow / task). Omitted = nothing at this level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolset: Option<String>,
     /// Channel-scoped ordered prompt sections (task 9): shadow plugin-global
     /// sections with the same name for threads of this channel only.
     #[serde(default, skip_serializing_if = "Option::is_none")]

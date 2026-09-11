@@ -402,6 +402,7 @@ pub async fn manual_review_decision(
                 workflow_id: resolved.workflow_id.clone(),
                 workflow_step: Some(step.to_string()),
                 template,
+                toolset: None,
                 hook_caused: false,
             },
         )
@@ -1272,6 +1273,7 @@ pub(crate) async fn engine_transition(
                 workflow_id: wf_id.map(str::to_string),
                 workflow_step: Some(step.to_string()),
                 template,
+                toolset: None,
                 hook_caused: false,
             },
         )
@@ -1369,6 +1371,7 @@ pub(crate) async fn engine_transition(
                 workflow_id: wf_id.map(str::to_string),
                 workflow_step: Some("review".to_string()),
                 template,
+                toolset: thread.toolset.clone(),
                 hook_caused: false,
             },
         )
@@ -2059,6 +2062,7 @@ mod tests_rerun_script {
             iterations: 0,
             workflow_step: Some("running".to_string()),
             template: None,
+            toolset: None,
         };
 
         let new_id = engine_transition(
@@ -2234,6 +2238,7 @@ mod tests_r8n_no_workflow_blocked {
             iterations: 0,
             workflow_step: step,
             template: None,
+            toolset: None,
         }
     }
 

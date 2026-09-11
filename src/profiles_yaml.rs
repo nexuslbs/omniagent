@@ -14,7 +14,7 @@
 //!     model: deepseek-v4-flash     #   default_provider when omitted
 //!     plan: false                  # optional profile-level plan override
 //!     template: dev-development    # optional profile-level thread template
-//!     allowed_tools: []            # optional allowed MCP tool names
+//!     toolset: my_set              # optional toolset id (config/toolsets.yml)
 //! ```
 //!
 //! FIELD NAMING (bare, matches channels.yml):
@@ -24,7 +24,7 @@
 //!   global in the plan fallback chain).
 //! - `template` (str) - profile-level thread template (tier between channel
 //!   and the `dev-development` default).
-//! - `allowed_tools` (list) - allowed MCP tool names for the profile.
+//! - `toolset` (string) - toolset id (config/toolsets.yml) for the profile.
 //! - `base_url` / `api_key` / `max_tokens` / `temperature` - provider-level
 //!   overrides kept from the legacy `Profile`/`ProfileConfig` schema.
 //! - NO `name` field inside an entry - the map key IS the name (same
@@ -102,9 +102,11 @@ pub struct ProfileDef {
     /// profile.template → "dev-development" (running steps).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
-    /// Allowed MCP tool names for this profile.
+    /// Toolset id (`config/toolsets.yml`) applied to threads that run as this
+    /// profile and have no higher-priority toolset (workflow role / workflow /
+    /// task / channel). Omitted = no toolset at this level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allowed_tools: Option<Vec<String>>,
+    pub toolset: Option<String>,
     /// Base API URL override for this profile's provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
@@ -275,12 +277,9 @@ pub fn validate_profile(name: &str, _def: &ProfileDef) -> Result<(), String> {
     if name.trim().is_empty() {
         return Err("profile name (yml key) must not be empty".to_string());
     }
-    if let Some(tools) = &_def.allowed_tools {
-        if tools.iter().any(|t| t.trim().is_empty()) {
-            return Err(format!(
-                "profile '{}': allowed_tools contains an empty tool name",
-                name
-            ));
+    if let Some(toolset) = &_def.toolset {
+        if toolset.trim().is_empty() {
+            return Err(format!("profile '{}': toolset must not be blank", name));
         }
     }
     Ok(())
@@ -344,15 +343,13 @@ mod tests {
         r#"
 profiles:
   omni:
-    allowed_tools: []
+    plan: false
   research:
     provider: opencode-go
     model: deepseek-v4-flash
     plan: true
     template: researcher
-    allowed_tools:
-      - filesystem_read
-      - search_messages
+    toolset: research_set
 "#
     }
 
@@ -363,17 +360,13 @@ profiles:
         let o = &file.profiles["omni"];
         assert_eq!(o.provider, None, "bare optional fields");
         assert_eq!(o.model, None);
-        assert_eq!(o.allowed_tools.as_deref(), Some(&[] as &[String]));
+        assert_eq!(o.toolset, None, "absent toolset stays None");
         let r = &file.profiles["research"];
         assert_eq!(r.provider.as_deref(), Some("opencode-go"));
         assert_eq!(r.model.as_deref(), Some("deepseek-v4-flash"));
         assert_eq!(r.plan, Some(true));
         assert_eq!(r.template.as_deref(), Some("researcher"));
-        assert_eq!(
-            r.allowed_tools.as_deref().unwrap().len(),
-            2,
-            "allowed_tools list"
-        );
+        assert_eq!(r.toolset.as_deref(), Some("research_set"), "toolset id");
     }
 
     #[test]
@@ -410,7 +403,7 @@ profiles:
                 model: Some("deepseek-v4-flash".to_string()),
                 plan: Some(false),
                 template: Some("dev-development".to_string()),
-                allowed_tools: Some(vec!["filesystem_read".to_string()]),
+                toolset: Some("dev_set".to_string()),
                 ..Default::default()
             },
         );
@@ -422,7 +415,7 @@ profiles:
         assert_eq!(p.model.as_deref(), Some("deepseek-v4-flash"));
         assert_eq!(p.plan, Some(false));
         assert_eq!(p.template.as_deref(), Some("dev-development"));
-        assert_eq!(p.allowed_tools.as_deref().unwrap().len(), 1);
+        assert_eq!(p.toolset.as_deref(), Some("dev_set"));
     }
 
     #[test]
@@ -497,7 +490,7 @@ profiles:
         assert!(validate_profile(
             "bad",
             &ProfileDef {
-                allowed_tools: Some(vec!["".to_string()]),
+                toolset: Some("".to_string()),
                 ..Default::default()
             }
         )

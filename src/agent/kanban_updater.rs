@@ -857,6 +857,7 @@ async fn create_review_thread(
             workflow_id: Some(wf_id),
             workflow_step: Some("review".to_string()),
             template: identity.4,
+            toolset: thread.toolset.clone(),
             hook_caused: false,
         },
     )
@@ -956,6 +957,7 @@ async fn create_testing_thread(
             workflow_id: Some(wf_id),
             workflow_step: Some("testing".to_string()),
             template: identity.4,
+            toolset: thread.toolset.clone(),
             hook_caused: false,
         },
     )

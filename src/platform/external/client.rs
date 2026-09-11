@@ -1035,6 +1035,7 @@ impl Platform for ExternalPlatformClient {
                                                                     model: channel.current_model.clone(),
                                                                     task_id: None,
                                                                     schedule_task_id: None,
+                                                                    toolset: None,
                                                                     content: text,
                                                                     external_id: Some(inbound.external_id.clone()),
                                                                     parent_external_id: crate::platform::external::parent_external_id_from_metadata(

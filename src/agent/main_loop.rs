@@ -3708,6 +3708,7 @@ mod interactive_round_budget_tests {
             iterations: 0,
             workflow_step: None,
             template: None,
+            toolset: None,
         }
     }
 

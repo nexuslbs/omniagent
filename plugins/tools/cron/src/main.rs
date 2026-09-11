@@ -144,6 +144,7 @@ async fn handle_create(
         template: None,
         skills: Some(skills_json.to_string()),
         silent: Some(silent.unwrap_or(false)),
+        toolset: None,
     };
     tasks.schedules.insert(id.clone(), def);
     tasks_yaml::save_tasks(&data_dir(), &tasks)

@@ -281,6 +281,7 @@ async fn create_action_thread(
             model: None,
             task_id: Some(task_id.to_string()),
             schedule_task_id: None,
+            toolset: None,
             content,
             external_id: Some(format!("kanban-action:{}:{}:{}", task_id, step, ts)),
             parent_external_id: None,

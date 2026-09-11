@@ -96,7 +96,7 @@ pub async fn process_thread(
         .await;
     }
 
-    let prof = profile_registry
+    let _prof = profile_registry
         .get(&profile_name)
         .cloned()
         .unwrap_or_else(|| crate::profile::Profile::default(&profile_name));
@@ -285,12 +285,37 @@ pub async fn process_thread(
             .ok()
             .flatten();
     let (workflow_id, workflow_step) = wf.unwrap_or((None, None));
-    let effective_allowed_tools = crate::workflows::effective_allowed_tools(
-        &cfg.ctx.data_dir,
-        prof.allowed_tools.as_deref(),
-        workflow_id.as_deref(),
-        workflow_step.as_deref(),
-    );
+    // Toolset: NEVER re-resolved here - `threads.toolset` already holds the
+    // first-match result computed at thread creation
+    // (`workflow_role > workflow > task > channel > profile`). `None` = every
+    // registered tool; `Some(id)` = exactly that toolset's tools (an empty
+    // toolset = no tool at all). An id that is not defined in
+    // config/toolsets.yml is a HARD error: the thread must end `failed` with a
+    // message naming both the id and the level that defined it.
+    let effective_allowed_tools: Option<Vec<String>> = match thread.toolset.as_deref() {
+        None => None,
+        Some(id) => match crate::toolsets::load_map(&cfg.ctx.data_dir).get(id) {
+            Some(tools) => Some(tools.clone()),
+            None => {
+                let resolved =
+                    crate::toolsets::resolve_for_thread(&crate::toolsets::ThreadToolsetSources {
+                        data_dir: &cfg.ctx.data_dir,
+                        profile: Some(thread.profile.as_str()),
+                        channel_id: Some(thread.channel_id.as_str()),
+                        task: None,
+                        workflow_id: workflow_id.as_deref(),
+                        workflow_step: workflow_step.as_deref(),
+                    });
+                let source = resolved
+                    .map(|r| r.describe())
+                    .unwrap_or_else(|| format!("thread {}", thread.id));
+                return Err(crate::error::Error::Message(format!(
+                    "toolset '{}' defined by {} is not defined in config/toolsets.yml",
+                    id, source
+                )));
+            }
+        },
+    };
     let tool_names: Vec<String> = cfg
         .plugin_manager
         .snapshot_registry()

@@ -80,6 +80,10 @@ pub struct ScheduleDef {
     pub action: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
+    /// Task-level toolset id (`config/toolsets.yml`) for threads this schedule
+    /// spawns. Omitted = nothing at this level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolset: Option<String>,
     /// Comma-separated or JSON-array string of skill names (legacy `skills`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skills: Option<String>,
@@ -121,6 +125,10 @@ pub struct HookDef {
     pub mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
+    /// Task-level toolset id (`config/toolsets.yml`) for threads this hook
+    /// spawns. Omitted = nothing at this level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolset: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -146,6 +154,7 @@ impl Default for ScheduleDef {
             prompt: None,
             action: None,
             template: None,
+            toolset: None,
             skills: None,
             silent: None,
         }
@@ -167,6 +176,7 @@ impl Default for HookDef {
             action: None,
             mode: None,
             template: None,
+            toolset: None,
         }
     }
 }

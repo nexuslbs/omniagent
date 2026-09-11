@@ -13,7 +13,10 @@ use omniagent::channels_yaml::{load_channels_from, save_channels_file, ChannelDe
 /// Find the channels.yml the writer produced (data_dir/config/channels.yml,
 /// with a shallow fallback for the flat layout).
 fn find_channels_yml(dir: &std::path::Path) -> std::path::PathBuf {
-    for candidate in [dir.join("config").join("channels.yml"), dir.join("channels.yml")] {
+    for candidate in [
+        dir.join("config").join("channels.yml"),
+        dir.join("channels.yml"),
+    ] {
         if candidate.exists() {
             return candidate;
         }

@@ -43,6 +43,7 @@ struct CronJobDueRow {
     action_id: Option<String>,
     silent: Option<bool>,
     template: Option<String>,
+    pub toolset: Option<String>,
     plan: Option<bool>,
 }
 
@@ -61,6 +62,7 @@ impl CronJobDueRow {
             action_id: def.action.clone(),
             silent: def.silent,
             template: def.template.clone(),
+            toolset: def.toolset.clone(),
             plan: def.plan(),
         }
     }
@@ -232,6 +234,7 @@ async fn tick(
                 model,
                 task_id: None,
                 schedule_task_id: Some(job.id.clone()),
+                toolset: job.toolset.clone(),
                 content: prompt_content,
                 external_id: Some(format!("cron:{}:{}", job.id, now.timestamp())),
                 metadata: serde_json::json!({
@@ -652,6 +655,7 @@ async fn create_action_thread(ctx: ActionThreadCtx<'_>) -> AppResult<i64> {
             model: None,
             task_id: None,
             schedule_task_id: Some(ctx.job.id.clone()),
+            toolset: ctx.job.toolset.clone(),
             content: prompt_content,
             external_id: Some(format!("cron:{}:{}", ctx.job.id, ctx.now.timestamp())),
             metadata: serde_json::json!({
@@ -1116,6 +1120,7 @@ pub async fn fire_cron_job_by_id(
             model,
             task_id: None,
             schedule_task_id: Some(job.id.clone()),
+            toolset: job.toolset.clone(),
             content: prompt_content,
             external_id: Some(format!("cron:{}:{}", job.id, now.timestamp())),
             metadata: serde_json::json!({

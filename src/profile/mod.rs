@@ -35,13 +35,15 @@ pub struct Profile {
     pub max_tokens: Option<u32>,
     /// Temperature for this profile
     pub temperature: Option<f32>,
-    /// Tool allow-list from `profiles.yml` (`allowed_tools`). TRI-STATE:
-    /// - `None` (field UNDEFINED): no restriction - every registered tool is
-    ///   available to the agent;
-    /// - `Some([])`: NO tool at all;
-    /// - `Some(list)`: exactly these tools (a workflow role running the thread
-    ///   may further restrict them, see `workflows::effective_allowed_tools`).
-    pub allowed_tools: Option<Vec<String>>,
+    /// Toolset id from `profiles.yml` (`toolset`). OPTIONAL:
+    /// - `None` (field UNDEFINED): this profile defines no toolset, so the
+    ///   resolution chain (`workflow_role > workflow > task > channel >
+    ///   profile`) decides - and when nothing defines one, ALL tools are
+    ///   allowed;
+    /// - `Some(id)`: the lowest-priority toolset of the chain; when it is the
+    ///   first DEFINED level, only the tools of `config/toolsets.yml[id]` are
+    ///   allowed (an empty list means NO tool at all).
+    pub toolset: Option<String>,
     /// Whether automatic retrieval is enabled for this profile
     pub auto_retrieval_enabled: bool,
     /// Retrieval aggressiveness: 0=off, 1=conservative, 2=balanced, 3=aggressive
@@ -64,7 +66,7 @@ pub const PROMPT_BUDGET_DEFAULT: usize = 15_000;
 pub struct ProfileConfig {
     pub provider: Option<String>,
     pub model: Option<String>,
-    pub allowed_tools: Option<Vec<String>>,
+    pub toolset: Option<String>,
 }
 
 impl Profile {
@@ -84,7 +86,7 @@ impl Profile {
             api_key: None,
             max_tokens: None,
             temperature: None,
-            allowed_tools: None, // undefined => no restriction (all tools)
+            toolset: None, // undefined => no restriction (all tools)
             auto_retrieval_enabled: true,
             retrieval_aggressiveness: 2,
             grounding_required: false,
@@ -107,7 +109,7 @@ impl Profile {
         p.api_key = def.api_key.clone();
         p.max_tokens = def.max_tokens;
         p.temperature = def.temperature;
-        p.allowed_tools = def.allowed_tools.clone();
+        p.toolset = def.toolset.clone();
         p
     }
 
@@ -131,8 +133,8 @@ impl Profile {
         if let Some(m) = config.model {
             self.model = Some(m);
         }
-        if let Some(tools) = config.allowed_tools {
-            self.allowed_tools = Some(tools);
+        if let Some(toolset) = config.toolset {
+            self.toolset = Some(toolset);
         }
         self
     }
@@ -279,7 +281,7 @@ mod tests {
     fn test_default_profile_starts_empty() {
         let p = Profile::default("test");
         assert!(
-            p.allowed_tools.is_none(),
+            p.toolset.is_none(),
             "Default profile has NO tool restriction (undefined = all tools)"
         );
         assert_eq!(p.plan, None);
@@ -293,14 +295,11 @@ mod tests {
         let profile = Profile::default("test").with_config(ProfileConfig {
             provider: Some("anthropic".to_string()),
             model: Some("claude-3".to_string()),
-            allowed_tools: Some(vec!["filesystem_read".to_string()]),
+            toolset: Some("fs_set".to_string()),
         });
         assert_eq!(profile.provider, Some("anthropic".to_string()));
         assert_eq!(profile.model, Some("claude-3".to_string()));
-        assert_eq!(
-            profile.allowed_tools,
-            Some(vec!["filesystem_read".to_string()])
-        );
+        assert_eq!(profile.toolset.as_deref(), Some("fs_set"));
     }
 
     #[test]
@@ -313,8 +312,8 @@ mod tests {
         assert_eq!(p.plan, None);
         assert_eq!(p.template, None);
         assert!(
-            p.allowed_tools.is_none(),
-            "absent allowed_tools stays None (no restriction)"
+            p.toolset.is_none(),
+            "absent toolset stays None (no restriction)"
         );
     }
 
@@ -327,7 +326,7 @@ mod tests {
                 model: Some("deepseek-v4-flash".to_string()),
                 plan: Some(true),
                 template: Some("researcher".to_string()),
-                allowed_tools: Some(vec!["search_messages".to_string()]),
+                toolset: Some("researcher_set".to_string()),
                 ..Default::default()
             },
         );
@@ -335,7 +334,7 @@ mod tests {
         assert_eq!(p.model.as_deref(), Some("deepseek-v4-flash"));
         assert_eq!(p.plan, Some(true));
         assert_eq!(p.template.as_deref(), Some("researcher"));
-        assert_eq!(p.allowed_tools, Some(vec!["search_messages".to_string()]));
+        assert_eq!(p.toolset.as_deref(), Some("researcher_set"));
     }
 
     #[test]
@@ -369,7 +368,7 @@ mod tests {
         let dir = temp_dir("yaml-only");
         std::fs::write(
             dir.join("config").join("profiles.yml"),
-            "profiles:\n  omni:\n    provider: opencode-go\n    model: deepseek-v4-flash\n    plan: true\n    template: dev-development\n    allowed_tools:\n      - filesystem_read\n",
+            "profiles:\n  omni:\n    provider: opencode-go\n    model: deepseek-v4-flash\n    plan: true\n    template: dev-development\n    toolset: dev_set\n",
         )
         .unwrap();
         let registry = ProfileRegistry::new(dir.to_str().unwrap());
@@ -378,7 +377,7 @@ mod tests {
         assert_eq!(p.model.as_deref(), Some("deepseek-v4-flash"));
         assert_eq!(p.plan, Some(true));
         assert_eq!(p.template.as_deref(), Some("dev-development"));
-        assert_eq!(p.allowed_tools, Some(vec!["filesystem_read".to_string()]));
+        assert_eq!(p.toolset.as_deref(), Some("dev_set"));
         assert!(
             !dir.join("profiles").exists(),
             "no directory needed for a yaml-declared profile"
@@ -421,14 +420,13 @@ mod tests {
         // neither read for resolution nor modified.
         let dir = temp_dir("legacy");
         std::fs::create_dir_all(dir.join("profiles").join("omni")).unwrap();
-        let cfg =
-            r#"{"provider": "openai", "model": "gpt-4", "allowed_tools": ["filesystem_read"]}"#;
+        let cfg = r#"{"provider": "openai", "model": "gpt-4", "toolset": "legacy_set"}"#;
         std::fs::write(dir.join("profiles").join("omni").join("config.json"), cfg).unwrap();
         // profiles.yml declares omni WITHOUT provider/model → config.json is
         // NOT consulted (provider stays None, falls through to global).
         std::fs::write(
             dir.join("config").join("profiles.yml"),
-            "profiles:\n  omni:\n    allowed_tools: []\n",
+            "profiles:\n  omni:\n    template: dev-development\n",
         )
         .unwrap();
         let registry = ProfileRegistry::new(dir.to_str().unwrap());

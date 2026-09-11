@@ -67,7 +67,7 @@ pub struct ProfileEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub allowed_tools: Option<Vec<String>>,
+    pub toolset: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<String>,
 }
@@ -80,7 +80,7 @@ impl ProfileEntry {
             model: def.model.clone(),
             plan: def.plan,
             template: def.template.clone(),
-            allowed_tools: def.allowed_tools.clone(),
+            toolset: def.toolset.clone(),
             skills: list_skills(data_dir, name),
         }
     }
@@ -130,7 +130,7 @@ struct UpdateProfileRequest {
     /// UNDEFINED (no restriction, all tools); `[]` = explicitly allow NO tool;
     /// a list = allow exactly these tools.
     #[serde(default, deserialize_with = "deserialize_double_option")]
-    allowed_tools: Option<Option<Vec<String>>>,
+    pub toolset: Option<Option<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -212,10 +212,6 @@ async fn create_profile_handler(
     let def = crate::profiles_yaml::ProfileDef {
         provider: clean_opt(req.provider),
         model: clean_opt(req.model),
-        // `allowed_tools` stays UNDEFINED (`None` = every tool): a fresh
-        // profile must never be silently stored as an empty list, which
-        // now means "no tool at all".
-        allowed_tools: None,
         ..Default::default()
     };
     if let Err(e) = validate_profile(&name, &def) {
@@ -252,8 +248,10 @@ async fn update_profile_handler(
         if req.template.is_some() {
             def.template = clean_opt(req.template.clone());
         }
-        if let Some(tools) = req.allowed_tools.clone() {
-            def.allowed_tools = tools;
+        if let Some(toolset) = req.toolset.clone() {
+            def.toolset = toolset
+                .map(|t| t.trim().to_string())
+                .filter(|v| !v.is_empty());
         }
         Ok(def)
     });
@@ -344,7 +342,7 @@ mod tests {
         let yaml = r#"
 profiles:
   omni:
-    allowed_tools: []
+    toolset: dev_set
   research:
     provider: opencode-go
     model: deepseek-v4-flash
@@ -355,12 +353,11 @@ profiles:
         for (name, def) in &parsed.profiles {
             validate_profile(name, def).expect("valid entry");
         }
-        // An entry with an empty tool name fails validation (loud, pre-write).
+        // An entry with a blank toolset id fails validation (loud, pre-write).
         let bad = r#"
 profiles:
   broken:
-    allowed_tools:
-      - ""
+    toolset: ""
 "#;
         let parsed_bad: ProfilesFile = serde_yaml::from_str(bad).expect("parse");
         let name = parsed_bad.profiles.keys().next().unwrap().clone();

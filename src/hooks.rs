@@ -157,6 +157,7 @@ struct HookRow {
     profile: Option<String>,
     channel_id: Option<String>,
     plan: Option<bool>,
+    pub toolset: Option<String>,
     template: Option<String>,
 }
 
@@ -176,6 +177,7 @@ impl HookRow {
             profile: def.profile.clone(),
             channel_id,
             plan,
+            toolset: def.toolset.clone(),
             template: def.template.clone(),
         }
     }
@@ -458,6 +460,7 @@ impl HooksEngine {
                 model: None,
                 task_id: None,
                 schedule_task_id: None,
+                toolset: hook.toolset.clone(),
                 content: prompt,
                 external_id: Some(external_id),
                 parent_external_id: None,

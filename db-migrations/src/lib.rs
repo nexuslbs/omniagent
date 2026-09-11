@@ -742,7 +742,8 @@ async fn create_tables(pool: &PgPool) -> Result<()> {
             task_id           TEXT,
             schedule_task_id  TEXT,
             parent_id         BIGINT REFERENCES threads(id),
-            iterations        INT NOT NULL DEFAULT 0
+            iterations        INT NOT NULL DEFAULT 0,
+            toolset           TEXT
         );
         "#,
     )
@@ -788,6 +789,7 @@ async fn create_tables(pool: &PgPool) -> Result<()> {
             archived        BOOLEAN NOT NULL DEFAULT false,
             position        INTEGER,
             template        TEXT DEFAULT '',
+            toolset         TEXT,
             created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         );
@@ -795,6 +797,20 @@ async fn create_tables(pool: &PgPool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+
+    // ── Toolset column (additive, v0.2.3) ─────────────────────────────────
+    // NULL = the level defines no toolset (previous behavior: all tools
+    // allowed); a value is a toolset id from config/toolsets.yml restricting
+    // the thread / task to that toolset's tools. Nullable + defaulted, so no
+    // data migration is needed.
+    sqlx::query("ALTER TABLE threads ADD COLUMN IF NOT EXISTS toolset TEXT;")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS toolset TEXT;")
+        .execute(pool)
+        .await
+        .ok();
 
     // ── Kanban dependencies ───────────────────────────────────────────────
     sqlx::query(
