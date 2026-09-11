@@ -615,6 +615,10 @@ fn retry_limit(wf: &crate::workflows::Workflow, role: &str) -> u64 {
 ///
 /// Mirrors `fail_thread` (Error-type message + FAILED + delivery + reaction)
 /// and additionally applies the workflow_step kanban transition (F0-F4).
+/// Reason text used when the caller passes no `reason`. Shared with the tool
+/// result so the LAST message of a failed thread always carries the reason.
+pub const DEFAULT_FAIL_REASON: &str = "The thread was ended as FAILED by the fail-thread tool.";
+
 pub(crate) async fn fail_thread_tool(
     ctx: &crate::mcp::AppContext,
     thread: &crate::db::types::Thread,
@@ -635,8 +639,7 @@ pub(crate) async fn fail_thread_tool(
     let usage = crate::db::threads::aggregate_thread_token_usage(&ctx.pool, thread.id)
         .await
         .unwrap_or((0, 0, 0));
-    let content = reason
-        .unwrap_or_else(|| "The thread was ended as FAILED by the fail-thread tool.".to_string());
+    let content = reason.unwrap_or_else(|| DEFAULT_FAIL_REASON.to_string());
     let err_msg = MessageNew {
         thread_id: thread.id,
         role: "system".to_string(),

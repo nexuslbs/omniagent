@@ -328,9 +328,7 @@ pub async fn process_thread(
                         let schedule_level = crate::tasks_yaml::load_tasks(&cfg.ctx.data_dir)
                             .ok()
                             .and_then(|t| {
-                                t.schedules
-                                    .get(schedule_id)
-                                    .and_then(|d| d.toolset.clone())
+                                t.schedules.get(schedule_id).and_then(|d| d.toolset.clone())
                             });
                         if schedule_level.as_deref() == Some(id) {
                             source = Some(format!("schedule task '{schedule_id}'"));

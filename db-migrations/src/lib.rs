@@ -143,6 +143,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     create_search_support(pool).await?;
     create_triggers(pool).await?;
     migrate_channels_to_yml(pool).await?;
+    assert_retention_regression_guards(pool).await?;
 
     // -- Kanban boards (config/boards.yml) --
     // Nullable `board` column on kanban_tasks: NULL = no board. Board gating is
@@ -690,6 +691,34 @@ pub async fn run(pool: &PgPool) -> Result<()> {
 }
 
 // ── Extensions ──────────────────────────────────────────────────────────────
+
+/// Retention regression guard: `summaries.next_thread_id` is a monotonic
+/// next-thread-id counter, NOT a reference that may be lost. It must NEVER get
+/// an FK to `threads`: a thread hard-delete would then either fail or cascade
+/// the counter away. Fail loudly (refuse to migrate) if one ever appears.
+async fn assert_retention_regression_guards(pool: &PgPool) -> Result<()> {
+    let fk_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON kcu.constraint_name = tc.constraint_name
+         AND kcu.table_schema = tc.table_schema
+        WHERE tc.constraint_type = 'FOREIGN KEY'
+          AND tc.table_name = 'summaries'
+          AND kcu.column_name = 'next_thread_id'
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    if fk_count > 0 {
+        anyhow::bail!(
+            "retention guard: summaries.next_thread_id must NOT have a foreign key (it is a monotonic counter that must survive thread hard-deletes)"
+        );
+    }
+    Ok(())
+}
 
 async fn create_extensions(pool: &PgPool) -> Result<()> {
     sqlx::query("CREATE EXTENSION IF NOT EXISTS pg_trgm")

@@ -156,7 +156,8 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
             "general",
             vec![
                 "condense_keep_turns",
-                "delete_after_days",
+                "soft_delete_after_days",
+                "hard_delete_after_days",
                 "git_sync_tool",
                 "default_provider",
                 "llm_provider",
@@ -426,13 +427,23 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "delete_after_days".into(),
+            "soft_delete_after_days".into(),
             SettingMeta {
                 field_type: "number".into(),
-                description: "Days before old messages, summaries, threads and kanban history are deleted (0 disables)".into(),
+                description: "Days before old messages are SOFT-deleted (the first and last message of every thread are never deleted). NO DEFAULT. 0 or empty = disabled.".into(),
                 options: None,
                 readonly: false,
-                default: Some("30".into()),
+                default: None,
+            },
+        ),
+        (
+            "hard_delete_after_days".into(),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Days before rows are HARD-deleted from kanban history, messages, secret versions, subtasks and threads (secret values are never deleted). NO DEFAULT. Must be >= soft_delete_after_days when both are set. 0 or empty = disabled.".into(),
+                options: None,
+                readonly: false,
+                default: None,
             },
         ),
         (
@@ -647,7 +658,9 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "temperature"
             | "tool_bg_secs" => "execution",
             // general category (default; matches state_block_update_interval)
-            "kanban_dispatcher_interval" | "delete_after_days" => "general",
+            "kanban_dispatcher_interval" | "soft_delete_after_days" | "hard_delete_after_days" => {
+                "general"
+            }
             // system : bootstrap from env
             "host" | "port" | "database_url" | "omni_dir" => "system",
             // everything else → general
@@ -768,7 +781,8 @@ fn writable_setting_keys() -> std::collections::HashSet<&'static str> {
         "redaction_tool",
         "malformed_response_tool",
         "git_sync_tool",
-        "delete_after_days",
+        "soft_delete_after_days",
+        "hard_delete_after_days",
         "kanban_dispatcher_interval",
         "memory_max_chars",
         "default_provider",
@@ -931,6 +945,33 @@ pub async fn update_settings_handler(
         applied.push(update.name.clone());
     }
 
+    // Retention guard: `hard_delete_after_days` must be >= `soft_delete_after_days`
+    // whenever BOTH are enabled (> 0). With either one empty/unset (= disabled)
+    // or 0 there is no comparison, no error. 0 or empty = disabled.
+    let retention_days = |name: &str| -> Option<u32> {
+        file_vars
+            .get(name)
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|v| *v > 0)
+    };
+    if let (Some(soft), Some(hard)) = (
+        retention_days("soft_delete_after_days"),
+        retention_days("hard_delete_after_days"),
+    ) {
+        if hard < soft {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "hard_delete_after_days ({}) must be >= soft_delete_after_days ({})",
+                        hard, soft
+                    ),
+                    "field": "hard_delete_after_days",
+                })),
+            );
+        }
+    }
+
     let data_dir_write = state.data_dir.clone();
     match tokio::task::spawn_blocking(move || write_settings_file(&data_dir_write, &file_vars))
         .await
@@ -1078,7 +1119,8 @@ mod tests {
     fn sub_prompt_settings_are_writable_numbers_in_prompt() {
         // The sub-prompt + memory settings must be exposed by the settings
         // API: number type + documented defaults, writable via PUT /settings,
-        // and categorized under "prompt" (delete_after_days under "general").
+        // and categorized under "prompt" (the retention settings under
+        // "general", both with NO default).
         // The old "memory" (Memory & Retention) category must be gone.
         let defs = get_all_setting_definitions();
         let by_name: std::collections::HashMap<&str, &SettingMeta> =
@@ -1087,7 +1129,6 @@ mod tests {
             ("sub_prompt_max_chars", "4000"),
             ("sub_prompt_iteration_percent", "50"),
             ("memory_max_chars", "5000"),
-            ("delete_after_days", "30"),
         ] {
             let meta = by_name
                 .get(name)
@@ -1097,12 +1138,24 @@ mod tests {
             assert_eq!(meta.default.as_deref(), Some(expected_default));
         }
 
+        // Retention settings: number type, writable, NO DEFAULT (empty/unset =
+        // disabled, per the "0 or empty = disabled" convention).
+        for name in ["soft_delete_after_days", "hard_delete_after_days"] {
+            let meta = by_name
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} must be defined"));
+            assert_eq!(meta.field_type, "number", "{name} is a number");
+            assert!(!meta.readonly, "{name} is writable");
+            assert_eq!(meta.default, None, "{name} must have NO default");
+        }
+
         let keys = writable_setting_keys();
         for name in [
             "sub_prompt_max_chars",
             "sub_prompt_iteration_percent",
             "memory_max_chars",
-            "delete_after_days",
+            "soft_delete_after_days",
+            "hard_delete_after_days",
         ] {
             assert!(keys.contains(name), "{name} must be writable");
         }
@@ -1115,7 +1168,8 @@ mod tests {
                     "sub_prompt_max_chars"
                         | "sub_prompt_iteration_percent"
                         | "memory_max_chars"
-                        | "delete_after_days"
+                        | "soft_delete_after_days"
+                        | "hard_delete_after_days"
                 )
             })
             .map(|(n, m)| (n.clone(), String::new(), m.clone()))
@@ -1146,10 +1200,12 @@ mod tests {
             .find(|c| c.name == "general")
             .unwrap_or_else(|| panic!("general category must exist"));
         let general_names: Vec<&str> = general.settings.iter().map(|s| s.name.as_str()).collect();
-        assert!(
-            general_names.contains(&"delete_after_days"),
-            "delete_after_days in general: {general_names:?}"
-        );
+        for name in ["soft_delete_after_days", "hard_delete_after_days"] {
+            assert!(
+                general_names.contains(&name),
+                "{name} in general: {general_names:?}"
+            );
+        }
     }
 
     #[test]

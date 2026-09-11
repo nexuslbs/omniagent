@@ -25,6 +25,7 @@ pub mod profile;
 pub mod profiles_yaml;
 pub mod provider;
 pub mod resolution;
+pub mod retention;
 pub mod scheduler;
 pub mod server;
 pub mod status_wait;

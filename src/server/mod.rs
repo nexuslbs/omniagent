@@ -105,6 +105,7 @@ pub mod plugins_listing;
 pub mod plugins_reload;
 pub mod plugins_setup;
 pub mod plugins_types;
+pub(crate) mod retention;
 
 /// Type alias for the platform restart signals map.
 /// Each entry: (restart_count, stopped_flag, notify)
@@ -244,6 +245,16 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
         // ── Settings routes ──
         .route("/settings", get(settings::get_settings_handler))
         .route("/settings", put(settings::update_settings_handler))
+        // ── Data retention: imperative soft/hard delete triggers + status ──
+        .route("/api/retention/status", get(retention::status_handler))
+        .route(
+            "/api/retention/soft-delete",
+            post(retention::soft_delete_handler),
+        )
+        .route(
+            "/api/retention/hard-delete",
+            post(retention::hard_delete_handler),
+        )
         // ── Git sync: canonical sync entrypoint (explorer + backup/restore) ──
         .route("/git/sync", post(git_sync::sync_handler))
         // ── Secrets routes ──

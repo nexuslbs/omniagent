@@ -160,6 +160,10 @@ async fn run_server() -> AppResult<()> {
 
     // Ensure the config/ subdir exists (root-level yml config files live there).
     config_path::ensure_config_dir(&data_dir);
+    // One-time migration: drop the legacy `delete_after_days` key. Its VALUE
+    // is intentionally NOT carried over: `soft_delete_after_days` has NO
+    // default and must start empty (= disabled).
+    config_path::migrate_legacy_settings(&data_dir);
 
     // Provider/model overrides via config/models.yml: fail loud on a malformed
     // file (absent/empty is fine - zero behavior change).
@@ -386,74 +390,55 @@ async fn run_server() -> AppResult<()> {
         cfg.port
     );
 
-    // Spawn old-data deletion task (daily cleanup). delete_after_days == 0
-    // disables the cleanup entirely (0 = disabled: keep the loop alive but
-    // never delete anything).
-    let pool_clean = pool.clone();
-    let delete_after_days = cfg.delete_after_days;
-    let cleanup_handle = tokio::spawn(async move {
-        if delete_after_days == 0 {
-            tracing::info!("Old-data cleanup disabled (delete_after_days=0)");
-        }
-        let interval = tokio::time::Duration::from_secs(86400); // daily
+    // Retention: the SOFT delete and the HARD delete each run automatically
+    // ONCE PER DAY (one scheduled run per operation; see src/retention.rs).
+    // The same functions are also triggerable imperatively through
+    // POST /api/retention/soft-delete and POST /api/retention/hard-delete.
+    //
+    // The configured horizon is read from the live config on every run (hot
+    // reload aware). 0 or empty/unset DISABLES that operation: the run is
+    // skipped and logged as `disabled` (no error, no rows touched). Neither
+    // setting has a default, so out of the box both operations are disabled.
+    let soft_interval = omniagent::retention::daily_interval_secs();
+    let hard_interval = omniagent::retention::daily_interval_secs();
+    tracing::info!(
+        "Retention schedule: soft-delete every {}s, hard-delete every {}s (one run per operation per day); a 0 or empty value disables an operation",
+        soft_interval,
+        hard_interval
+    );
+    let pool_retention_soft = pool.clone();
+    let soft_retention_handle = tokio::spawn(async move {
+        let interval = tokio::time::Duration::from_secs(soft_interval);
         loop {
             tokio::time::sleep(interval).await;
-            if delete_after_days == 0 {
-                continue;
+            let days = agent::config::get_global().and_then(|c| c.read().soft_delete_after_days);
+            match omniagent::retention::run_soft_delete(&pool_retention_soft, days).await {
+                Ok(report) => tracing::info!(
+                    "Retention soft-delete run: status={} rows={:?} total={} ms={}",
+                    report.status,
+                    report.rows_deleted,
+                    report.total_deleted,
+                    report.duration_ms
+                ),
+                Err(e) => tracing::error!("Retention soft-delete run failed: {:?}", e),
             }
-            let before = chrono::Utc::now() - chrono::Duration::days(delete_after_days as i64);
-            // Delete old messages
-            match db::types::delete_old_messages(&pool_clean, before).await {
-                Ok(count) => {
-                    if count > 0 {
-                        tracing::info!(
-                            "Deleted {} messages older than {} days",
-                            count,
-                            delete_after_days
-                        );
-                    }
-                }
-                Err(e) => tracing::error!("Failed to delete old messages: {:?}", e),
-            }
-            // Delete old summaries
-            match db::types::delete_old_summaries(&pool_clean, before).await {
-                Ok(count) => {
-                    if count > 0 {
-                        tracing::info!(
-                            "Deleted {} summaries older than {} days",
-                            count,
-                            delete_after_days
-                        );
-                    }
-                }
-                Err(e) => tracing::error!("Failed to delete old summaries: {:?}", e),
-            }
-            // Delete old threads (terminal only; their messages + subtasks are
-            // removed by delete_old_threads itself, FK-safe order).
-            match db::types::delete_old_threads(&pool_clean, before).await {
-                Ok(count) => {
-                    if count > 0 {
-                        tracing::info!(
-                            "Deleted {} threads older than {} days",
-                            count,
-                            delete_after_days
-                        );
-                    }
-                }
-                Err(e) => tracing::error!("Failed to delete old threads: {:?}", e),
-            }
-            // Delete old kanban history (no FK to kanban_tasks)
-            match db::types::delete_old_kanban_history(&pool_clean, before).await {
-                Ok(count) => {
-                    if count > 0 {
-                        tracing::info!(
-                            "Deleted {} kanban history rows older than {} days",
-                            count,
-                            delete_after_days
-                        );
-                    }
-                }
-                Err(e) => tracing::error!("Failed to delete old kanban history: {:?}", e),
+        }
+    });
+    let pool_retention_hard = pool.clone();
+    let hard_retention_handle = tokio::spawn(async move {
+        let interval = tokio::time::Duration::from_secs(hard_interval);
+        loop {
+            tokio::time::sleep(interval).await;
+            let days = agent::config::get_global().and_then(|c| c.read().hard_delete_after_days);
+            match omniagent::retention::run_hard_delete(&pool_retention_hard, days).await {
+                Ok(report) => tracing::info!(
+                    "Retention hard-delete run: status={} rows={:?} total={} ms={}",
+                    report.status,
+                    report.rows_deleted,
+                    report.total_deleted,
+                    report.duration_ms
+                ),
+                Err(e) => tracing::error!("Retention hard-delete run failed: {:?}", e),
             }
         }
     });
@@ -512,8 +497,11 @@ async fn run_server() -> AppResult<()> {
         _ = server_handle => {
             tracing::info!("Server finished");
         }
-        _ = cleanup_handle => {
-            tracing::info!("Cleanup finished");
+        _ = soft_retention_handle => {
+            tracing::info!("Soft-delete retention loop finished");
+        }
+        _ = hard_retention_handle => {
+            tracing::info!("Hard-delete retention loop finished");
         }
         _ = dispatcher_handle => {
             tracing::info!("Kanban dispatcher loop finished");
