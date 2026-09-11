@@ -762,3 +762,117 @@ channels:
         assert!(settings.is_empty(), "no settings.yml → empty snapshot");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Thread-template chain (gate (a)): the tiers resolution.rs owns.
+// ONE documented chain (highest wins):
+// `workflow_role > workflow > kanban_task > board > channel > profile`.
+// This module pins the two segments resolved here: `task > board` (the
+// `template` of `resolve_task_defaults`) and `channel > profile` (the
+// `template` of `resolve_channel_identity`). The `role > workflow` segment
+// lives in `src/workflows.rs` and the composition of every tier in
+// `src/db/threads.rs::resolve_kanban_thread_template`.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod template_chain_tests {
+    use super::*;
+
+    /// Fresh temp data dir carrying optional config/*.yml fixtures.
+    fn data_dir(
+        tag: &str,
+        boards: Option<&str>,
+        channels: Option<&str>,
+        profiles: Option<&str>,
+    ) -> String {
+        let dir = std::env::temp_dir().join(format!("resolution-tpl-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        if let Some(y) = boards {
+            std::fs::write(dir.join("config").join("boards.yml"), y).unwrap();
+        }
+        if let Some(y) = channels {
+            std::fs::write(dir.join("config").join("channels.yml"), y).unwrap();
+        }
+        if let Some(y) = profiles {
+            std::fs::write(dir.join("config").join("profiles.yml"), y).unwrap();
+        }
+        dir.to_str().unwrap().to_string()
+    }
+
+    fn fields<'a>(board: Option<&'a str>, template: Option<&'a str>) -> TaskFallbackFields<'a> {
+        TaskFallbackFields {
+            board,
+            workflow_id: None,
+            channel_id: None,
+            profile: None,
+            plan: None,
+            template,
+        }
+    }
+
+    #[test]
+    fn template_task_wins_over_board() {
+        let dir = data_dir(
+            "task-over-board",
+            Some("boards:\n  omnidev:\n    channel: kanban\n    template: board-tpl\n"),
+            None,
+            None,
+        );
+        let r = resolve_task_defaults(&dir, &fields(Some("omnidev"), Some("task-tpl")))
+            .expect("valid board");
+        assert_eq!(
+            r.template.as_deref(),
+            Some("task-tpl"),
+            "kanban_task tier wins over board"
+        );
+    }
+
+    #[test]
+    fn template_board_supplies_when_task_has_none() {
+        // Regression: a task that sets ONLY the board template keeps
+        // resolving exactly as before (task -> board).
+        let dir = data_dir(
+            "board-only",
+            Some("boards:\n  omnidev:\n    channel: kanban\n    template: board-tpl\n"),
+            None,
+            None,
+        );
+        let r = resolve_task_defaults(&dir, &fields(Some("omnidev"), None)).expect("valid board");
+        assert_eq!(
+            r.template.as_deref(),
+            Some("board-tpl"),
+            "board tier preserved"
+        );
+    }
+
+    #[test]
+    fn template_all_tiers_empty_is_none() {
+        let dir = data_dir("all-empty", None, None, None);
+        let r = resolve_task_defaults(&dir, &fields(None, None)).expect("boards disabled");
+        assert_eq!(r.template, None, "nothing set anywhere -> no template");
+    }
+
+    #[test]
+    fn template_channel_wins_over_profile_and_profile_supplies() {
+        let dir = data_dir(
+            "channel-over-profile",
+            None,
+            Some(
+                "channels:\n  tpl-chan:\n    profile: omni\n    template: channel-tpl\n  tpl-bare:\n    profile: omni\n",
+            ),
+            Some("profiles:\n  omni:\n    template: profile-tpl\n"),
+        );
+        let def = channel_def_from(&dir, "tpl-chan").expect("channel present");
+        assert_eq!(
+            resolve_channel_identity(&dir, &def).template.as_deref(),
+            Some("channel-tpl"),
+            "channel tier wins over the profile tier"
+        );
+        let bare = channel_def_from(&dir, "tpl-bare").expect("channel present");
+        assert_eq!(
+            resolve_channel_identity(&dir, &bare).template.as_deref(),
+            Some("profile-tpl"),
+            "profile tier supplies the template when the channel has none"
+        );
+    }
+}
