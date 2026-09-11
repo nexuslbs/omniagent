@@ -67,6 +67,7 @@ pub struct EventsQueryParams {
     pub msg_type: Option<String>,
     pub subtype: Option<String>,
     pub seq0: Option<String>,
+    pub last: Option<String>,
     pub order: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
@@ -354,6 +355,17 @@ async fn filters_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
 // ORDER BY direction uses two if-branches since it can't be a bind parameter.
 // ---------------------------------------------------------------------------
 
+/// `seq0=true` (first message of each thread) and `last=true` (last message of
+/// each thread) select the two opposite ends of a thread, so requesting both at
+/// once is rejected. Returns the 400 message when both are requested.
+fn filter_exclusion_error(seq0: &str, last: &str) -> Option<&'static str> {
+    if seq0 == "true" && last == "true" {
+        Some("seq0 and last are mutually exclusive: seq0 selects the first message of each thread, last selects the last message of each thread")
+    } else {
+        None
+    }
+}
+
 async fn events_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<EventsQueryParams>,
@@ -371,6 +383,10 @@ async fn events_handler(
     let model = params.model.unwrap_or_default();
     let msg_type = params.msg_type.unwrap_or_default();
     let seq0 = params.seq0.unwrap_or_default();
+    let last = params.last.unwrap_or_default();
+    if let Some(msg) = filter_exclusion_error(&seq0, &last) {
+        return err_json(StatusCode::BAD_REQUEST, msg);
+    }
     let subtype = params.subtype.unwrap_or_default();
     let subtype_pattern = if subtype.trim().is_empty() {
         String::new()
@@ -395,6 +411,7 @@ async fn events_handler(
           AND (:model = '' OR :model = 'all' OR t.model = :model)
           AND (:msg_type = '' OR :msg_type = 'all' OR m.msg_type = ANY(string_to_array(:msg_type, ',')))
           AND (:seq0 != 'true' OR m.thread_sequence = 0)
+          AND (:last_flag != 'true' OR m.id IN (SELECT DISTINCT ON (l.thread_id) l.id FROM messages l WHERE l.thread_id IS NOT NULL ORDER BY l.thread_id, l.thread_sequence DESC NULLS LAST, l.id DESC))
           AND (:subtype_pattern = '' OR m.msg_subtype LIKE :subtype_pattern)
         "#,
         ( :channel_id = &channel,
@@ -405,6 +422,7 @@ async fn events_handler(
           :model = &model,
           :msg_type = &msg_type,
           :seq0 = &seq0,
+          :last_flag = &last,
           :subtype_pattern = &subtype_pattern )
     )
     .fetch_one(&state.pool)
@@ -464,6 +482,7 @@ async fn events_handler(
               AND (:model = '' OR :model = 'all' OR t.model = :model)
               AND (:msg_type = '' OR :msg_type = 'all' OR m.msg_type = ANY(string_to_array(:msg_type, ',')))
               AND (:seq0 != 'true' OR m.thread_sequence = 0)
+              AND (:last_flag != 'true' OR m.id IN (SELECT DISTINCT ON (l.thread_id) l.id FROM messages l WHERE l.thread_id IS NOT NULL ORDER BY l.thread_id, l.thread_sequence DESC NULLS LAST, l.id DESC))
               AND (:subtype_pattern = '' OR m.msg_subtype LIKE :subtype_pattern)
             ORDER BY m.id DESC
             LIMIT :limit_val OFFSET :offset_val
@@ -476,6 +495,7 @@ async fn events_handler(
               :model = &model,
               :msg_type = &msg_type,
               :seq0 = &seq0,
+              :last_flag = &last,
               :subtype_pattern = &subtype_pattern,
               :limit_val = limit,
               :offset_val = offset )
@@ -531,6 +551,7 @@ async fn events_handler(
               AND (:model = '' OR :model = 'all' OR t.model = :model)
               AND (:msg_type = '' OR :msg_type = 'all' OR m.msg_type = ANY(string_to_array(:msg_type, ',')))
               AND (:seq0 != 'true' OR m.thread_sequence = 0)
+              AND (:last_flag != 'true' OR m.id IN (SELECT DISTINCT ON (l.thread_id) l.id FROM messages l WHERE l.thread_id IS NOT NULL ORDER BY l.thread_id, l.thread_sequence DESC NULLS LAST, l.id DESC))
               AND (:subtype_pattern = '' OR m.msg_subtype LIKE :subtype_pattern)
             ORDER BY m.id ASC
             LIMIT :limit_val OFFSET :offset_val
@@ -543,6 +564,7 @@ async fn events_handler(
               :model = &model,
               :msg_type = &msg_type,
               :seq0 = &seq0,
+              :last_flag = &last,
               :subtype_pattern = &subtype_pattern,
               :limit_val = limit,
               :offset_val = offset )
@@ -636,4 +658,24 @@ async fn events_handler(
         offset,
         limit,
     })
+}
+
+#[cfg(test)]
+mod events_filter_tests {
+    use super::filter_exclusion_error;
+
+    #[test]
+    fn seq0_and_last_are_mutually_exclusive() {
+        assert!(filter_exclusion_error("true", "true").is_some());
+        assert!(filter_exclusion_error("true", "").is_none());
+        assert!(filter_exclusion_error("", "true").is_none());
+        assert!(filter_exclusion_error("", "").is_none());
+    }
+
+    #[test]
+    fn exclusion_requires_the_exact_value_true() {
+        assert!(filter_exclusion_error("TRUE", "true").is_none());
+        assert!(filter_exclusion_error("1", "true").is_none());
+        assert!(filter_exclusion_error("true", "TRUE").is_none());
+    }
 }

@@ -278,6 +278,60 @@ fn test_actions() {
 // Edge cases: missing query params on handlers that accept them
 // ---------------------------------------------------------------------------
 
+// /messages/events?last=true — exactly one row per thread, the max thread_sequence row
+#[test]
+#[ignore]
+fn test_messages_events_last_only_one_row_per_thread() {
+    use std::collections::HashSet;
+
+    let resp = get("/messages/events?last=true&limit=500");
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().unwrap();
+    assert!(json["success"].as_bool().unwrap_or(false));
+
+    let msgs = json["data"]["messages"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(!msgs.is_empty(), "expected at least one last message");
+
+    let mut seen: HashSet<String> = HashSet::new();
+    for m in &msgs {
+        let tid = m["thread_id"].as_str().unwrap_or_default().to_string();
+        assert!(seen.insert(tid.clone()), "thread {} returned twice", tid);
+        assert!(
+            m["thread_sequence"].as_i64().is_some(),
+            "thread {}: thread_sequence missing",
+            tid
+        );
+    }
+
+    // For a few threads the returned row must carry that thread's max thread_sequence.
+    for m in msgs.iter().take(5) {
+        let tid = m["thread_id"].as_str().unwrap_or_default();
+        let all = get(&format!("/messages/events?thread_id={}&limit=500", tid));
+        assert_eq!(all.status(), 200);
+        let all_json: serde_json::Value = all.json().unwrap();
+        let max_seq = all_json["data"]["messages"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|x| x["thread_sequence"].as_i64())
+            .max();
+        assert_eq!(
+            m["thread_sequence"].as_i64(),
+            max_seq,
+            "thread {}: returned row is not the thread's last message",
+            tid
+        );
+    }
+
+    // seq0 + last together is rejected (mutually exclusive).
+    let both = get("/messages/events?seq0=true&last=true");
+    assert_eq!(both.status(), 400, "seq0 + last must be mutually exclusive");
+}
+
 #[test]
 #[ignore]
 fn test_messages_events_with_bogus_params() {
