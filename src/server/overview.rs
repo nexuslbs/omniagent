@@ -437,6 +437,10 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
             FROM kanban_history h
             JOIN kanban_tasks t ON t.id = h.kanban_task_id
             WHERE h.action = 'moved'
+               OR (h.action = 'workflow'
+                   AND h.initial_board IS NOT NULL
+                   AND h.final_board IS NOT NULL
+                   AND h.initial_board <> h.final_board)
             ORDER BY h.kanban_task_id, h.created_at DESC, h.id DESC
         ) sub
         ORDER BY sub.changed_at::timestamptz DESC
@@ -599,9 +603,9 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
 
     // ── 8. Kanban snapshot (recently changed tasks) ───────────────────────────
     // The kanban_history table records every status transition (action
-    // 'moved'). Show the last changed tasks, newest first, with the board,
-    // task name, CURRENT status (from kanban_tasks), tags and the
-    // change timestamp.
+    // 'moved', plus status-changing 'workflow' rows). Show the last changed
+    // tasks, newest first, with the board, task name, CURRENT status (from
+    // kanban_tasks), tags and the change timestamp.
     let kanban_snapshot = match kanban_snapshot_res {
         Ok(rows) => rows
             .into_iter()

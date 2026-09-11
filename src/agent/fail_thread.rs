@@ -464,10 +464,23 @@ pub async fn manual_review_decision(
     .await
     .map_err(err_str)?;
 
+    // D-B: a status that did not change must not yield a bogus
+    // "moved from X to X" row - the comment carries the explicit wording.
+    let status_changed = task.status != to_status;
+    let hist_from = if status_changed {
+        task.status.clone()
+    } else {
+        String::new()
+    };
+    let hist_to = if status_changed {
+        to_status.to_string()
+    } else {
+        String::new()
+    };
     sql_forge!(
         "INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
-         VALUES (:id, 'workflow', :from, :to, :comment)",
-        (:id = task_id, :from = task.status.clone(), :to = to_status.clone(), :comment = auto_comment.clone())
+         VALUES (:id, 'workflow', NULLIF(:from, ''), NULLIF(:to, ''), :comment)",
+        (:id = task_id, :from = hist_from.as_str(), :to = hist_to.as_str(), :comment = auto_comment.as_str())
     )
     .execute(&mut *tx)
     .await
@@ -1475,7 +1488,7 @@ pub(crate) async fn engine_transition(
 
     sql_forge!(
         "INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
-         VALUES (:task_id, 'workflow', :initial, :to_status, :comment)",
+         VALUES (:task_id, 'workflow', NULLIF(:initial, :to_status), NULLIF(:to_status, :initial), :comment)",
         (
             :task_id = task_id,
             :initial = initial_status.as_str(),

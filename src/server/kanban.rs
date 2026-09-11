@@ -2144,6 +2144,35 @@ async fn delete_task_handler(
         );
     }
 
+    // 2b. History: clearing the dependency edges (both directions) is a
+    //     durable mutation. Record a 'dependency_removed' row on the SURVIVING
+    //     task, naming this (now deleted) task; a missing / empty title
+    //     degrades to "(deleted task)".
+    if let Err(e) = sql_forge!(
+        r#"
+        INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, previous_values)
+        SELECT
+            CASE WHEN d.task_id = :id THEN d.depends_on_id ELSE d.task_id END,
+            'dependency_removed', NULL, NULL,
+            jsonb_build_object(
+                'depends_on_id', CAST(:id AS text),
+                'title', COALESCE(NULLIF(del.title, ''), '(deleted task)')
+            )
+        FROM kanban_task_dependencies d
+        LEFT JOIN kanban_tasks del ON del.id = :id
+        WHERE d.task_id = :id OR d.depends_on_id = :id
+        "#,
+        ( :id = &id )
+    )
+    .execute(&state.pool)
+    .await
+    {
+        error!(
+            "[kanban/tasks/{}] dependency history insert failed: {:?}",
+            id, e
+        );
+    }
+
     // 3. Clear dependencies (both directions)
     if let Err(e) = sql_forge!(
         r#"DELETE FROM kanban_task_dependencies WHERE task_id = :id OR depends_on_id = :id"#,
@@ -2455,10 +2484,7 @@ async fn add_dependency_handler(
     .await
     .ok()
     .flatten();
-    let dep_prev = serde_json::json!({
-        "depends_on_id": depends_on_id,
-        "title": dep_title,
-    });
+    let dep_prev = dep_previous_values(depends_on_id, dep_title.as_deref());
     if let Err(e) = sql_forge!(
         r#"
         INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, previous_values)
@@ -2520,10 +2546,7 @@ async fn remove_dependency_handler(
 
     // History: record the removal when a dependency row was actually deleted.
     if res.rows_affected() > 0 {
-        let dep_prev = serde_json::json!({
-            "depends_on_id": dep_id,
-            "title": dep_title,
-        });
+        let dep_prev = dep_previous_values(&dep_id, dep_title.as_deref());
         if let Err(e) = sql_forge!(
             r#"
             INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, previous_values)
@@ -2553,6 +2576,46 @@ struct TagRow {
     name: String,
 }
 
+/// The complete tag set currently attached to a task, sorted by name. This is
+/// always the "before" state of a tag mutation.
+async fn task_tags_sorted(pool: &sqlx::PgPool, task_id: &str) -> Result<Vec<String>, sqlx::Error> {
+    let rows = sql_forge!(
+        TagRow,
+        r#"
+        SELECT kt.name
+        FROM task_tags tt
+        JOIN kanban_tags kt ON kt.id = tt.tag_id
+        WHERE tt.task_id = :task_id
+        ORDER BY kt.name
+        "#,
+        ( :task_id = task_id )
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|r| r.name).collect())
+}
+
+/// `previous_values` payload for tag_added / tag_removed: the task's COMPLETE
+/// tag set BEFORE the change, under the plural `tags` key, sorted by name so
+/// successive rows are directly comparable. The tag that actually changed is
+/// carried separately in the history row's `comment` column.
+fn tags_previous_values(tags_before: &[String]) -> serde_json::Value {
+    let mut sorted: Vec<String> = tags_before.to_vec();
+    sorted.sort();
+    serde_json::json!({ "tags": sorted })
+}
+
+/// `previous_values` payload for dependency_added / dependency_removed: the id
+/// and title of the OTHER task. A missing / now-deleted task degrades to the
+/// stable placeholder "(deleted task)" instead of null or an empty string.
+fn dep_previous_values(dep_id: &str, title: Option<&str>) -> serde_json::Value {
+    let title = title
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .unwrap_or("(deleted task)");
+    serde_json::json!({ "depends_on_id": dep_id, "title": title })
+}
+
 /// Shared tag attach routine: ensure the tag exists (kanban_tags), link it to
 /// the task (task_tags), and - only when the association is NEW - record a
 /// durable 'tag_added' history entry. Returns true when the tag was newly
@@ -2565,7 +2628,10 @@ async fn attach_tag(pool: &sqlx::PgPool, task_id: &str, tag: &str) -> Result<boo
     )
     .execute(pool)
     .await?;
-    // 2. Link it to the task (idempotent: ON CONFLICT DO NOTHING).
+    // 2. Snapshot the task's COMPLETE tag set BEFORE the association is added:
+    //    history stores the previous state (plural key), never the new tag.
+    let tags_before = task_tags_sorted(pool, task_id).await?;
+    // 3. Link it to the task (idempotent: ON CONFLICT DO NOTHING).
     let tag_id: i64 = sql_forge!(
         scalar i64,
         "SELECT id FROM kanban_tags WHERE name = :name",
@@ -2582,14 +2648,15 @@ async fn attach_tag(pool: &sqlx::PgPool, task_id: &str, tag: &str) -> Result<boo
     if res.rows_affected() == 0 {
         return Ok(false); // already attached
     }
-    // 3. Durable history entry for the newly attached tag.
-    let prev = serde_json::json!({ "tag": tag });
+    // 4. Durable history entry for the newly attached tag: previous_values =
+    //    the full previous tag set (plural), comment = the tag that changed.
+    let prev = tags_previous_values(&tags_before);
     sql_forge!(
         r#"
-        INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, previous_values)
-        VALUES (:task_id, 'tag_added', NULL, NULL, :previous_values::jsonb)
+        INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, previous_values, comment)
+        VALUES (:task_id, 'tag_added', NULL, NULL, :previous_values::jsonb, :tag)
         "#,
-        ( :task_id = task_id, :previous_values = &prev )
+        ( :task_id = task_id, :previous_values = &prev, :tag = tag )
     )
     .execute(pool)
     .await?;
@@ -2676,6 +2743,18 @@ async fn remove_tag_handler(
     if tag.is_empty() {
         return err_json(StatusCode::BAD_REQUEST, "Tag cannot be empty");
     }
+    // Snapshot the COMPLETE tag set BEFORE the removal: previous_values must
+    // hold the state before the change, not the tag being removed.
+    let tags_before = match task_tags_sorted(&state.pool, &id).await {
+        Ok(t) => t,
+        Err(e) => {
+            error!(
+                "[kanban/tasks/{}/tags/{}] tag snapshot failed: {:?}",
+                id, tag, e
+            );
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to read tags");
+        }
+    };
     let res = match sql_forge!(
         r#"
         DELETE FROM task_tags
@@ -2694,13 +2773,15 @@ async fn remove_tag_handler(
         }
     };
     if res.rows_affected() > 0 {
-        let prev = serde_json::json!({ "tag": tag });
+        // previous_values = the full tag set BEFORE the removal; the comment
+        // carries the removed tag name so the event line is self-explanatory.
+        let prev = tags_previous_values(&tags_before);
         if let Err(e) = sql_forge!(
             r#"
-            INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, previous_values)
-            VALUES (:task_id, 'tag_removed', NULL, NULL, :previous_values::jsonb)
+            INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, previous_values, comment)
+            VALUES (:task_id, 'tag_removed', NULL, NULL, :previous_values::jsonb, :tag)
             "#,
-            ( :task_id = &id, :previous_values = &prev )
+            ( :task_id = &id, :previous_values = &prev, :tag = tag.as_str() )
         )
         .execute(&state.pool)
         .await
@@ -3115,6 +3196,39 @@ async fn delete_board_handler(
     .await
     .map_err(|e| {
         tracing::warn!("[kanban/boards/{}] history insert failed: {:?}", key, e)
+    });
+
+    // 1b. History: clearing the board's dependency edges is a durable
+    //     mutation. Record a 'dependency_removed' row on every SURVIVING task
+    //     (the other end of an edge crossing the board boundary), naming the
+    //     deleted task; a missing title degrades to "(deleted task)".
+    let _ = sql_forge!(
+        r#"
+        INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, previous_values)
+        SELECT
+            surv.id,
+            'dependency_removed', NULL, NULL,
+            jsonb_build_object(
+                'depends_on_id', del.id,
+                'title', COALESCE(NULLIF(del.title, ''), '(deleted task)')
+            )
+        FROM kanban_task_dependencies d
+        JOIN kanban_tasks a ON a.id = d.task_id
+        JOIN kanban_tasks b ON b.id = d.depends_on_id
+        JOIN kanban_tasks del ON del.id = CASE WHEN a.board = :board THEN a.id ELSE b.id END
+        JOIN kanban_tasks surv ON surv.id = CASE WHEN a.board = :board THEN b.id ELSE a.id END
+        WHERE (a.board = :board OR b.board = :board)
+          AND surv.board IS DISTINCT FROM :board::text
+        "#,
+        ( :board = &key )
+    )
+    .execute(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::warn!(
+            "[kanban/boards/{}] dependency history insert failed: {:?}",
+            key, e
+        )
     });
 
     // 2. Clear dependencies (both directions) for the board's tasks.
@@ -3904,5 +4018,38 @@ async fn wait_task_status_handler(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("wait failed: {}", e),
         ),
+    }
+}
+
+#[cfg(test)]
+mod history_payload_tests {
+    use super::{dep_previous_values, tags_previous_values};
+
+    #[test]
+    fn test_tags_previous_values_plural_sorted() {
+        let empty = tags_previous_values(&[]);
+        assert_eq!(empty, serde_json::json!({ "tags": [] }));
+        assert!(
+            empty.get("tag").is_none(),
+            "new rows must not carry the legacy singular key"
+        );
+
+        let set =
+            tags_previous_values(&["def".to_string(), "v0.2.3".to_string(), "abc".to_string()]);
+        assert_eq!(set["tags"], serde_json::json!(["abc", "def", "v0.2.3"]));
+    }
+
+    #[test]
+    fn test_dep_previous_values_title_fallback() {
+        let with_title = dep_previous_values("task_b", Some("Task B"));
+        assert_eq!(with_title["depends_on_id"], "task_b");
+        assert_eq!(with_title["title"], "Task B");
+
+        let missing = dep_previous_values("task_b", None);
+        assert_eq!(missing["title"], "(deleted task)");
+        assert_eq!(missing["depends_on_id"], "task_b");
+
+        let blank = dep_previous_values("task_b", Some("   "));
+        assert_eq!(blank["title"], "(deleted task)");
     }
 }

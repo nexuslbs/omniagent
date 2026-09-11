@@ -402,7 +402,6 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
             match skip_recovery(t.task_id.as_deref(), task_status.as_deref()) {
                 SkipRecovery::Reschedule { .. } => {
                     let task_id = t.task_id.as_deref().unwrap_or("");
-                    let status = task_status.as_deref().unwrap_or("todo");
                     let reason = "channel closed";
                     // Identity invariant: copy the parent's persisted identity;
                     // fail the re-schedule if it is missing (never fabricate).
@@ -484,12 +483,10 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
                     sql_forge!(
                         r#"
                         INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
-                        VALUES (:task_id, 'workflow', :initial, :to_status, :comment)
+                        VALUES (:task_id, 'workflow', NULL, NULL, :comment)
                         "#,
                         (
                             :task_id = task_id,
-                            :initial = status,
-                            :to_status = status,
                             :comment = comment.as_str()
                         )
                     )
@@ -1085,11 +1082,9 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: &str) -> AppResult<
                     );
                     sql_forge!(
                         "INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
-                         VALUES (:task_id, 'workflow', :initial, :to_status, :comment)",
+                         VALUES (:task_id, 'workflow', NULL, NULL, :comment)",
                         (
                             :task_id = task_id.as_str(),
-                            :initial = status.as_str(),
-                            :to_status = status.as_str(),
                             :comment = comment.as_str()
                         )
                     )
@@ -1270,9 +1265,9 @@ pub(crate) async fn skip_stale_threads_for_status(
         let _ = sql_forge!(
             r#"
             INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
-            VALUES (:task_id, 'workflow', :to_status, :to_status, :comment)
+            VALUES (:task_id, 'workflow', NULL, NULL, :comment)
             "#,
-            ( :task_id = task_id, :to_status = new_status, :comment = comment.as_str() )
+            ( :task_id = task_id, :comment = comment.as_str() )
         )
         .execute(pool)
         .await
@@ -1617,9 +1612,9 @@ pub(crate) async fn create_kanban_step_thread(
             let _ = sql_forge!(
                 r#"
                 INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
-                VALUES (:task_id, 'workflow', :initial, :to_status, :comment)
+                VALUES (:task_id, 'workflow', NULL, NULL, :comment)
                 "#,
-                ( :task_id = task_id, :initial = &task.status, :to_status = &task.status, :comment = comment.as_str() )
+                ( :task_id = task_id, :comment = comment.as_str() )
             )
             .execute(pool)
             .await
@@ -1693,16 +1688,17 @@ pub(crate) async fn create_kanban_step_thread(
     let _ = sql_forge!(
         r#"
         INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
-        VALUES (:task_id, 'workflow', :initial, :to_status, :comment)
+        VALUES (:task_id, 'workflow', NULL, NULL, :comment)
         "#,
-        ( :task_id = task_id, :initial = &task.status, :to_status = &task.status, :comment = comment.as_str() )
+        ( :task_id = task_id, :comment = comment.as_str() )
     )
     .execute(pool)
     .await
     .map_err(|e| {
         tracing::warn!(
             "[kanban dispatch] history insert for new thread #{} failed: {:?}",
-            thread.id, e
+            thread.id,
+            e
         )
     });
 
@@ -1836,11 +1832,10 @@ async fn fail_kanban_thread_no_board(
     let _ = sql_forge!(
         r#"
         INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
-        VALUES (:task_id, 'workflow', :initial, :initial, :comment)
+        VALUES (:task_id, 'workflow', NULL, NULL, :comment)
         "#,
         (
             :task_id = task.id.as_str(),
-            :initial = task.status.as_str(),
             :comment = format!("Thread #{} failed: {}", thread.id, board_err),
         )
     )
@@ -3020,7 +3015,7 @@ pub async fn mark_thread_merged_for_sub_prompt(
             let _ = sql_forge!(
                 r#"
                 INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
-                VALUES (:task_id, 'workflow', '', '', :comment)
+                VALUES (:task_id, 'workflow', NULL, NULL, :comment)
                 "#,
                 ( :task_id = task_id.as_str(), :comment = comment.as_str() )
             )

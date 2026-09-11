@@ -602,6 +602,21 @@ pub(crate) fn route_completed_thread(
     }
 }
 
+/// Boards to persist in a status history row: a real transition keeps both
+/// ends; a no-op transition (from == to, e.g. the task row vanished so `from`
+/// fell back to `to`) writes an explicit NULL pair, so a row can never render
+/// as the meaningless "moved from X to X".
+pub(crate) fn history_status_pair<'a>(
+    from: &'a str,
+    to: &'a str,
+) -> (Option<&'a str>, Option<&'a str>) {
+    if from == to {
+        (None, None)
+    } else {
+        (Some(from), Some(to))
+    }
+}
+
 /// Move the task to `to` and record a workflow history entry with `comment`
 /// (D3: transitions persist a comment).
 pub(crate) async fn transition_with_comment(
@@ -633,10 +648,11 @@ pub(crate) async fn transition_with_comment(
     .await
     .map_err(|e| format!("transition task: {e}"))?;
 
+    let (hist_from, hist_to) = history_status_pair(from.as_str(), to);
     sql_forge!(
         "INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
-         VALUES (:id, 'workflow', :from, :to, :comment)",
-        (:id = task_id, :from = from.clone(), :to = to, :comment = comment)
+         VALUES (:id, 'workflow', NULLIF(:from, ''), NULLIF(:to, ''), :comment)",
+        (:id = task_id, :from = hist_from.unwrap_or(""), :to = hist_to.unwrap_or(""), :comment = comment)
     )
     .execute(pool)
     .await
@@ -1339,5 +1355,24 @@ mod tests {
                 cause
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod history_status_pair_tests {
+    use super::history_status_pair;
+
+    #[test]
+    fn test_real_transition_keeps_both_boards() {
+        assert_eq!(
+            history_status_pair("running", "testing"),
+            (Some("running"), Some("testing"))
+        );
+    }
+
+    #[test]
+    fn test_noop_transition_writes_null_pair() {
+        assert_eq!(history_status_pair("running", "running"), (None, None));
+        assert_eq!(history_status_pair("blocked", "blocked"), (None, None));
     }
 }
