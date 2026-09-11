@@ -1338,10 +1338,15 @@ pub(crate) fn kanban_step_actionable(
 
 /// R8-J: an executor thread must ALWAYS carry a template - the role template
 /// wins; for the running step the fallback chain is task.template ->
-/// channel.template -> "dev-development" (never None). Step threads
-/// (testing/review) carry their role template only (required by workflow
-/// validation); without one they stay None exactly like kanban_updater's
-/// step-thread creation.
+/// channel.template -> profile.template -> "dev-development" (never None).
+/// The one effective template chain is
+/// `workflow_role > workflow > kanban_task > board > channel > profile`:
+/// `role_template` is the ALREADY-RESOLVED value from `Workflow::resolve_role`
+/// (which itself falls back to the workflow-level `template`), and
+/// `task_template` here is the resolved `task -> board` value from
+/// `resolve_task_defaults`. Step threads (testing/review) carry their role
+/// template only (required by workflow validation); without one they stay None
+/// exactly like kanban_updater's step-thread creation.
 fn resolve_kanban_thread_template(
     role_template: Option<String>,
     is_running: bool,

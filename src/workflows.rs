@@ -16,6 +16,7 @@
 //!     model: claude-sonnet-4-5
 //!     plan_mode: on
 //!     retries: 2
+//!     template: dev-development # optional workflow-level thread template
 //!     auto_approve: false       # optional; default false
 //!     review_on_fail: false     # optional; default false
 //!     roles:
@@ -39,7 +40,10 @@
 //! - `tester` / `reviewer` templates are required when the role is present,
 //!   UNLESS the role runs in `action` mode (`mode: action`) - action roles
 //!   dispatch a predefined action instead of an agent thread and need no
-//!   template (the `executor` template is optional in both modes);
+//!   template (the `executor` template is optional in both modes). A
+//!   workflow-level `template` satisfies the requirement too: the effective
+//!   template chain is `workflow_role > workflow > kanban_task > board >
+//!   channel > profile`;
 //! - `mode` must be `agent` (default) or `action`; any other value is rejected;
 //! - `mode: action` requires a non-blank `action_id`.
 
@@ -87,7 +91,9 @@ pub struct WorkflowDefaults {
 }
 
 /// A single role inside a workflow. `template` is the system prompt the role
-/// runs with; any other fields override the workflow-level defaults.
+/// runs with; when absent the workflow-level `template` is used (the one
+/// template chain is `workflow_role > workflow > kanban_task > board >
+/// channel > profile`). Any other fields override the workflow-level defaults.
 ///
 /// Role execution modes:
 /// - `agent` (default): the role runs as an agent thread with the template.
@@ -122,6 +128,16 @@ pub struct WorkflowRole {
 pub struct Workflow {
     #[serde(flatten)]
     pub defaults: WorkflowDefaults,
+
+    /// Optional workflow-level thread template. Fallback for every role that
+    /// does not define its own `template`: the one effective template chain is
+    /// `workflow_role > workflow > kanban_task > board > channel > profile`.
+    /// Absent contributes nothing (the previous behavior). Declared on
+    /// `Workflow` (not `WorkflowDefaults`) on purpose: `WorkflowDefaults` is
+    /// `#[serde(flatten)]`-ed into every role, so a duplicate key would be
+    /// emitted on serialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
 
     /// If true, execution counters (`workflow_state.executions`) are cleared
     /// when the task moves to review. Default: false.
@@ -236,7 +252,12 @@ impl WorkflowsFile {
                 // tester / reviewer: template required UNLESS action mode.
                 if [TESTER_ROLE, REVIEWER_ROLE].contains(&role_key.as_str()) && mode != MODE_ACTION
                 {
-                    let template = role_def.template.as_deref().unwrap_or("").trim();
+                    let template = role_def
+                        .template
+                        .as_deref()
+                        .or(workflow.template.as_deref())
+                        .unwrap_or("")
+                        .trim();
                     if template.is_empty() {
                         return Err(WorkflowConfigError::Invalid {
                             key: key.clone(),
@@ -356,13 +377,16 @@ impl Workflow {
     /// Resolve the effective settings for one role.
     ///
     /// Role-level overrides take precedence over workflow-level defaults
-    /// (workflow_role > workflow_field). Returns `None` when the role is not
-    /// defined on the workflow. `mode` / `action_id` are role-only and are
+    /// (workflow_role > workflow_field). `template` falls back to the
+    /// workflow-level `template`; the lower effective-template tiers
+    /// (kanban_task > board > channel > profile) are applied by the thread
+    /// dispatcher (`resolve_kanban_thread_template`). Returns `None` when the
+    /// role is not defined on the workflow. `mode` / `action_id` are role-only and are
     /// propagated as-is (they have no workflow-level counterpart).
     pub fn resolve_role(&self, role_key: &str) -> Option<ResolvedWorkflowRole> {
         let role = self.roles.get(role_key)?;
         Some(ResolvedWorkflowRole {
-            template: role.template.clone(),
+            template: role.template.clone().or_else(|| self.template.clone()),
             mode: role.mode.clone(),
             action_id: role.action_id.clone(),
             profile: role
@@ -536,6 +560,7 @@ mod tests {
     fn base_workflow() -> Workflow {
         Workflow {
             defaults: empty_defaults(),
+            template: None,
             clear_executions_on_review: false,
             auto_approve: false,
             review_on_fail: false,
@@ -1243,6 +1268,93 @@ workflows:
         let out = serde_yaml::to_string(&file).expect("serialize");
         assert!(out.contains("auto_approve: true"));
         assert!(out.contains("review_on_fail: true"));
+        let reparsed = WorkflowsFile::from_yaml(&out).expect("reparse");
+        assert_eq!(reparsed, file);
+    }
+
+    // ── workflow-level template (chain: workflow_role > workflow > ...) ──
+
+    #[test]
+    fn workflow_template_fills_roles_without_a_template() {
+        let yaml = r#"
+workflows:
+  wf:
+    template: workflow-tpl
+    roles:
+      executor: {}
+      tester:
+        template: tester-tpl
+"#;
+        let file = WorkflowsFile::from_yaml(yaml).expect("workflow-level template parses");
+        let wf = &file.workflows["wf"];
+        assert_eq!(wf.template.as_deref(), Some("workflow-tpl"));
+        // executor declares no template -> the workflow-level template is used.
+        let exec = wf.resolve_role(EXECUTOR_ROLE).expect("executor");
+        assert_eq!(exec.template.as_deref(), Some("workflow-tpl"));
+        // the role-level template still wins over the workflow-level one.
+        let tester = wf.resolve_role(TESTER_ROLE).expect("tester");
+        assert_eq!(tester.template.as_deref(), Some("tester-tpl"));
+    }
+
+    #[test]
+    fn workflow_template_satisfies_tester_requirement() {
+        let yaml = r#"
+workflows:
+  wf:
+    template: shared-tpl
+    roles:
+      executor: {}
+      tester: {}
+      reviewer: {}
+"#;
+        let file = WorkflowsFile::from_yaml(yaml)
+            .expect("workflow-level template satisfies tester/reviewer");
+        let wf = &file.workflows["wf"];
+        assert_eq!(
+            wf.resolve_role(TESTER_ROLE).unwrap().template.as_deref(),
+            Some("shared-tpl")
+        );
+        assert_eq!(
+            wf.resolve_role(REVIEWER_ROLE).unwrap().template.as_deref(),
+            Some("shared-tpl")
+        );
+    }
+
+    #[test]
+    fn missing_template_everywhere_is_still_rejected() {
+        let yaml = r#"
+workflows:
+  wf:
+    roles:
+      executor: {}
+      tester: {}
+"#;
+        let err =
+            WorkflowsFile::from_yaml(yaml).expect_err("tester without any template must fail");
+        assert!(err.to_string().contains("template"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn workflow_template_round_trips_through_yaml() {
+        let yaml = r#"
+workflows:
+  wf:
+    template: dev-development
+    roles:
+      executor: {}
+      tester:
+        template: t
+      reviewer:
+        template: r
+"#;
+        let file = WorkflowsFile::from_yaml(yaml).expect("parse");
+        assert_eq!(
+            file.workflows["wf"].template.as_deref(),
+            Some("dev-development")
+        );
+        let out = serde_yaml::to_string(&file).expect("serialize");
+        assert!(out.contains("template: dev-development"));
+        // the flattened role defaults must NOT emit a second `template` key.
         let reparsed = WorkflowsFile::from_yaml(&out).expect("reparse");
         assert_eq!(reparsed, file);
     }
