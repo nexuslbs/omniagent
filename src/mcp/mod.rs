@@ -771,7 +771,9 @@ impl McpRegistry {
             let alias_holder = self
                 .tools
                 .values()
-                .find(|other| other.name != tool.name && other.legacy_names().iter().any(|a| a == &alias))
+                .find(|other| {
+                    other.name != tool.name && other.legacy_names().iter().any(|a| a == &alias)
+                })
                 .map(plugin_of);
             if let Some(holder) = exposed_holder.or(alias_holder) {
                 warn_alias_collision(&alias, &tool.name, &holder);
@@ -929,9 +931,9 @@ impl McpRegistry {
             .tools
             .values()
             .filter(|t| {
-                allowed_names.iter().any(|name| {
-                    name == &t.name || self.alias_matches(t, name.as_str())
-                })
+                allowed_names
+                    .iter()
+                    .any(|name| name == &t.name || self.alias_matches(t, name.as_str()))
             })
             .collect();
         tools.sort_by_key(|t| Self::tool_priority(&t.name));
@@ -2047,7 +2049,10 @@ mod tests {
             tool_qualify("search", "channel_prompts"),
             "search__channel_prompts"
         );
-        assert_eq!(tool_qualify(CORE_PLUGIN_NAME, "poll_task"), "core__poll_task");
+        assert_eq!(
+            tool_qualify(CORE_PLUGIN_NAME, "poll_task"),
+            "core__poll_task"
+        );
     }
 
     #[test]
@@ -2190,11 +2195,20 @@ mod tests {
         reg.register(make_tool(&core_name, None, None));
         assert_eq!(reg.all().len(), 1);
         reg.register(make_tool("some_tool", Some(CORE_PLUGIN_NAME), None));
-        assert_eq!(reg.invalid_tools().len(), 1, "plugin claim must be rejected");
+        assert_eq!(
+            reg.invalid_tools().len(),
+            1,
+            "plugin claim must be rejected"
+        );
         assert!(reg.invalid_tools()[0].reason.contains("reserved"));
         assert_eq!(reg.all().len(), 1, "no extra tool may be registered");
-        let kept = reg.get(&core_name).expect("the core tool must still be there");
-        assert!(kept.server_name.is_none(), "the survivor must be the CORE tool");
+        let kept = reg
+            .get(&core_name)
+            .expect("the core tool must still be there");
+        assert!(
+            kept.server_name.is_none(),
+            "the survivor must be the CORE tool"
+        );
 
         // The retired `builtin` plugin name is rejected the same way.
         let retired_plugin = "builtin";
