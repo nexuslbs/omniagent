@@ -8,6 +8,7 @@
 //!  - GET   /kanban/tasks                          : board tasks (flat list)
 //!  - GET   /kanban/tasks/{id}                     : task detail
 //!  - GET   /kanban/tasks/{id}/dependencies        : task dependencies
+//!  - GET   /kanban/tasks/{id}/depended-upon       : reverse task dependencies (dependents)
 //!  - POST  /kanban/tasks                          : create task
 //!  - PATCH /kanban/tasks/{id}/status              : change status (+ position shift)
 //!  - PATCH /kanban/tasks/{id}/position            : change position (+ cross-column)
@@ -72,6 +73,11 @@ pub fn kanban_router() -> Router<Arc<AppState>> {
         .route(
             "/kanban/tasks/{id}/dependencies",
             get(list_dependencies_handler),
+        )
+        // 3b. Reverse dependencies: tasks that depend on this one
+        .route(
+            "/kanban/tasks/{id}/depended-upon",
+            get(list_depended_upon_handler),
         )
         // 4. Create task
         .route("/kanban/tasks", post(create_task_handler))
@@ -633,6 +639,31 @@ struct DependencyEntry {
     created_at: Option<String>,
 }
 
+/// Row for the reverse dependency lookup (`.../depended-upon`): the tasks that
+/// depend on a given task. Same projection as `DependencyRow` plus `board` and
+/// `archived`, so the dashboard can reuse one row renderer for both tables.
+#[derive(FromRow)]
+struct DependedUponRow {
+    id: String,
+    title: String,
+    status: String,
+    board: Option<String>,
+    priority: Option<i32>,
+    archived: Option<bool>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Serialize)]
+struct DependedUponEntry {
+    id: String,
+    title: String,
+    status: String,
+    board: Option<String>,
+    priority: i32,
+    archived: bool,
+    created_at: Option<String>,
+}
+
 #[derive(Serialize)]
 struct KanbanThreadEntry {
     id: i64,
@@ -783,6 +814,20 @@ fn dep_row_to_entry(r: DependencyRow) -> DependencyEntry {
         title: r.title,
         status: r.status,
         priority: r.priority.unwrap_or(0),
+        created_at: r
+            .created_at
+            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+    }
+}
+
+fn depended_upon_row_to_entry(r: DependedUponRow) -> DependedUponEntry {
+    DependedUponEntry {
+        id: r.id,
+        title: r.title,
+        status: r.status,
+        board: r.board,
+        priority: r.priority.unwrap_or(0),
+        archived: r.archived.unwrap_or(false),
         created_at: r
             .created_at
             .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
@@ -1021,6 +1066,55 @@ async fn list_dependencies_handler(
     };
 
     let entries: Vec<DependencyEntry> = rows.into_iter().map(dep_row_to_entry).collect();
+    ok_json(entries)
+}
+
+// ---------------------------------------------------------------------------
+// 3b. GET /kanban/tasks/{id}/depended-upon: tasks that depend on {id}
+// ---------------------------------------------------------------------------
+
+/// Reverse dependency lookup in a SINGLE SQL statement. Instead of listing
+/// every task and scanning each task's dependency list (N+1 requests), the
+/// dashboard asks this endpoint who depends on the task. Archived tasks are
+/// returned exactly like the forward `/dependencies` list returns them; an
+/// unknown or dependency-free task id yields an empty JSON array.
+async fn list_depended_upon_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let rows = match sql_forge!(
+        DependedUponRow,
+        r#"
+        SELECT
+            d.task_id AS id,
+            t.title,
+            t.status,
+            t.board,
+            t.priority,
+            t.archived,
+            t.created_at
+        FROM kanban_task_dependencies d
+        JOIN kanban_tasks t ON t.id = d.task_id
+        WHERE d.depends_on_id = :task_id
+        ORDER BY t.priority ASC, t.created_at DESC
+        "#,
+        ( :task_id = &id )
+    )
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!("[kanban/tasks/{}/depended-upon] query failed: {:?}", id, e);
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to fetch dependents",
+            );
+        }
+    };
+
+    let entries: Vec<DependedUponEntry> =
+        rows.into_iter().map(depended_upon_row_to_entry).collect();
     ok_json(entries)
 }
 
@@ -3639,6 +3733,26 @@ mod tests {
         };
         let entry = dep_row_to_entry(row);
         assert_eq!(entry.priority, 0);
+        assert_eq!(entry.created_at, None);
+    }
+
+    #[test]
+    fn test_depended_upon_row_to_entry() {
+        let row = DependedUponRow {
+            id: "child-1".to_string(),
+            title: "Depends on parent".to_string(),
+            status: "todo".to_string(),
+            board: Some("todo".to_string()),
+            priority: Some(3),
+            archived: None,
+            created_at: None,
+        };
+        let entry = depended_upon_row_to_entry(row);
+        assert_eq!(entry.id, "child-1");
+        assert_eq!(entry.title, "Depends on parent");
+        assert_eq!(entry.priority, 3);
+        assert_eq!(entry.board.as_deref(), Some("todo"));
+        assert!(!entry.archived);
         assert_eq!(entry.created_at, None);
     }
 
