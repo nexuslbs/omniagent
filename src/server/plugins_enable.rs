@@ -453,7 +453,7 @@ mod tests {
     fn lifecycle_key_is_type_scoped() {
         assert_eq!(
             lifecycle_key(&plugins_yaml::PluginYamlType::Tool, "git"),
-            "tool/git"
+            "tools/git"
         );
         assert_eq!(
             lifecycle_key(&plugins_yaml::PluginYamlType::Platform, "git"),
