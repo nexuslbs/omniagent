@@ -26,6 +26,7 @@ pub(crate) mod schedule;
 mod secrets;
 pub(crate) mod settings;
 pub(crate) mod threads;
+pub(crate) mod toolsets;
 use crate::error::{AppResult, ErrorContext};
 use axum::{
     extract::{Path, Query, State},
@@ -212,6 +213,11 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
         .route(
             "/api/models",
             get(models::get_models_handler).put(models::put_models_handler),
+        )
+        // ── Toolsets (config/toolsets.yml) API ──
+        .route(
+            "/api/toolsets",
+            get(toolsets::get_toolsets_handler).put(toolsets::put_toolsets_handler),
         )
         .route("/api/plugins/check-state", get(diagnostic::check_state))
         .route("/api/plugins/check-db", get(diagnostic::check_db))

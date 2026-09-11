@@ -289,6 +289,7 @@ pub struct ToolsetLevels {
 
 impl ToolsetLevels {
     /// Every level in priority order.
+    #[allow(clippy::type_complexity)]
     fn ordered(&self) -> [(ToolsetLevel, &Option<(String, Option<String>)>); 5] {
         [
             (ToolsetLevel::WorkflowRole, &self.workflow_role),
@@ -570,8 +571,10 @@ toolsets:
 
     #[test]
     fn resolve_keeps_empty_list_toolset() {
-        let mut l = ToolsetLevels::default();
-        l.workflow_role = level("executor", Some("empty_set"));
+        let l = ToolsetLevels {
+            workflow_role: level("executor", Some("empty_set")),
+            ..Default::default()
+        };
         let r = resolve(&l).expect("resolved");
         assert_eq!(r.id, "empty_set");
         assert_eq!(r.level, ToolsetLevel::WorkflowRole);
