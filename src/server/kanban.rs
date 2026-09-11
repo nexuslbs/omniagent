@@ -2820,6 +2820,7 @@ fn workflows_response(file: &WorkflowsFile) -> serde_json::Value {
                             "model": role.model,
                             "plan_mode": role.plan_mode,
                             "retries": role.retries,
+                            "allowed_tools": role.allowed_tools,
                         }),
                     )
                 })

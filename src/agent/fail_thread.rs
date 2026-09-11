@@ -3072,7 +3072,7 @@ mod tests_fail_tool_lifecycle {
             )),
             current_thread_id: Some(thread_id),
             current_channel_id: Some("kanban".to_string()),
-            current_allowed_tools: Vec::new(),
+            current_allowed_tools: None,
             current_channel_name: None,
             current_platform: None,
             current_profile_name: Some("test".to_string()),

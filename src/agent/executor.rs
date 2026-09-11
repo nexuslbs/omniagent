@@ -270,11 +270,32 @@ pub async fn process_thread(
     // the unfiltered registry (short `t.name`), so the prompt advertised
     // tools the model could not call and names that did not match the
     // schema. Always full names, except plugin-internal references.
+    // Effective tool allow-list: the profile's list intersected with the list
+    // of the workflow ROLE running this thread (executor / tester / reviewer).
+    // `None` = no restriction (all registered tools); `Some([])` = no tool at
+    // all. Threads that run no workflow role (user prompts, cron, hooks) have
+    // no workflow step, so the profile list applies unchanged. The workflow id
+    // / step are read from the DB: the dispatcher may load the thread without
+    // those columns.
+    let wf: Option<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT workflow_id, workflow_step FROM threads WHERE id = $1")
+            .bind(thread.id)
+            .fetch_optional(&cfg.pool)
+            .await
+            .ok()
+            .flatten();
+    let (workflow_id, workflow_step) = wf.unwrap_or((None, None));
+    let effective_allowed_tools = crate::workflows::effective_allowed_tools(
+        &cfg.ctx.data_dir,
+        prof.allowed_tools.as_deref(),
+        workflow_id.as_deref(),
+        workflow_step.as_deref(),
+    );
     let tool_names: Vec<String> = cfg
         .plugin_manager
         .snapshot_registry()
         .await
-        .allowed(&prof.allowed_tools)
+        .allowed_opt(effective_allowed_tools.as_deref())
         .iter()
         .map(|t| t.name.clone())
         .collect();
@@ -292,7 +313,7 @@ pub async fn process_thread(
         template_section,
         &mut next_seq,
         &per_thread_llm,
-        &prof,
+        effective_allowed_tools.as_deref(),
         start_time,
     )
     .await?;

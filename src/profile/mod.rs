@@ -35,8 +35,13 @@ pub struct Profile {
     pub max_tokens: Option<u32>,
     /// Temperature for this profile
     pub temperature: Option<f32>,
-    /// List of allowed MCP tool names for this profile (from profiles.yml)
-    pub allowed_tools: Vec<String>,
+    /// Tool allow-list from `profiles.yml` (`allowed_tools`). TRI-STATE:
+    /// - `None` (field UNDEFINED): no restriction - every registered tool is
+    ///   available to the agent;
+    /// - `Some([])`: NO tool at all;
+    /// - `Some(list)`: exactly these tools (a workflow role running the thread
+    ///   may further restrict them, see `workflows::effective_allowed_tools`).
+    pub allowed_tools: Option<Vec<String>>,
     /// Whether automatic retrieval is enabled for this profile
     pub auto_retrieval_enabled: bool,
     /// Retrieval aggressiveness: 0=off, 1=conservative, 2=balanced, 3=aggressive
@@ -79,7 +84,7 @@ impl Profile {
             api_key: None,
             max_tokens: None,
             temperature: None,
-            allowed_tools: Vec::new(), // Tools come from profiles.yml / dashboard UI
+            allowed_tools: None, // undefined => no restriction (all tools)
             auto_retrieval_enabled: true,
             retrieval_aggressiveness: 2,
             grounding_required: false,
@@ -102,7 +107,7 @@ impl Profile {
         p.api_key = def.api_key.clone();
         p.max_tokens = def.max_tokens;
         p.temperature = def.temperature;
-        p.allowed_tools = def.allowed_tools.clone().unwrap_or_default();
+        p.allowed_tools = def.allowed_tools.clone();
         p
     }
 
@@ -127,7 +132,7 @@ impl Profile {
             self.model = Some(m);
         }
         if let Some(tools) = config.allowed_tools {
-            self.allowed_tools = tools;
+            self.allowed_tools = Some(tools);
         }
         self
     }
@@ -274,8 +279,8 @@ mod tests {
     fn test_default_profile_starts_empty() {
         let p = Profile::default("test");
         assert!(
-            p.allowed_tools.is_empty(),
-            "Default profile should have no tools - they come from profiles.yml"
+            p.allowed_tools.is_none(),
+            "Default profile has NO tool restriction (undefined = all tools)"
         );
         assert_eq!(p.plan, None);
         assert_eq!(p.template, None);
@@ -292,7 +297,10 @@ mod tests {
         });
         assert_eq!(profile.provider, Some("anthropic".to_string()));
         assert_eq!(profile.model, Some("claude-3".to_string()));
-        assert_eq!(profile.allowed_tools, vec!["filesystem_read".to_string()]);
+        assert_eq!(
+            profile.allowed_tools,
+            Some(vec!["filesystem_read".to_string()])
+        );
     }
 
     #[test]
@@ -304,7 +312,10 @@ mod tests {
         assert_eq!(p.model, None, "absent model stays None");
         assert_eq!(p.plan, None);
         assert_eq!(p.template, None);
-        assert!(p.allowed_tools.is_empty());
+        assert!(
+            p.allowed_tools.is_none(),
+            "absent allowed_tools stays None (no restriction)"
+        );
     }
 
     #[test]
@@ -324,7 +335,7 @@ mod tests {
         assert_eq!(p.model.as_deref(), Some("deepseek-v4-flash"));
         assert_eq!(p.plan, Some(true));
         assert_eq!(p.template.as_deref(), Some("researcher"));
-        assert_eq!(p.allowed_tools, vec!["search_messages".to_string()]);
+        assert_eq!(p.allowed_tools, Some(vec!["search_messages".to_string()]));
     }
 
     #[test]
@@ -367,7 +378,7 @@ mod tests {
         assert_eq!(p.model.as_deref(), Some("deepseek-v4-flash"));
         assert_eq!(p.plan, Some(true));
         assert_eq!(p.template.as_deref(), Some("dev-development"));
-        assert_eq!(p.allowed_tools, vec!["filesystem_read".to_string()]);
+        assert_eq!(p.allowed_tools, Some(vec!["filesystem_read".to_string()]));
         assert!(
             !dir.join("profiles").exists(),
             "no directory needed for a yaml-declared profile"

@@ -104,6 +104,17 @@ struct ImportRequest {
     yaml: Option<String>,
 }
 
+/// Deserialize a tri-state field: absent -> `None` (leave unchanged),
+/// explicit JSON `null` -> `Some(None)` (clear to UNDEFINED), any other value
+/// -> `Some(Some(value))`.
+fn deserialize_double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Ok(Some(Option::<T>::deserialize(deserializer)?))
+}
+
 /// Fields a PATCH may update (bare names; empty string clears to None).
 #[derive(Debug, Deserialize, Default)]
 struct UpdateProfileRequest {
@@ -115,8 +126,11 @@ struct UpdateProfileRequest {
     plan: Option<bool>,
     #[serde(default)]
     template: Option<String>,
-    #[serde(default)]
-    allowed_tools: Option<Vec<String>>,
+    /// Tri-state tool list: absent = leave unchanged; `null` = clear to
+    /// UNDEFINED (no restriction, all tools); `[]` = explicitly allow NO tool;
+    /// a list = allow exactly these tools.
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    allowed_tools: Option<Option<Vec<String>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -198,7 +212,10 @@ async fn create_profile_handler(
     let def = crate::profiles_yaml::ProfileDef {
         provider: clean_opt(req.provider),
         model: clean_opt(req.model),
-        allowed_tools: Some(Vec::new()),
+        // `allowed_tools` stays UNDEFINED (`None` = every tool): a fresh
+        // profile must never be silently stored as an empty list, which
+        // now means "no tool at all".
+        allowed_tools: None,
         ..Default::default()
     };
     if let Err(e) = validate_profile(&name, &def) {
@@ -235,8 +252,8 @@ async fn update_profile_handler(
         if req.template.is_some() {
             def.template = clean_opt(req.template.clone());
         }
-        if req.allowed_tools.is_some() {
-            def.allowed_tools = req.allowed_tools.clone();
+        if let Some(tools) = req.allowed_tools.clone() {
+            def.allowed_tools = tools;
         }
         Ok(def)
     });

@@ -671,7 +671,9 @@ pub(crate) async fn run_main_loop(
     template_section: Option<String>,
     next_seq: &mut i32,
     per_thread_llm: &LLMClient,
-    prof: &crate::profile::Profile,
+    // Effective tool allow-list for this thread: the profile's tools
+    // intersected with the workflow ROLE's tools (`None` = no restriction).
+    effective_allowed_tools: Option<&[String]>,
     start_time: std::time::Instant,
 ) -> AppResult<Message> {
     // Track cumulative token usage across all LLM calls
@@ -1101,7 +1103,7 @@ Previous plan:\n{}",
         .plugin_manager
         .snapshot_registry()
         .await
-        .to_openai_tools(&prof.allowed_tools);
+        .to_openai_tools_opt(effective_allowed_tools);
 
     // 6. Tool-calling loop: max iterations controls total LLM calls
     // Use the plugin's runtime plan decision for the iteration budget too,
@@ -2383,7 +2385,7 @@ Previous plan:\n{}",
             tool_ctx.current_profile_name = Some(profile_name.to_string());
             tool_ctx.current_channel_name = Some(channel.name.clone());
             tool_ctx.current_platform = channel.platform.clone();
-            tool_ctx.current_allowed_tools = prof.allowed_tools.clone();
+            tool_ctx.current_allowed_tools = effective_allowed_tools.map(|tools| tools.to_vec());
 
             let pool = pool.clone();
             let pm = cfg.plugin_manager.clone();

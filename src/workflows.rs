@@ -101,6 +101,17 @@ pub struct WorkflowRole {
     pub mode: Option<String>,
     /// Predefined action id (from actions.yml) executed when `mode: action`.
     pub action_id: Option<String>,
+    /// Role-scoped tool allow-list, same parser semantics as `profiles.yml`.
+    /// TRI-STATE:
+    /// - absent (`None`): the role imposes NO restriction - every tool the
+    ///   profile allows stays available (the previous behavior);
+    /// - present and EMPTY (`Some([])`): the role allows NO tool at all;
+    /// - present and non-empty: the role allows exactly these tool names, and
+    ///   the thread's effective tools are `profile tools INTERSECT role tools`.
+    ///   ROLE-ONLY: deliberately not part of `WorkflowDefaults`, so it can never
+    ///   be set or inherited at workflow level.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_tools: Option<Vec<String>>,
     #[serde(flatten)]
     pub overrides: WorkflowDefaults,
 }
@@ -233,6 +244,17 @@ impl WorkflowsFile {
                         });
                     }
                 }
+                // `allowed_tools` entries must be non-blank tool names.
+                if let Some(tools) = &role_def.allowed_tools {
+                    if tools.iter().any(|tool| tool.trim().is_empty()) {
+                        return Err(WorkflowConfigError::Invalid {
+                            key: key.clone(),
+                            message: format!(
+                                "role '{role_key}' allowed_tools contains an empty tool name"
+                            ),
+                        });
+                    }
+                }
             }
         }
         Ok(())
@@ -314,6 +336,9 @@ pub struct ResolvedWorkflowRole {
     pub model: Option<String>,
     pub plan_mode: Option<String>,
     pub retries: Option<u32>,
+    /// Role-scoped tool allow-list (role-only; never inherited from the
+    /// workflow). `None` = no restriction.
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 impl ResolvedWorkflowRole {
@@ -361,6 +386,7 @@ impl Workflow {
                 .clone()
                 .or_else(|| self.defaults.plan_mode.clone()),
             retries: role.overrides.retries.or(self.defaults.retries),
+            allowed_tools: role.allowed_tools.clone(),
         })
     }
 
@@ -371,6 +397,76 @@ impl Workflow {
             .map(|resolved| resolved.effective_mode() == MODE_ACTION)
             .unwrap_or(false)
     }
+}
+
+/// Compute the EFFECTIVE tool allow-list of a thread from the profile's
+/// allow-list and the workflow ROLE's allow-list.
+///
+/// Tri-state semantics (identical to `profiles.yml` / `workflows.yml`):
+/// `None` means "no restriction - every registered tool is available", an
+/// EMPTY list means "no tool at all". The intersection preserves that:
+/// - `(None, None)`       -> `None` (unrestricted)
+/// - `(Some(p), None)`    -> `Some(p)` (profile restriction only)
+/// - `(None, Some(r))`    -> `Some(r)` (role restriction only)
+/// - `(Some(p), Some(r))` -> `Some(p INTERSECT r)` (both restrictions apply)
+///
+/// The result keeps the profile's order and never contains duplicates.
+pub fn intersect_allowed_tools(
+    profile: Option<&[String]>,
+    role: Option<&[String]>,
+) -> Option<Vec<String>> {
+    match (profile, role) {
+        (None, None) => None,
+        (Some(p), None) => Some(p.to_vec()),
+        (None, Some(r)) => Some(r.to_vec()),
+        (Some(p), Some(r)) => {
+            let mut seen = std::collections::BTreeSet::new();
+            Some(
+                p.iter()
+                    .filter(|name| r.iter().any(|role_name| role_name == *name))
+                    .filter(|name| seen.insert((*name).clone()))
+                    .cloned()
+                    .collect(),
+            )
+        }
+    }
+}
+
+/// Tool allow-list declared by the workflow ROLE running a thread step.
+///
+/// `None` = no role restriction (no workflow id, no workflow step, unknown
+/// workflow / step, or a role that does not declare `allowed_tools`).
+/// `Some(list)` = the role restricts the tools (an empty list allows none).
+/// A missing or unreadable `workflows.yml` also degrades to `None`: broken
+/// optional config must never silently take tools away from a running thread.
+pub fn role_allowed_tools(
+    data_dir: &str,
+    workflow_id: Option<&str>,
+    workflow_step: Option<&str>,
+) -> Option<Vec<String>> {
+    let workflow_id = workflow_id?;
+    let role_key = role_for_step(workflow_step?)?;
+    let workflow = WorkflowsFile::load_workflow(data_dir, workflow_id).ok()??;
+    workflow
+        .roles
+        .get(role_key)
+        .and_then(|role| role.allowed_tools.clone())
+}
+
+/// Effective tool allow-list of a thread: the profile's allow-list
+/// intersected with the allow-list of the workflow ROLE running the thread.
+///
+/// Threads that run no workflow role (user prompts, cron, hooks, plain
+/// schedule threads) carry no workflow step, so the role side is `None` and the
+/// result is exactly the profile's own list (previous behavior).
+pub fn effective_allowed_tools(
+    data_dir: &str,
+    profile_allowed: Option<&[String]>,
+    workflow_id: Option<&str>,
+    workflow_step: Option<&str>,
+) -> Option<Vec<String>> {
+    let role = role_allowed_tools(data_dir, workflow_id, workflow_step);
+    intersect_allowed_tools(profile_allowed, role.as_deref())
 }
 
 /// Errors produced while loading/parsing/validating `workflows.yml`.
@@ -452,8 +548,177 @@ mod tests {
             template: template.map(|s| s.to_string()),
             mode: None,
             action_id: None,
+            allowed_tools: None,
             overrides: empty_defaults(),
         }
+    }
+
+    const ROLE_TOOLS_YAML: &str = r#"
+workflows:
+  wf:
+    roles:
+      executor:
+        template: exec
+        allowed_tools:
+          - filesystem_read
+          - notes_note-write
+      tester:
+        template: tester
+      reviewer:
+        template: rev
+        allowed_tools: []
+"#;
+
+    #[test]
+    fn test_intersect_allowed_tools_matrix() {
+        let p = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let r = vec!["b".to_string(), "c".to_string(), "d".to_string()];
+        assert_eq!(intersect_allowed_tools(None, None), None);
+        assert_eq!(intersect_allowed_tools(Some(&p), None), Some(p.clone()));
+        assert_eq!(intersect_allowed_tools(None, Some(&r)), Some(r.clone()));
+        assert_eq!(
+            intersect_allowed_tools(Some(&p), Some(&r)),
+            Some(vec!["b".to_string(), "c".to_string()])
+        );
+        // An EMPTY role list is a restriction: it allows nothing.
+        assert_eq!(
+            intersect_allowed_tools(Some(&p), Some(&[])),
+            Some(Vec::new())
+        );
+        assert_eq!(intersect_allowed_tools(None, Some(&[])), Some(Vec::new()));
+        // An empty PROFILE list is a restriction too (no tool at all).
+        assert_eq!(intersect_allowed_tools(Some(&[]), None), Some(Vec::new()));
+        assert_eq!(
+            intersect_allowed_tools(Some(&[]), Some(&p)),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn test_role_allowed_tools_tristate_from_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("config")).expect("config dir");
+        std::fs::write(
+            dir.path().join("config").join("workflows.yml"),
+            ROLE_TOOLS_YAML,
+        )
+        .expect("write workflows.yml");
+        let data_dir = dir.path().to_string_lossy().to_string();
+
+        // role declares a non-empty list -> that list
+        assert_eq!(
+            role_allowed_tools(&data_dir, Some("wf"), Some("running")),
+            Some(vec![
+                "filesystem_read".to_string(),
+                "notes_note-write".to_string()
+            ])
+        );
+        // role declares NO allowed_tools (undefined) -> no restriction
+        assert_eq!(
+            role_allowed_tools(&data_dir, Some("wf"), Some("testing")),
+            None
+        );
+        // role declares an empty list -> allows NOTHING
+        assert_eq!(
+            role_allowed_tools(&data_dir, Some("wf"), Some("review")),
+            Some(Vec::new())
+        );
+        // not a workflow step (user/cron/hook thread) -> no restriction
+        assert_eq!(role_allowed_tools(&data_dir, Some("wf"), None), None);
+        assert_eq!(
+            role_allowed_tools(&data_dir, Some("wf"), Some("todo")),
+            None
+        );
+        // no workflow id (plain thread) -> no restriction
+        assert_eq!(role_allowed_tools(&data_dir, None, Some("running")), None);
+        // unknown workflow -> no restriction
+        assert_eq!(
+            role_allowed_tools(&data_dir, Some("nope"), Some("running")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_effective_allowed_tools_intersects_profile_and_role() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("config")).expect("config dir");
+        std::fs::write(
+            dir.path().join("config").join("workflows.yml"),
+            ROLE_TOOLS_YAML,
+        )
+        .expect("write workflows.yml");
+        let data_dir = dir.path().to_string_lossy().to_string();
+        let profile = vec![
+            "filesystem_read".to_string(),
+            "notes_note-write".to_string(),
+            "kanban_list-kanban-tasks".to_string(),
+        ];
+
+        // profile restricted, role restricted -> intersection
+        assert_eq!(
+            effective_allowed_tools(&data_dir, Some(&profile), Some("wf"), Some("running")),
+            Some(vec![
+                "filesystem_read".to_string(),
+                "notes_note-write".to_string()
+            ])
+        );
+        // profile restricted, role undefined -> profile list unchanged
+        assert_eq!(
+            effective_allowed_tools(&data_dir, Some(&profile), Some("wf"), Some("testing")),
+            Some(profile.clone())
+        );
+        // profile restricted, role [] -> nothing
+        assert_eq!(
+            effective_allowed_tools(&data_dir, Some(&profile), Some("wf"), Some("review")),
+            Some(Vec::new())
+        );
+        // profile undefined, role restricted -> role list
+        assert_eq!(
+            effective_allowed_tools(&data_dir, None, Some("wf"), Some("running")),
+            Some(vec![
+                "filesystem_read".to_string(),
+                "notes_note-write".to_string()
+            ])
+        );
+        // non-workflow thread -> profile list unchanged (role side absent)
+        assert_eq!(
+            effective_allowed_tools(&data_dir, Some(&profile), Some("wf"), None),
+            Some(profile.clone())
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_blank_role_allowed_tool() {
+        let yaml = r#"
+workflows:
+  wf:
+    roles:
+      executor:
+        template: exec
+        allowed_tools:
+          - ""
+"#;
+        let err = WorkflowsFile::from_yaml(yaml).expect_err("blank tool name must fail");
+        assert!(
+            err.to_string().contains("allowed_tools"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_role_allowed_tools_roundtrip_keeps_tristate() {
+        let file = WorkflowsFile::from_yaml(ROLE_TOOLS_YAML).expect("valid yaml");
+        let yaml = file.to_yaml().expect("to_yaml");
+        let again = WorkflowsFile::from_yaml(&yaml).expect("reparse");
+        assert_eq!(again, file);
+        // undefined stays undefined, [] stays [] (never merged)
+        let wf = again.workflows.get("wf").expect("wf");
+        assert_eq!(wf.roles["tester"].allowed_tools, None);
+        assert_eq!(wf.roles["reviewer"].allowed_tools, Some(Vec::new()));
+        assert!(
+            !yaml.contains("allowed_tools: null"),
+            "undefined role tools must not be serialized as null: {yaml}"
+        );
     }
 
     #[test]
@@ -529,6 +794,7 @@ mod tests {
                 template: Some("executor-template".to_string()),
                 mode: Some(MODE_ACTION.to_string()),
                 action_id: Some("my-action".to_string()),
+                allowed_tools: None,
                 overrides: WorkflowDefaults {
                     profile: Some("role-profile".to_string()),
                     ..empty_defaults()
@@ -826,6 +1092,7 @@ workflows:
             template: None,
             mode: Some(MODE_ACTION.to_string()),
             action_id: Some(action_id.to_string()),
+            allowed_tools: None,
             overrides: empty_defaults(),
         }
     }

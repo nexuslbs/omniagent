@@ -264,12 +264,13 @@ pub struct AppContext {
     /// Current channel ID (== channel NAME, the channels.yml key) being
     /// executed (set per-tool-call so MCP tools know the channel identity).
     pub current_channel_id: Option<String>,
-    /// Profile-allowed tool names for the current thread execution.
+    /// Effective tool allow-list for the current thread execution: the
+    /// profile's tools intersected with the running workflow ROLE's tools.
     /// Set per-tool-call alongside `current_thread_id` so the
-    /// `list_tool_details` introspection tool knows which tools are
-    /// actually available to the current profile. Empty = no restriction
-    /// (all tools allowed).
-    pub current_allowed_tools: Vec<String>,
+    /// `list_tool_details` introspection tool knows which tools are actually
+    /// available. `None` = no restriction (all tools allowed); `Some([])` =
+    /// NO tool allowed.
+    pub current_allowed_tools: Option<Vec<String>>,
     /// Current channel name being executed (e.g. "Home", "Engineering").
     /// Set alongside current_channel_id so MCP tools know the channel identity.
     pub current_channel_name: Option<String>,
@@ -311,7 +312,7 @@ impl AppContext {
             platforms: Arc::new(RwLock::new(HashMap::new())),
             current_thread_id: None,
             current_channel_id: None,
-            current_allowed_tools: Vec::new(),
+            current_allowed_tools: None,
             current_channel_name: None,
             current_platform: None,
             current_profile_name: None,
@@ -526,6 +527,15 @@ impl McpRegistry {
     }
 
     /// Get tools allowed for a given profile, sorted by execution priority.
+    /// Tools permitted by an OPTIONAL allow-list: `None` means "no
+    /// restriction" (every registered tool), `Some([])` means "no tool".
+    pub fn allowed_opt(&self, allowed_names: Option<&[String]>) -> Vec<&McpTool> {
+        match allowed_names {
+            None => self.all(),
+            Some(names) => self.allowed(names),
+        }
+    }
+
     pub fn allowed(&self, allowed_names: &[String]) -> Vec<&McpTool> {
         let mut tools: Vec<&McpTool> = self
             .tools
@@ -619,6 +629,24 @@ impl McpRegistry {
             "Unknown tool: {}{}",
             call.name, suggestion_msg
         )))
+    }
+
+    /// Build the OpenAI-compatible tools array for an OPTIONAL allow-list:
+    /// `None` = every registered tool, `Some([])` = no tool at all.
+    pub fn to_openai_tools_opt(&self, allowed_names: Option<&[String]>) -> Vec<Value> {
+        self.allowed_opt(allowed_names)
+            .iter()
+            .map(|tool| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.input_schema,
+                    }
+                })
+            })
+            .collect()
     }
 
     /// Build the OpenAI-compatible tools array for the LLM.
@@ -1015,7 +1043,6 @@ fn list_tool_details_tool() -> McpTool {
 
                 // Search the catalog for a tool with matching name
                 let allowed = &ctx.current_allowed_tools;
-                let unrestricted = allowed.is_empty();
 
                 for tool_def in &ctx.tool_catalog {
                     if let Some(name) = tool_def
@@ -1024,12 +1051,16 @@ fn list_tool_details_tool() -> McpTool {
                     {
                         if name == tool_name {
                             // Check if the tool is allowed by the current profile
-                            let status = if unrestricted || allowed.contains(&name.to_string()) {
+                            let permitted = allowed
+                                .as_ref()
+                                .map(|names| names.contains(&name.to_string()))
+                                .unwrap_or(true);
+                            let status = if permitted {
                                 "AVAILABLE".to_string()
                             } else {
                                 format!(
-                                    "RESTRICTED: not in profile allowed_tools ({}/{} tools allowed)",
-                                    allowed.len(),
+                                    "RESTRICTED: not in the effective allowed tools ({}/{} tools allowed)",
+                                    allowed.as_ref().map(|names| names.len()).unwrap_or(0),
                                     ctx.tool_catalog.len()
                                 )
                             };
@@ -1049,7 +1080,7 @@ fn list_tool_details_tool() -> McpTool {
 
                 // Tool not found: list available tools (restricted by profile if applicable)
                 let allowed = &ctx.current_allowed_tools;
-                let is_restricted = !allowed.is_empty();
+                let is_restricted = allowed.is_some();
                 let catalog_tools: Vec<&str> = ctx
                     .tool_catalog
                     .iter()
@@ -1063,7 +1094,12 @@ fn list_tool_details_tool() -> McpTool {
                 let visible: Vec<&str> = if is_restricted {
                     catalog_tools
                         .into_iter()
-                        .filter(|name| allowed.contains(&name.to_string()))
+                        .filter(|name| {
+                            allowed
+                                .as_ref()
+                                .map(|names| names.contains(&name.to_string()))
+                                .unwrap_or(true)
+                        })
                         .collect()
                 } else {
                     catalog_tools
