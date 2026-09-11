@@ -306,9 +306,38 @@ pub async fn process_thread(
                         workflow_id: workflow_id.as_deref(),
                         workflow_step: workflow_step.as_deref(),
                     });
-                let source = resolved
-                    .map(|r| r.describe())
-                    .unwrap_or_else(|| format!("thread {}", thread.id));
+                // Name the LEVEL that defined the unresolved id. The
+                // re-resolution above covers the workflow_role / workflow /
+                // channel / profile levels; when it yields a DIFFERENT id the
+                // value can only come from the TASK level, so name the exact
+                // task (kanban task column or tasks.yml schedule entry).
+                let mut source = resolved.filter(|r| r.id == id).map(|r| r.describe());
+                if source.is_none() {
+                    if let Some(task_id) = thread.task_id.as_deref() {
+                        let task_level = crate::db::kanban::task_toolset(&cfg.pool, task_id)
+                            .await
+                            .ok()
+                            .flatten();
+                        if task_level.as_deref() == Some(id) {
+                            source = Some(format!("kanban task '{task_id}'"));
+                        }
+                    }
+                }
+                if source.is_none() {
+                    if let Some(schedule_id) = thread.schedule_task_id.as_deref() {
+                        let schedule_level = crate::tasks_yaml::load_tasks(&cfg.ctx.data_dir)
+                            .ok()
+                            .and_then(|t| {
+                                t.schedules
+                                    .get(schedule_id)
+                                    .and_then(|d| d.toolset.clone())
+                            });
+                        if schedule_level.as_deref() == Some(id) {
+                            source = Some(format!("schedule task '{schedule_id}'"));
+                        }
+                    }
+                }
+                let source = source.unwrap_or_else(|| format!("thread {}", thread.id));
                 return Err(crate::error::Error::Message(format!(
                     "toolset '{}' defined by {} is not defined in config/toolsets.yml",
                     id, source
