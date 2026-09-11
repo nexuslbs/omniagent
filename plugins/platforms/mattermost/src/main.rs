@@ -30,10 +30,63 @@ use tokio_tungstenite::tungstenite::Message;
 // Mattermost REST API Client
 // ---------------------------------------------------------------------------
 
+/// Process-wide typing scope per Mattermost THREAD KEY.
+///
+/// The key is the id the core sends as the typing `parent_id`: the thread ROOT
+/// of a thread a user replied in, or the post id of a plain channel-level post.
+/// `true` = thread-scoped (typing must carry `parent_id`), `false` =
+/// channel-level (typing must omit it). A post lookup cannot tell the two apart
+/// because BOTH keys are top-level posts (`root_id == ""`), so the plugin
+/// records what it observed inbound; see `note_thread_scope`.
+///
+/// The inbound path and the JSON-RPC path use SEPARATE `MattermostClient`
+/// instances, hence a process-wide map instead of a client field.
+static THREAD_SCOPE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, bool>>> =
+    std::sync::OnceLock::new();
+
+fn thread_scope_map() -> &'static std::sync::Mutex<HashMap<String, bool>> {
+    THREAD_SCOPE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Record the typing scope of the Mattermost thread an inbound HUMAN post
+/// belongs to. Called for every inbound post BEFORE its notification reaches
+/// the core, so the scope is already known when the core starts typing for that
+/// thread. A reply makes its thread thread-scoped; a top-level post is
+/// channel-level.
+fn note_thread_scope(post_id: &str, root_id: &str) {
+    let root = root_id.trim();
+    let (key, scoped) = if root.is_empty() {
+        (post_id.trim(), false)
+    } else {
+        (root, true)
+    };
+    if key.is_empty() {
+        return;
+    }
+    let mut scopes = thread_scope_map().lock().expect("thread scope poisoned");
+    if scopes.len() >= 4096 {
+        scopes.clear();
+    }
+    scopes.insert(key.to_string(), scoped);
+}
+
+/// Scope observed inbound for a thread key, if any (see `note_thread_scope`).
+fn known_thread_scope(thread_key: &str) -> Option<bool> {
+    thread_scope_map()
+        .lock()
+        .expect("thread scope poisoned")
+        .get(thread_key)
+        .copied()
+}
+
 struct MattermostClient {
     http_client: reqwest::Client,
     api_base: String,
     auth_header: String,
+    /// Cache of post id -> resolved typing `parent_id` (Mattermost thread root
+    /// id, or None for a channel-level post). Typing repeats every ~5s while a
+    /// thread runs, so the same cause post is resolved over and over.
+    typing_parent_cache: std::sync::Mutex<HashMap<String, Option<String>>>,
 }
 
 impl MattermostClient {
@@ -43,6 +96,7 @@ impl MattermostClient {
             http_client: reqwest::Client::new(),
             api_base,
             auth_header: format!("Bearer {}", access_token),
+            typing_parent_cache: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -54,6 +108,7 @@ impl MattermostClient {
             http_client: reqwest::Client::new(),
             api_base,
             auth_header: format!("Bearer {}", session_token),
+            typing_parent_cache: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -159,6 +214,88 @@ impl MattermostClient {
             );
         }
         Ok(status.is_success())
+    }
+
+    /// Resolve the Mattermost THREAD ROOT to use as the typing `parent_id`.
+    ///
+    /// Mattermost renders a typing indicator only in a view whose `rootId`
+    /// equals the event's `parent_id`; channel-level views use `""`. The core
+    /// sends the CAUSE message's external post id, which for a top-level
+    /// channel post is the post itself - passing that id as `parent_id` scopes
+    /// the indicator to a thread the channel view never matches, so nothing is
+    /// shown. Resolve the post and return:
+    ///   - `Some(root_id)` when the post belongs to a real thread,
+    ///   - `None` for a top-level channel post (empty `root_id`).
+    ///
+    /// Results are cached because typing repeats every ~5s per processing thread.
+    async fn resolve_typing_parent(&self, post_id: &str) -> Result<Option<String>> {
+        // What the plugin observed inbound is the reliable signal: the core
+        // sends a top-level post id in BOTH cases (a plain channel-level post
+        // and the root of a thread a user replied in) and both carry
+        // root_id == "". A thread a user replied in must be typed with
+        // `parent_id` = that thread key (what the client's thread view matches);
+        // a single channel-level post must omit `parent_id` so that the CHANNEL
+        // view (rootId == "") shows the indicator.
+        if let Some(scoped) = known_thread_scope(post_id) {
+            return Ok(if scoped {
+                Some(post_id.to_string())
+            } else {
+                None
+            });
+        }
+
+        if let Some(cached) = self
+            .typing_parent_cache
+            .lock()
+            .expect("typing parent cache poisoned")
+            .get(post_id)
+        {
+            return Ok(cached.clone());
+        }
+
+        let resp = self
+            .http_client
+            .get(format!("{}/api/v4/posts/{}", self.api_base, post_id))
+            .header("Authorization", &self.auth_header)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        // Unknown/deleted post or a transient API error: fall back to
+        // channel-level typing instead of guessing a thread scope.
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                "Typing: could not resolve post {} ({}): {}",
+                post_id,
+                status,
+                text
+            );
+            return Ok(None);
+        }
+
+        let post: Value = resp.json().await.unwrap_or(Value::Null);
+        let root_id = post
+            .get("root_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let resolved = if root_id.is_empty() {
+            None
+        } else {
+            Some(root_id)
+        };
+
+        let mut cache = self
+            .typing_parent_cache
+            .lock()
+            .expect("typing parent cache poisoned");
+        if cache.len() >= 1024 {
+            cache.clear();
+        }
+        cache.insert(post_id.to_string(), resolved.clone());
+        Ok(resolved)
     }
 
     /// Add a reaction (emoji) to a post.
@@ -2208,8 +2345,23 @@ async fn handle_typing(
     client: &MattermostClient,
     params: &TypingParams,
 ) -> PluginResponse {
+    // The core sends the CAUSE message's external id. Resolve it to a real
+    // Mattermost THREAD ROOT: a top-level channel post (root_id == "") must
+    // produce channel-level typing (no parent_id), otherwise the indicator is
+    // scoped to a thread the channel view never matches and stays invisible.
+    let parent = match params.parent_id.as_deref() {
+        Some(pid) if !pid.trim().is_empty() => match client.resolve_typing_parent(pid).await {
+            Ok(root) => root,
+            Err(e) => {
+                tracing::warn!("Typing: parent resolution failed for {}: {}", pid, e);
+                None
+            }
+        },
+        _ => None,
+    };
+
     match client
-        .send_typing(&params.resource_identifier, params.parent_id.as_deref())
+        .send_typing(&params.resource_identifier, parent.as_deref())
         .await
     {
         Ok(sent) => make_success(id, serde_json::json!({"typing": sent})),
@@ -2337,6 +2489,7 @@ async fn login_admin_client(
         http_client,
         api_base: server_url.trim_end_matches('/').to_string(),
         auth_header: session_auth,
+        typing_parent_cache: std::sync::Mutex::new(HashMap::new()),
     })
 }
 
@@ -3087,6 +3240,10 @@ async fn send_inbound_notification(
     };
 
     let thread_id = root_id.unwrap_or(&post.id);
+
+    // Teach the typing path which scope this thread has: a reply makes the
+    // thread thread-scoped, a top-level post stays channel-level.
+    note_thread_scope(&post.id, &post.root_id);
 
     // Build structured file attachments list
     let mut file_attachments: Vec<FileAttachment> = Vec::new();
@@ -4276,9 +4433,12 @@ mod tests {
     // request BODY, plus `parent_id` when the processing thread lives inside a
     // Mattermost thread. These tests pin the request the plugin really sends.
 
+    /// (path, body) pairs captured by the test HTTP servers below.
+    type CapturedRequests = Arc<Mutex<Vec<(String, String)>>>;
+
     /// Minimal HTTP server that records the (path, body) of every request and
     /// answers with the pre-configured statuses, one per request in order.
-    fn start_capture_server(statuses: Vec<u16>) -> (String, Arc<Mutex<Vec<(String, String)>>>) {
+    fn start_capture_server(statuses: Vec<u16>) -> (String, CapturedRequests) {
         let captured: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = captured.clone();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind capture server");
@@ -4310,6 +4470,53 @@ mod tests {
                 let resp = format!(
                     "HTTP/1.1 {} {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                     status, reason
+                );
+                std::io::Write::write_all(&mut stream, resp.as_bytes()).expect("write resp");
+            }
+        });
+        (addr, captured)
+    }
+
+    /// Like `start_capture_server`, but each request is answered with a
+    /// configurable status AND body (so a `GET /api/v4/posts/{id}` can return a
+    /// JSON post). `responses` is consumed in request order.
+    fn start_capture_server_with_bodies(
+        responses: Vec<(u16, String)>,
+    ) -> (String, CapturedRequests) {
+        let captured: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind capture server");
+        let addr = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut buf = vec![0u8; 8192];
+                let n = std::io::Read::read(&mut stream, &mut buf).unwrap_or(0);
+                let raw = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = raw
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or_default()
+                    .to_string();
+                let req_body = raw
+                    .split("\r\n\r\n")
+                    .nth(1)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                sink.lock().push((path, req_body));
+                let reason = match status {
+                    200 => "OK",
+                    404 => "Not Found",
+                    _ => "Error",
+                };
+                let resp = format!(
+                    "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status,
+                    reason,
+                    body.len(),
+                    body
                 );
                 std::io::Write::write_all(&mut stream, resp.as_bytes()).expect("write resp");
             }
@@ -4364,5 +4571,232 @@ mod tests {
             .expect("send_typing");
         assert!(!sent, "a 404 must be reported as NOT sent");
         assert_eq!(captured.lock()[0].0, "/api/v4/users/me/typing");
+    }
+
+    // ── typing parent resolution: top-level channel post vs thread root ─────
+    //
+    // The core sends the CAUSE message's external id as `parent_id`. For a
+    // top-level channel post that id is the post itself (root_id == ""), and
+    // the Mattermost client only shows the indicator in a view whose rootId
+    // equals the event's parent_id (channel views use ""). These tests pin the
+    // resolution: channel-level posts must NOT set parent_id, replies must be
+    // scoped to their thread root.
+
+    #[tokio::test]
+    async fn resolve_typing_parent_omits_parent_for_channel_level_post() {
+        let (addr, captured) = start_capture_server_with_bodies(vec![(
+            200,
+            r#"{"id":"post-1","channel_id":"chan-1","root_id":""}"#.to_string(),
+        )]);
+        let client = MattermostClient::new(&addr, "test-token");
+
+        let parent = client
+            .resolve_typing_parent("post-1")
+            .await
+            .expect("resolve_typing_parent");
+        assert_eq!(
+            parent, None,
+            "a top-level channel post must NOT set parent_id (channel-level typing)"
+        );
+        assert_eq!(
+            captured.lock()[0].0,
+            "/api/v4/posts/post-1",
+            "the post must be resolved via GET /api/v4/posts/{{id}}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_typing_parent_returns_thread_root_for_reply() {
+        let (addr, captured) = start_capture_server_with_bodies(vec![(
+            200,
+            r#"{"id":"reply-2","channel_id":"chan-1","root_id":"root-9"}"#.to_string(),
+        )]);
+        let client = MattermostClient::new(&addr, "test-token");
+
+        let parent = client
+            .resolve_typing_parent("reply-2")
+            .await
+            .expect("resolve_typing_parent");
+        assert_eq!(
+            parent.as_deref(),
+            Some("root-9"),
+            "a reply must be scoped to its Mattermost thread ROOT"
+        );
+        assert_eq!(captured.lock()[0].0, "/api/v4/posts/reply-2");
+    }
+
+    #[tokio::test]
+    async fn resolve_typing_parent_falls_back_to_channel_on_error() {
+        let (addr, _captured) = start_capture_server_with_bodies(vec![(404, String::new())]);
+        let client = MattermostClient::new(&addr, "test-token");
+
+        let parent = client
+            .resolve_typing_parent("gone-3")
+            .await
+            .expect("resolve_typing_parent");
+        assert_eq!(parent, None, "unknown post must fall back to channel level");
+    }
+
+    #[tokio::test]
+    async fn resolve_typing_parent_is_cached() {
+        // Only ONE response is queued: a second lookup must be served from the
+        // cache (typing repeats every ~5s, so the GET must not run each time).
+        let (addr, captured) = start_capture_server_with_bodies(vec![(
+            200,
+            r#"{"id":"reply-2","channel_id":"chan-1","root_id":"root-9"}"#.to_string(),
+        )]);
+        let client = MattermostClient::new(&addr, "test-token");
+
+        for _ in 0..2 {
+            assert_eq!(
+                client
+                    .resolve_typing_parent("reply-2")
+                    .await
+                    .expect("resolve_typing_parent")
+                    .as_deref(),
+                Some("root-9")
+            );
+        }
+        assert_eq!(
+            captured.lock().len(),
+            1,
+            "the second resolution must be cached (one HTTP request only)"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_typing_channel_level_post_omits_parent_id_end_to_end() {
+        // 1) GET /api/v4/posts/<top-level post> -> root_id "" ; 2) typing POST.
+        let (addr, captured) = start_capture_server_with_bodies(vec![
+            (
+                200,
+                r#"{"id":"post-1","channel_id":"chan-1","root_id":""}"#.to_string(),
+            ),
+            (200, String::new()),
+        ]);
+        let client = MattermostClient::new(&addr, "test-token");
+        let params = TypingParams {
+            resource_identifier: "chan-1".to_string(),
+            parent_id: Some("post-1".to_string()),
+        };
+        let _ = handle_typing(1, &client, &params).await;
+
+        let got = captured.lock().clone();
+        assert_eq!(got.len(), 2, "expected GET post + POST typing");
+        assert_eq!(got[0].0, "/api/v4/posts/post-1");
+        assert_eq!(got[1].0, "/api/v4/users/me/typing");
+        let body: serde_json::Value = serde_json::from_str(&got[1].1).expect("json body");
+        assert_eq!(body["channel_id"], "chan-1");
+        assert!(
+            body.get("parent_id").is_none(),
+            "a top-level channel post must type at CHANNEL level (no parent_id)"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_typing_thread_reply_scopes_to_root_end_to_end() {
+        let (addr, captured) = start_capture_server_with_bodies(vec![
+            (
+                200,
+                r#"{"id":"reply-2","channel_id":"chan-1","root_id":"root-9"}"#.to_string(),
+            ),
+            (200, String::new()),
+        ]);
+        let client = MattermostClient::new(&addr, "test-token");
+        let params = TypingParams {
+            resource_identifier: "chan-1".to_string(),
+            parent_id: Some("reply-2".to_string()),
+        };
+        let _ = handle_typing(1, &client, &params).await;
+
+        let got = captured.lock().clone();
+        assert_eq!(got.len(), 2, "expected GET post + POST typing");
+        let body: serde_json::Value = serde_json::from_str(&got[1].1).expect("json body");
+        assert_eq!(body["channel_id"], "chan-1");
+        assert_eq!(
+            body["parent_id"], "root-9",
+            "a reply must be scoped to its thread root, not the reply id"
+        );
+    }
+
+    // -- inbound-observed thread scope (channel-level post vs reply thread) ----
+    //
+    // The core sends the SAME kind of id in both cases (a top-level post id,
+    // root_id == ""), so the post cannot tell them apart. The plugin uses what
+    // it observed inbound: a user reply marks that thread as thread-scoped.
+
+    #[tokio::test]
+    async fn note_thread_scope_marks_a_reply_thread_as_thread_scoped() {
+        note_thread_scope("scope-reply-1", "scope-root-1");
+        assert_eq!(known_thread_scope("scope-root-1"), Some(true));
+
+        let (addr, captured) = start_capture_server(vec![200]);
+        let client = MattermostClient::new(&addr, "test-token");
+        let parent = client
+            .resolve_typing_parent("scope-root-1")
+            .await
+            .expect("resolve_typing_parent");
+        assert_eq!(
+            parent.as_deref(),
+            Some("scope-root-1"),
+            "a thread a user replied in must be typed with parent_id = thread root"
+        );
+        assert!(
+            captured.lock().is_empty(),
+            "the observed scope must be used without an HTTP post lookup"
+        );
+
+        let params = TypingParams {
+            resource_identifier: "chan-1".to_string(),
+            parent_id: Some("scope-root-1".to_string()),
+        };
+        let _ = handle_typing(1, &client, &params).await;
+        let got = captured.lock().clone();
+        assert_eq!(got.len(), 1, "only the typing POST is expected");
+        assert_eq!(got[0].0, "/api/v4/users/me/typing");
+        let body: serde_json::Value = serde_json::from_str(&got[0].1).expect("json body");
+        assert_eq!(body["parent_id"], "scope-root-1");
+    }
+
+    #[tokio::test]
+    async fn note_thread_scope_keeps_a_top_level_post_channel_level() {
+        // A top-level trigger post stays channel-level (no parent_id). The bot's
+        // own replies live in its thread but are never recorded (the inbound path
+        // skips bot posts), so the indicator stays visible in the channel view.
+        note_thread_scope("scope-post-2", "");
+        assert_eq!(known_thread_scope("scope-post-2"), Some(false));
+
+        let (addr, captured) = start_capture_server(vec![200]);
+        let client = MattermostClient::new(&addr, "test-token");
+        let parent = client
+            .resolve_typing_parent("scope-post-2")
+            .await
+            .expect("resolve_typing_parent");
+        assert_eq!(parent, None, "a channel-level post must not set parent_id");
+
+        let params = TypingParams {
+            resource_identifier: "chan-1".to_string(),
+            parent_id: Some("scope-post-2".to_string()),
+        };
+        let _ = handle_typing(1, &client, &params).await;
+        let got = captured.lock().clone();
+        assert_eq!(got.len(), 1, "only the typing POST is expected");
+        let body: serde_json::Value = serde_json::from_str(&got[0].1).expect("json body");
+        assert!(
+            body.get("parent_id").is_none(),
+            "channel-level typing must omit parent_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn note_thread_scope_flips_a_channel_thread_once_a_user_replies() {
+        note_thread_scope("scope-post-3", "");
+        assert_eq!(known_thread_scope("scope-post-3"), Some(false));
+        // The user's reply arrives in that thread: the key is the thread root.
+        note_thread_scope("scope-reply-3", "scope-post-3");
+        assert_eq!(known_thread_scope("scope-post-3"), Some(true));
+        // A blank post id and root are ignored.
+        note_thread_scope("", "");
+        assert_eq!(known_thread_scope(""), None);
     }
 }
