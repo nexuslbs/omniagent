@@ -316,6 +316,7 @@ pub struct Channel {
     pub plan: bool,
     pub metadata: serde_json::Value,
     pub template: Option<String>,
+    pub toolset: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -336,6 +337,7 @@ impl Default for Channel {
             plan: true,
             metadata: serde_json::Value::Object(serde_json::Map::new()),
             template: None,
+            toolset: None,
             created_at: DateTime::from_timestamp(0, 0).unwrap_or(DateTime::UNIX_EPOCH),
             updated_at: DateTime::from_timestamp(0, 0).unwrap_or(DateTime::UNIX_EPOCH),
         }

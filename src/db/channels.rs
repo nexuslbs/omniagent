@@ -38,6 +38,7 @@ fn def_to_channel(name: &str, def: &ChannelDef) -> Channel {
         plan: def.plan.unwrap_or(true),
         metadata: serde_json::json!({}),
         template: def.template.clone().filter(|t| !t.is_empty()),
+        toolset: def.toolset.clone().filter(|t| !t.is_empty()),
         created_at: chrono::DateTime::UNIX_EPOCH,
         updated_at: chrono::DateTime::UNIX_EPOCH,
     }

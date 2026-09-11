@@ -70,6 +70,7 @@ struct HookResponse {
     channel: Option<String>,
     plan: Option<bool>,
     template: Option<String>,
+    toolset: Option<String>,
     enabled: bool,
     created_at: Option<String>,
     updated_at: Option<String>,
@@ -98,6 +99,7 @@ impl HookResponse {
             channel,
             plan,
             template: def.template.clone(),
+            toolset: def.toolset.clone(),
             enabled: def.enabled,
             created_at: None,
             updated_at: None,
@@ -133,6 +135,7 @@ struct CreateHookRequest {
     plan: Option<bool>,
     #[serde(default)]
     template: Option<String>,
+    toolset: Option<String>,
     #[serde(default = "default_true")]
     enabled: Option<bool>,
 }
@@ -163,6 +166,7 @@ struct UpdateHookRequest {
     plan: Option<bool>,
     #[serde(default)]
     template: Option<String>,
+    toolset: Option<String>,
     #[serde(default)]
     enabled: Option<bool>,
 }
@@ -321,6 +325,7 @@ async fn create_hook_handler(
         prompt: body.prompt.clone().filter(|p| !p.trim().is_empty()),
         profile: body.profile.clone().filter(|p| !p.trim().is_empty()),
         template: body.template.clone().filter(|t| !t.trim().is_empty()),
+        toolset: body.toolset.clone().filter(|t| !t.trim().is_empty()),
         ..Default::default()
     };
     if let Some(action_id) = body.action_id.clone().filter(|a| !a.trim().is_empty()) {
@@ -402,6 +407,9 @@ async fn update_hook_handler(
     }
     if let Some(t) = body.template.clone() {
         def.template = if t.is_empty() { None } else { Some(t) };
+    }
+    if let Some(t) = body.toolset.clone() {
+        def.toolset = if t.is_empty() { None } else { Some(t) };
     }
     if let Some(mode) = body.mode.clone() {
         def.mode = if mode.is_empty() { None } else { Some(mode) };

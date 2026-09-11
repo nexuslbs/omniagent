@@ -90,6 +90,7 @@ pub struct ChannelEntry {
     pub readonly: bool,
     pub plan: bool,
     pub template: Option<String>,
+    pub toolset: Option<String>,
 }
 
 impl From<Channel> for ChannelEntry {
@@ -113,6 +114,7 @@ impl From<Channel> for ChannelEntry {
             readonly: c.readonly,
             plan: c.plan,
             template: c.template,
+            toolset: c.toolset,
         }
     }
 }
@@ -171,6 +173,7 @@ pub struct UpdateChannelRequest {
     pub readonly: Option<bool>,
     pub plan: Option<bool>,
     pub template: Option<String>,
+    pub toolset: Option<String>,
 }
 
 async fn update_channel_handler(
@@ -241,6 +244,9 @@ async fn update_channel_handler(
         }
         if let Some(template) = body.template.as_deref() {
             d.template = (!template.trim().is_empty()).then(|| template.to_string());
+        }
+        if let Some(toolset) = body.toolset.as_deref() {
+            d.toolset = (!toolset.trim().is_empty()).then(|| toolset.to_string());
         }
         Ok(d)
     }) {

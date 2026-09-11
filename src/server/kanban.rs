@@ -188,6 +188,7 @@ struct CreateTaskRequest {
     priority: Option<i32>,
     status: Option<String>,
     template: Option<String>,
+    toolset: Option<String>,
     plan: Option<bool>,
     workflow: Option<String>,
     board: Option<String>,
@@ -251,6 +252,7 @@ struct UpdateTaskRequest {
     status: Option<String>,
     archived: Option<bool>,
     template: Option<String>,
+    toolset: Option<String>,
     plan: Option<bool>,
     /// Task workflow key. ABSENT (field not sent) keeps the current value;
     /// an explicit JSON `null` or empty string `""` CLEARS the workflow so the
@@ -481,6 +483,7 @@ struct KanbanTaskRow {
     profile: Option<String>,
     archived: Option<bool>,
     template: Option<String>,
+    toolset: Option<String>,
     plan: Option<bool>,
     workflow_id: Option<String>,
     board: Option<String>,
@@ -512,6 +515,7 @@ struct DeleteIdRow {
     profile: Option<String>,
     archived: Option<bool>,
     template: Option<String>,
+    toolset: Option<String>,
     plan: Option<bool>,
     workflow_id: Option<String>,
     board: Option<String>,
@@ -606,6 +610,7 @@ struct KanbanTaskEntry {
     profile: Option<String>,
     archived: bool,
     template: Option<String>,
+    toolset: Option<String>,
     plan: Option<bool>,
     workflow: Option<String>,
     board: Option<String>,
@@ -741,6 +746,7 @@ fn task_row_to_entry(data_dir: &str, r: KanbanTaskRow) -> KanbanTaskEntry {
             .as_ref()
             .and_then(|res| res.template.clone())
             .or_else(|| r.template.clone()),
+        toolset: r.toolset.clone(),
         plan: resolved.as_ref().and_then(|res| res.plan).or(r.plan),
         workflow: resolved
             .as_ref()
@@ -895,7 +901,7 @@ async fn list_tasks_handler(
         r#"
         SELECT
             id, title, body, status, priority, position, assignee,
-            channel_id, profile, archived, template, plan, workflow_id, board,
+            channel_id, profile, archived, template, toolset, plan, workflow_id, board,
             goal_phase, goal_blocked_code, goal_blocked_message, goal_max_rounds,
             goal_revision,
             COALESCE((
@@ -946,7 +952,7 @@ async fn get_task_handler(
         r#"
         SELECT
             id, title, body, status, priority, position, assignee,
-            channel_id, profile, archived, template, plan, workflow_id, board,
+            channel_id, profile, archived, template, toolset, plan, workflow_id, board,
             goal_phase, goal_blocked_code, goal_blocked_message, goal_max_rounds,
             goal_revision,
             COALESCE((
@@ -1125,10 +1131,10 @@ async fn create_task_handler(
     if let Err(e) = sql_forge!(
         r#"
         INSERT INTO kanban_tasks
-            (id, title, body, assignee, status, priority, channel_id, profile, position, template, plan, workflow_id, board)
+            (id, title, body, assignee, status, priority, channel_id, profile, position, template, toolset, plan, workflow_id, board)
         VALUES
             (:id, :title, :body, NULLIF(:assignee, '')::text, :status, :priority, NULLIF(:channel_id, '')::text, NULLIF(:profile, '')::text,
-             :position, NULLIF(:template, '')::text, :plan::boolean, NULLIF(:workflow_id, '')::text, NULLIF(:board, '')::text)
+             :position, NULLIF(:template, '')::text, NULLIF(:toolset, '')::text, :plan::boolean, NULLIF(:workflow_id, '')::text, NULLIF(:board, '')::text)
         "#,
         ( :id = id.as_str(),
           :title = &title,
@@ -1140,6 +1146,7 @@ async fn create_task_handler(
           :profile = body.profile.as_deref().unwrap_or(""),
           :position = next_pos,
           :template = body.template.as_deref().unwrap_or(""),
+          :toolset = body.toolset.as_deref().unwrap_or(""),
           :plan = task_plan,
             :workflow_id = body.workflow.as_deref().unwrap_or(""),
             :board = body.board.as_deref().unwrap_or(""),
@@ -1209,7 +1216,7 @@ async fn change_status_handler(
         DeleteIdRow,
         r#"
         SELECT id, title, body, status, priority, position, assignee,
-               channel_id, profile, archived, template, plan,
+               channel_id, profile, archived, template, toolset, plan,
                workflow_id, board, created_at, updated_at
         FROM kanban_tasks WHERE id = :id
         "#,
@@ -1532,7 +1539,7 @@ async fn change_position_handler(
         DeleteIdRow,
         r#"
         SELECT id, title, body, status, priority, position, assignee,
-               channel_id, profile, archived, template, plan,
+               channel_id, profile, archived, template, toolset, plan,
                workflow_id, board, created_at, updated_at
         FROM kanban_tasks WHERE id = :id
         "#,
@@ -1694,7 +1701,7 @@ async fn update_task_handler(
         DeleteIdRow,
         r#"
         SELECT id, title, body, status, priority, position, assignee,
-               channel_id, profile, archived, template, plan,
+               channel_id, profile, archived, template, toolset, plan,
                workflow_id, board, created_at, updated_at
         FROM kanban_tasks WHERE id = :id
         "#,
@@ -1839,6 +1846,7 @@ async fn update_task_handler(
             status = CASE WHEN :status = '' THEN status ELSE :status END,
             archived = :archived,
             template = CASE WHEN :template = '' THEN template ELSE NULLIF(:template, '')::text END,
+            toolset = CASE WHEN :toolset = '' THEN toolset ELSE NULLIF(:toolset, '')::text END,
             plan = :plan,
             workflow_id = CASE WHEN :workflow_id = :ign_wf THEN workflow_id ELSE NULLIF(:workflow_id, '')::text END,
             board = CASE WHEN :board = '' THEN board ELSE NULLIF(:board, '')::text END,
@@ -1863,6 +1871,7 @@ async fn update_task_handler(
           :status = body.status.as_deref().unwrap_or(""),
           :archived = body.archived.unwrap_or(before.archived.unwrap_or(false)),
           :template = body.template.as_deref().unwrap_or(""),
+          :toolset = body.toolset.as_deref().unwrap_or(""),
           :plan = body.plan.or(before.plan).unwrap_or(false),
           :workflow_id = body.workflow.as_ref().map(|wf| wf.as_deref().unwrap_or("")).unwrap_or(IGNORE_STR),
           :board = body.board.as_deref().unwrap_or(""),
@@ -1992,7 +2001,7 @@ async fn delete_task_handler(
         DeleteIdRow,
         r#"
         SELECT id, title, body, status, priority, position, assignee,
-               channel_id, profile, archived, template, plan,
+               channel_id, profile, archived, template, toolset, plan,
                workflow_id, board, created_at, updated_at
         FROM kanban_tasks WHERE id = :id
         "#,
@@ -3424,6 +3433,7 @@ mod tests {
             profile: Some("default".to_string()),
             archived: Some(false),
             template: None,
+            toolset: None,
             plan: None,
             workflow_id: Some("wf-x".to_string()),
             board: None,
@@ -3543,6 +3553,7 @@ mod tests {
             profile: Some("default".to_string()),
             archived: Some(false),
             template: None,
+            toolset: None,
             plan: None,
             workflow_id: None,
             board: None,
@@ -3577,6 +3588,7 @@ mod tests {
             profile: None,
             archived: None,
             template: None,
+            toolset: None,
             plan: None,
             workflow_id: None,
             board: None,

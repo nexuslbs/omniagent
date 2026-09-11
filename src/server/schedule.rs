@@ -81,6 +81,7 @@ pub struct JobEntry {
     pub status: String,
     pub silent: bool,
     pub template: Option<String>,
+    pub toolset: Option<String>,
     pub plan: bool,
 }
 
@@ -226,6 +227,7 @@ pub struct CreateScheduleRequest {
     pub enabled: Option<bool>,
     pub silent: Option<bool>,
     pub template: Option<String>,
+    pub toolset: Option<String>,
     pub plan: Option<bool>,
 }
 
@@ -242,6 +244,7 @@ pub struct UpdateScheduleRequest {
     pub action_id: Option<String>,
     pub silent: Option<bool>,
     pub template: Option<String>,
+    pub toolset: Option<String>,
     pub plan: Option<bool>,
 }
 
@@ -402,6 +405,7 @@ async fn schedule_to_entry(
         },
         silent: def.silent.unwrap_or(false),
         template: def.template.clone(),
+        toolset: def.toolset.clone(),
         plan: def.plan().unwrap_or(false),
     }
 }
@@ -515,6 +519,7 @@ async fn create_schedule_handler(
         channel: channel_name,
         profile: body.profile.clone().filter(|p| !p.trim().is_empty()),
         template: body.template.clone().filter(|t| !t.trim().is_empty()),
+        toolset: body.toolset.clone().filter(|t| !t.trim().is_empty()),
         silent: body.silent,
         ..Default::default()
     };
@@ -578,6 +583,9 @@ async fn update_schedule_handler(
     }
     if let Some(t) = body.template.clone() {
         def.template = if t.is_empty() { None } else { Some(t) };
+    }
+    if let Some(t) = body.toolset.clone() {
+        def.toolset = if t.is_empty() { None } else { Some(t) };
     }
     if let Some(silent) = body.silent {
         def.silent = Some(silent);

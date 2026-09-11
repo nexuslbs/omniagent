@@ -2489,6 +2489,7 @@ mod tests {
             plan: true,
             metadata: serde_json::json!({}),
             template: None,
+            toolset: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
