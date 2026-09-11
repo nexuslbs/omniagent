@@ -47,7 +47,7 @@ SKIP_FILES = {"secret-scan.py", "test_secret_scan.py",
 # for these exact paths so the baseline stays green; gitleaks CI mirrors
 # this in .gitleaks.toml. A NEW secret anywhere else is still blocked.
 ALLOW_CONTENT = frozenset({
-    "plugins/tools/git/src/git__sync.rs",
+    "plugins/tools/git/src/git_sync.rs",
     "plugins/tools/git/src/main.rs",
     "plugins/tools/ssh/src/main.rs",
     "tests/api_tests.rs",
