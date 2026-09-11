@@ -10,6 +10,7 @@
 
 pub mod binary;
 pub mod installer;
+pub mod lifecycle;
 
 use crate::err_msg;
 use crate::error::{AppResult, ErrorContext};

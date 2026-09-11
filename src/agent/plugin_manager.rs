@@ -214,28 +214,22 @@ async fn actor_loop(mut registry: McpRegistry, mut rx: mpsc::UnboundedReceiver<P
                 pool,
                 resp,
             } => {
-                // Spawn a subtask so the actor isn't blocked on MCP I/O
-                let result = tokio::spawn(async move {
-                    crate::mcp::external::client::initialize_single_server_tools(
+                // NEVER await the MCP handshake inside the actor loop: this
+                // loop is the single consumer of every registry command, so
+                // awaiting a spawn+handshake (which can take seconds) blocked
+                // snapshot_registry / all_tool_names / register_tools and
+                // thereby froze unrelated API calls while a plugin restarted.
+                // Detach the work and deliver the result over the oneshot.
+                tokio::spawn(async move {
+                    let result = crate::mcp::external::client::initialize_single_server_tools(
                         &data_dir,
                         pool.as_ref(),
                         &server_name,
                         &clients,
                     )
-                    .await
-                })
-                .await;
-                match result {
-                    Ok(Ok(tools)) => {
-                        let _ = resp.send(Ok(tools));
-                    }
-                    Ok(Err(e)) => {
-                        let _ = resp.send(Err(e));
-                    }
-                    Err(e) => {
-                        let _ = resp.send(Err(format!("Actor task panicked: {}", e)));
-                    }
-                }
+                    .await;
+                    let _ = resp.send(result);
+                });
             }
         }
     }

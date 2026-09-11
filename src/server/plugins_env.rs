@@ -247,10 +247,27 @@ fn read_plugins_from_yaml(data_dir: &str) -> Result<Vec<ReloadPluginInfo>, Strin
     Ok(plugins)
 }
 
-/// Helper: reload plugin runtime state from YAML on disk.
+/// Single-flight gate for plugin reloads.
+///
+/// A reload is a full sweep over every plugin (starting missing tool/provider
+/// processes), so overlapping calls - e.g. one per provider in a bulk lifecycle
+/// burst - would duplicate subprocess spawns and multiply the sweep cost. Every
+/// caller queues here and then performs its own sweep, so no configuration
+/// change is left unapplied while the number of concurrent sweeps stays at one.
+static RELOAD_SINGLE_FLIGHT: std::sync::OnceLock<tokio::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
+/// Helper: reload plugin runtime state from YAML on disk (single-flight).
 pub(crate) async fn reload_plugins(
     state: Arc<AppState>,
 ) -> Result<(u32, u32, Vec<String>), String> {
+    let gate = RELOAD_SINGLE_FLIGHT.get_or_init(|| tokio::sync::Mutex::new(()));
+    let _gate_guard = gate.lock().await;
+    reload_plugins_inner(state).await
+}
+
+/// The reload sweep itself; callers must hold the single-flight gate.
+async fn reload_plugins_inner(state: Arc<AppState>) -> Result<(u32, u32, Vec<String>), String> {
     let data_dir = state.data_dir.clone();
     let all_plugins = read_plugins_from_yaml(&data_dir)?;
     tracing::info!("Reload: listed {} plugins", all_plugins.len());

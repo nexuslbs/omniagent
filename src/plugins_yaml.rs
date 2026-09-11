@@ -18,6 +18,29 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
+/// Process-wide lock serializing every plugins.yml read-modify-write cycle.
+///
+/// Concurrent lifecycle calls (e.g. a dashboard burst of disable+enable over 10
+/// plugins) used to run `load_raw` -> mutate -> `save_file` with no mutual
+/// exclusion: two writers could read the same base state, the later rename
+/// overwrote the earlier one (lost entry), and both staged through the SAME
+/// `plugins.yml.tmp` path so one rename failed outright with
+/// "Failed to rename .../plugins.yml.tmp" (HTTP 500).
+///
+/// Every public mutator holds this lock for its whole load+mutate+save cycle.
+/// Reads (`get_entry`, `list_plugins`, ...) stay lock-free: the write is an
+/// atomic tmp+rename, so a reader always sees a complete file and is never
+/// blocked by a plugin restart.
+static PLUGINS_YAML_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Take the plugins.yml write lock, recovering from a poisoned mutex (a panic
+/// while holding it must not wedge every later plugin write).
+fn lock_plugins_yaml_write() -> std::sync::MutexGuard<'static, ()> {
+    PLUGINS_YAML_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 // ---------------------------------------------------------------------------
 // YAML types
 // ---------------------------------------------------------------------------
@@ -228,7 +251,12 @@ pub fn load_all_sections(data_dir: &str) -> AppResult<PluginYamlFile> {
 /// Save the entire PluginYamlFile (all three sections) to plugins.yml.
 pub fn save_all_sections(data_dir: &str, file: &PluginYamlFile) -> AppResult<()> {
     let path = crate::config_path::config_path(data_dir, "plugins.yml");
-    let tmp_path = path.with_extension("yml.tmp");
+    // Unique staging name next to the target (same filesystem, so the rename
+    // stays atomic). Two concurrent writers must never share one staging file:
+    // the fixed `plugins.yml.tmp` name made the slower writer's rename fail
+    // ("Failed to rename .../plugins.yml.tmp", HTTP 500) and could publish a
+    // half-written file.
+    let tmp_path = unique_tmp_path(&path);
     let yaml = serde_yaml::to_string(file).ctx("Failed to serialize plugin YAML")?;
     {
         let mut f =
@@ -244,6 +272,29 @@ pub fn save_all_sections(data_dir: &str, file: &PluginYamlFile) -> AppResult<()>
         path.display()
     ))?;
     Ok(())
+}
+
+/// Build a per-writer staging path next to `path` (same filesystem, so the
+/// rename is atomic): `<file>.tmp.<pid>.<nanos>.<seq>`.
+fn unique_tmp_path(path: &std::path::Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "plugins.yml".to_string());
+    path.with_file_name(format!(
+        "{}.tmp.{}.{}.{}",
+        file_name,
+        std::process::id(),
+        nanos,
+        seq
+    ))
 }
 
 /// Load the raw entries map from plugins.yml for a specific section.
@@ -305,6 +356,10 @@ pub fn set_entry(
     enabled: bool,
     config: serde_json::Value,
 ) -> AppResult<PluginYamlEntry> {
+    // Whole read-modify-write under the process-wide lock: a concurrent
+    // lifecycle call can neither lose this entry nor collide on the staging
+    // file (see PLUGINS_YAML_WRITE_LOCK).
+    let _write_guard = lock_plugins_yaml_write();
     let mut entries = load_raw(data_dir, pt)?;
     let source = entries
         .get(name)
@@ -343,6 +398,10 @@ pub fn set_entry_with_source(
     source: &str,
     config: serde_json::Value,
 ) -> AppResult<PluginYamlEntry> {
+    // Whole read-modify-write under the process-wide lock: a concurrent
+    // lifecycle call can neither lose this entry nor collide on the staging
+    // file (see PLUGINS_YAML_WRITE_LOCK).
+    let _write_guard = lock_plugins_yaml_write();
     let mut entries = load_raw(data_dir, pt)?;
     let entry = PluginYamlEntry {
         enabled,
@@ -394,6 +453,10 @@ pub fn set_enabled(
     name: &str,
     enabled: bool,
 ) -> AppResult<PluginYamlEntry> {
+    // Whole read-modify-write under the process-wide lock: a concurrent
+    // lifecycle call can neither lose this entry nor collide on the staging
+    // file (see PLUGINS_YAML_WRITE_LOCK).
+    let _write_guard = lock_plugins_yaml_write();
     let mut entries = load_raw(data_dir, pt)?;
     let entry = entries
         .get_mut(name)
@@ -443,6 +506,10 @@ pub fn save_remote_plugin(
     name: &str,
     remote: &PluginRemote,
 ) -> AppResult<()> {
+    // Whole read-modify-write under the process-wide lock: a concurrent
+    // lifecycle call can neither lose this entry nor collide on the staging
+    // file (see PLUGINS_YAML_WRITE_LOCK).
+    let _write_guard = lock_plugins_yaml_write();
     let mut store = load_remote_plugins(data_dir);
     let entries = match pt {
         PluginYamlType::Tool => store.tools.get_or_insert_with(Default::default),
@@ -468,6 +535,10 @@ pub fn save_remote_plugin(
 
 /// Remove a remote plugin entry from `.remote/plugins.yml`.
 pub fn remove_remote_plugin(data_dir: &str, pt: &PluginYamlType, name: &str) -> AppResult<()> {
+    // Whole read-modify-write under the process-wide lock: a concurrent
+    // lifecycle call can neither lose this entry nor collide on the staging
+    // file (see PLUGINS_YAML_WRITE_LOCK).
+    let _write_guard = lock_plugins_yaml_write();
     let mut store = load_remote_plugins(data_dir);
     let entries = match pt {
         PluginYamlType::Tool => &mut store.tools,
@@ -508,6 +579,10 @@ pub fn update_config(
     name: &str,
     config: serde_json::Value,
 ) -> AppResult<PluginYamlEntry> {
+    // Whole read-modify-write under the process-wide lock: a concurrent
+    // lifecycle call can neither lose this entry nor collide on the staging
+    // file (see PLUGINS_YAML_WRITE_LOCK).
+    let _write_guard = lock_plugins_yaml_write();
     let mut entries = load_raw(data_dir, pt)?;
     let entry = entries
         .get_mut(name)
@@ -520,6 +595,10 @@ pub fn update_config(
 
 /// Remove a plugin entry from a YAML file.
 pub fn remove_entry(data_dir: &str, pt: &PluginYamlType, name: &str) -> AppResult<bool> {
+    // Whole read-modify-write under the process-wide lock: a concurrent
+    // lifecycle call can neither lose this entry nor collide on the staging
+    // file (see PLUGINS_YAML_WRITE_LOCK).
+    let _write_guard = lock_plugins_yaml_write();
     let mut entries = load_raw(data_dir, pt)?;
     let existed = entries.remove(name).is_some();
     if existed {

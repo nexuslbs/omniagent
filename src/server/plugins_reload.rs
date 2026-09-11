@@ -211,7 +211,28 @@ pub(crate) async fn stop_platform_plugin(state: &Arc<AppState>, name: &str) {
 }
 
 /// Trigger a hot-reload of a tool (MCP) plugin after its config has been updated.
+/// Failures are logged (the config is already saved and the next reload retries);
+/// callers that must report the outcome use [`restart_tool_plugin`].
 pub(crate) async fn reload_tool_plugin(state: &Arc<AppState>, name: &str) {
+    if let Err(e) = restart_tool_plugin(state, name).await {
+        tracing::warn!(
+            "Hot-reload of MCP server '{}' after config update failed (config saved, will retry on next restart): {}",
+            name,
+            e
+        );
+    }
+}
+
+/// Restart one tool (MCP) plugin: drop the existing client, spawn a fresh one
+/// and register its tools. The spawn+handshake step is bounded by
+/// `lifecycle::LIFECYCLE_STEP_TIMEOUT`, so an unresponsive plugin can neither
+/// wedge the API nor hold its lifecycle gate forever; the failure is returned so
+/// the lifecycle handler can report it per plugin. Returns the registered tool
+/// count.
+pub(crate) async fn restart_tool_plugin(
+    state: &Arc<AppState>,
+    name: &str,
+) -> Result<usize, String> {
     tracing::info!("Reloading tool plugin '{}' after config update", name);
 
     let refreshed = refresh_env_from_file(&state.env_path);
@@ -224,29 +245,24 @@ pub(crate) async fn reload_tool_plugin(state: &Arc<AppState>, name: &str) {
 
     state.plugin_manager.remove_client(name);
 
-    match state
-        .plugin_manager
-        .initialize_single_server(&state.data_dir, name)
-        .await
-    {
-        Ok(tools) => {
-            let count = tools.len();
-            state.plugin_manager.remove_server_tools(name).await;
-            state.plugin_manager.register_tools(tools).await;
-            tracing::info!(
-                "Hot-reloaded {} tool(s) from MCP server '{}' after config update (no restart needed)",
-                count,
-                name
-            );
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Hot-reload of MCP server '{}' after config update failed (config saved, will retry on next restart): {}",
-                name,
-                e
-            );
-        }
-    }
+    let what = format!("tool '{}' MCP init", name);
+    let tools = crate::plugin::lifecycle::step_timeout(
+        &what,
+        state
+            .plugin_manager
+            .initialize_single_server(&state.data_dir, name),
+    )
+    .await?;
+
+    let count = tools.len();
+    state.plugin_manager.remove_server_tools(name).await;
+    state.plugin_manager.register_tools(tools).await;
+    tracing::info!(
+        "Hot-reloaded {} tool(s) from MCP server '{}' after config update (no restart needed)",
+        count,
+        name
+    );
+    Ok(count)
 }
 
 /// Sanitize a plugin name for use as a YAML key and directory path.
