@@ -338,7 +338,26 @@ pub type McpToolHandler = Arc<
 pub const MAX_EXPOSED_TOOL_NAME_LEN: usize = 64;
 
 /// The plugin component used for tools that core implements itself.
-pub const BUILTIN_PLUGIN_NAME: &str = "builtin";
+///
+/// Renamed from `builtin`: the old value collided in the operator's head
+/// with plugins whose SOURCE is `built-in`. HARD CUTOVER, no alias window:
+/// the retired `core__*` prefix is no longer a valid exposed name.
+pub const CORE_PLUGIN_NAME: &str = "core";
+
+/// Plugin names that are RESERVED: a plugin may never claim one of them.
+///
+/// - `core` is the namespace the core-implemented tools live in (see
+///   `CORE_PLUGIN_NAME`): a plugin named `core` would collide with the core
+///   interface by construction.
+/// - `builtin` is the RETIRED name of that same core namespace. It MUST
+///   stay reserved, otherwise a plugin could re-claim it and re-introduce
+///   exactly the confusion the `builtin` -> `core` rename removed.
+/// - `mcp` and `system` are defensive siblings: names a consumer of the
+///   `{plugin}__{tool}` grammar would plausibly read as infrastructure.
+///
+/// Matched CASE-INSENSITIVELY (the exposed name is case-sensitive, but a
+/// plugin called `Core` / `CORE` would still read as the core namespace).
+pub const RESERVED_PLUGIN_NAMES: &[&str] = &[CORE_PLUGIN_NAME, "builtin", "mcp", "system"];
 
 /// The RESERVED separator between the plugin component and the in-plugin tool
 /// component of an exposed tool name. It may never appear inside a component,
@@ -389,15 +408,62 @@ pub fn validate_component(component: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Validate an exposed tool name built from its two components.
+/// Which namespace an exposed tool name belongs to.
+///
+/// Structured identity, not string luck: a CORE tool carries no server name
+/// (its plugin component is `CORE_PLUGIN_NAME`), every other tool was
+/// contributed by a plugin (local or external MCP server) and carries that
+/// server name. The registry is kind-aware, so a plugin can never shadow a
+/// core tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolKind {
+    Core,
+    Plugin,
+}
+
+/// Validate a PLUGIN name: the component grammar (`validate_component`)
+/// plus the reserved-name guard.
+///
+/// VALIDATE, DON'T MANGLE: a reserved name is rejected AS-IS with an
+/// actionable message; it is never rewritten (`core` -> `core-1`), because
+/// the rewrite would re-introduce the very confusion the guard prevents (a
+/// plugin that LOOKS like a core/system namespace).
+pub fn validate_plugin_name(plugin: &str) -> Result<(), String> {
+    if let Err(e) = validate_component(plugin) {
+        return Err(format!("plugin name '{}' {}", plugin, e));
+    }
+    if RESERVED_PLUGIN_NAMES
+        .iter()
+        .any(|reserved| reserved.eq_ignore_ascii_case(plugin))
+    {
+        return Err(format!(
+            "plugin name '{}' is reserved for core built-in tools (reserved names: {})",
+            plugin,
+            RESERVED_PLUGIN_NAMES.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// Validate an exposed tool name built from its two components, for a tool
+/// of the given KIND.
 ///
 /// Returns the failed rule as an actionable message (naming the offending
 /// component and the offending exposed name) so every caller can reject the
 /// tool loudly instead of exposing a name a provider or a consumer would
 /// mis-read.
-pub fn validate_exposed_name(plugin: &str, tool: &str) -> Result<(), String> {
-    if let Err(e) = validate_component(plugin) {
-        return Err(format!("plugin name '{}' {}", plugin, e));
+pub fn validate_exposed_name(plugin: &str, tool: &str, kind: ToolKind) -> Result<(), String> {
+    // Kind-aware at the earliest boundary: a PLUGIN registration may not
+    // claim a reserved namespace (fail closed: rejected, never exposed),
+    // while CORE tools legitimately own `CORE_PLUGIN_NAME` and only need the
+    // structural component grammar.
+    match kind {
+        ToolKind::Plugin => validate_plugin_name(plugin)?,
+        ToolKind::Core => {
+            if let Err(e) = validate_component(plugin) {
+                return Err(format!("plugin name '{}' {}", plugin, e));
+            }
+        }
     }
     if let Err(e) = validate_component(tool) {
         return Err(format!("tool name '{}' {}", tool, e));
@@ -483,12 +549,22 @@ pub fn tool_legacy_alias(server: &str, tool_name: &str) -> String {
     format!("{}_{}", server, tool.replace('_', "-"))
 }
 
+/// The namespace kind of a registered tool: a CORE tool carries no server
+/// name, every other tool was contributed by a plugin.
+fn kind_of(tool: &McpTool) -> ToolKind {
+    if tool.server_name.is_none() {
+        ToolKind::Core
+    } else {
+        ToolKind::Plugin
+    }
+}
+
 /// A registered MCP tool.
 #[derive(Clone)]
 pub struct McpTool {
     /// The canonical tool name - ALWAYS the fully-qualified name:
-    /// `builtin_{tool}` for built-ins, `{server}_{tool}` for external MCP
-    /// tools (see `tool_qualify`). There is deliberately NO separate short
+    /// `{plugin}__{tool}`: `core__{tool}` for core tools (see
+    /// `tool_qualify`). There is deliberately NO separate short
     /// name: every surface (prompt, schema, registry, API) uses this single
     /// name. The only place that may know a plugin-internal short form is
     /// the tool's own handler (which by construction knows its plugin).
@@ -513,13 +589,14 @@ pub struct McpTool {
 }
 
 impl McpTool {
-    /// Build a built-in tool. `short_name` is the plugin-internal name
+    /// Build a CORE tool (one core implements itself). `short_name` is the
+    /// plugin-internal name
     /// (e.g. "poll_task"); the canonical `name` is ALWAYS derived via
-    /// `tool_qualify("builtin", short_name)` → `builtin__poll_task`. Only
+    /// `tool_qualify(CORE_PLUGIN_NAME, short_name)` → `core__poll_task`. Only
     /// this constructor knows the builtin prefix - callers pass the short
     /// form and the full name is never hardcoded. This is the ONLY place a
     /// short name is acceptable: it is immediately qualified.
-    pub fn builtin(
+    pub fn core(
         short_name: &str,
         description: String,
         input_schema: Value,
@@ -527,7 +604,7 @@ impl McpTool {
         handler: McpToolHandler,
     ) -> Self {
         Self {
-            name: tool_qualify("builtin", short_name),
+            name: tool_qualify(CORE_PLUGIN_NAME, short_name),
             description,
             input_schema,
             server_name: None,
@@ -539,11 +616,11 @@ impl McpTool {
 }
 
 /// The plugin component of a registered tool: its server name, or the
-/// `builtin` plugin for tools core implements itself.
+/// `core` plugin for tools core implements itself.
 fn plugin_of(tool: &McpTool) -> String {
     tool.server_name
         .clone()
-        .unwrap_or_else(|| BUILTIN_PLUGIN_NAME.to_string())
+        .unwrap_or_else(|| CORE_PLUGIN_NAME.to_string())
 }
 
 impl McpTool {
@@ -610,6 +687,11 @@ pub struct McpRegistry {
     invalid: Vec<InvalidTool>,
     /// Exposed-name collisions observed while registering.
     collisions: Vec<ToolCollision>,
+    /// Aliases that must NOT resolve because they collide with another
+    /// tool (another tool's exposed name or another tool's alias). Fail
+    /// closed: an ambiguous alias resolves to NOTHING instead of to an
+    /// arbitrary tool.
+    rejected_aliases: std::collections::HashSet<String>,
 }
 
 impl Default for McpRegistry {
@@ -624,23 +706,53 @@ impl McpRegistry {
             tools: HashMap::new(),
             invalid: Vec::new(),
             collisions: Vec::new(),
+            rejected_aliases: std::collections::HashSet::new(),
         }
     }
 
     /// Register a tool.
     ///
-    /// VALIDATE, DON'T MANGLE: a tool whose plugin or in-plugin name violates
-    /// the exposed-name grammar, or whose exposed name exceeds
+    /// VALIDATE, DON'T MANGLE: a tool whose PLUGIN name is reserved (`core`,
+    /// the retired `builtin`, `mcp`, `system`), whose plugin or in-plugin
+    /// name violates the exposed-name grammar, or whose exposed name exceeds
     /// `MAX_EXPOSED_TOOL_NAME_LEN`, is REJECTED. It is never registered, so
     /// it is never sent to a provider, never listed in the prompt's available
     /// tools and never dispatchable. The rejection is recorded in
     /// `McpRegistry::invalid_tools` with plugin, tool and the failed rule.
     ///
-    /// A second registration under an identical exposed name is REPORTED
-    /// (loud log + `McpRegistry::collisions`), never a silent overwrite.
+    /// FAIL CLOSED, KIND-AWARE: an incoming tool NEVER shadows a tool of the
+    /// other kind (core vs plugin) - such a collision is rejected like any
+    /// invalid tool and the existing tool keeps serving, so a plugin can
+    /// never replace a core tool. A same-kind duplicate registration is
+    /// REPORTED (loud log + `McpRegistry::collisions`), never silent.
+    ///
+    /// ALIAS SAFETY: a legacy alias is honoured only while it collides with
+    /// nothing else; a colliding alias is rejected (`rejected_aliases`) and
+    /// resolves to nothing instead of to an arbitrary tool.
     pub fn register(&mut self, tool: McpTool) {
         let (plugin, short) = tool.components();
-        if let Err(reason) = validate_exposed_name(&plugin, &short) {
+        let kind = kind_of(&tool);
+        // FAIL CLOSED, KIND-AWARE: a shadowing attempt is rejected on the
+        // collision itself, before (and independently of) the name grammar.
+        if let Some(previous) = self.tools.get(&tool.name) {
+            let existing_plugin = plugin_of(previous);
+            let existing_kind = kind_of(previous);
+            if existing_kind != kind {
+                let reason = format!(
+                    "exposed name '{}' is already taken by a {:?} tool (plugin '{}'): rejecting the incoming {:?} tool instead of shadowing it",
+                    tool.name, existing_kind, existing_plugin, kind
+                );
+                warn_invalid_tool(&plugin, &short, &reason);
+                self.invalid.push(InvalidTool {
+                    plugin,
+                    tool: short,
+                    reason,
+                    exposed_name: tool.name.clone(),
+                });
+                return;
+            }
+        }
+        if let Err(reason) = validate_exposed_name(&plugin, &short, kind) {
             warn_invalid_tool(&plugin, &short, &reason);
             self.invalid.push(InvalidTool {
                 plugin,
@@ -649,6 +761,27 @@ impl McpRegistry {
                 exposed_name: tool.name.clone(),
             });
             return;
+        }
+        // ALIAS SAFETY: an alias is honoured only while it collides with
+        // nothing else (another tool's exposed name, or another tool's
+        // alias). A colliding alias is rejected AND logged; the tool keeps
+        // its canonical name and the ambiguous alias resolves to nothing.
+        for alias in tool.legacy_names() {
+            let exposed_holder = self.tools.get(&alias).map(plugin_of);
+            let alias_holder = self
+                .tools
+                .values()
+                .find(|other| other.name != tool.name && other.legacy_names().iter().any(|a| a == &alias))
+                .map(plugin_of);
+            if let Some(holder) = exposed_holder.or(alias_holder) {
+                warn_alias_collision(&alias, &tool.name, &holder);
+                self.collisions.push(ToolCollision {
+                    name: alias.clone(),
+                    existing_plugin: holder,
+                    incoming_plugin: plugin.clone(),
+                });
+                self.rejected_aliases.insert(alias);
+            }
         }
         if let Some(previous) = self.tools.get(&tool.name) {
             let existing_plugin = plugin_of(previous);
@@ -743,12 +876,18 @@ impl McpRegistry {
 
     /// Get a tool by name.
     ///
-    /// Exact (canonical) match first; during the one-release alias window a
-    /// LEGACY name (`{plugin}_{tool-with-dashes}`) also resolves, so callers
-    /// and configs written before the separator flip keep working.
+    /// Exact (canonical) match first: an EXPOSED name always wins, so an
+    /// alias can never shadow a real tool. During the one-release alias
+    /// window a LEGACY name (`{plugin}_{tool-with-dashes}`) also resolves,
+    /// but ONLY while it is unambiguous: an alias that collides with another
+    /// tool was rejected at registration (`rejected_aliases`) and resolves to
+    /// nothing rather than to an arbitrary tool.
     pub fn get(&self, name: &str) -> Option<&McpTool> {
         if let Some(tool) = self.tools.get(name) {
             return Some(tool);
+        }
+        if self.rejected_aliases.contains(name) {
+            return None;
         }
         self.tools
             .values()
@@ -791,7 +930,7 @@ impl McpRegistry {
             .values()
             .filter(|t| {
                 allowed_names.iter().any(|name| {
-                    name == &t.name || t.legacy_names().iter().any(|alias| alias == name)
+                    name == &t.name || self.alias_matches(t, name.as_str())
                 })
             })
             .collect();
@@ -799,8 +938,16 @@ impl McpRegistry {
         tools
     }
 
+    /// True when `name` is an alias of `tool` that is still allowed to
+    /// resolve: the GENERAL alias rule is that an alias is honoured only
+    /// while it collides with nothing else (see `rejected_aliases`).
+    fn alias_matches(&self, tool: &McpTool, name: &str) -> bool {
+        !self.rejected_aliases.contains(name)
+            && tool.legacy_names().iter().any(|alias| alias == name)
+    }
+
     /// Get the qualified name for a tool.
-    /// Tool names are ALWAYS fully qualified (builtin_* / {server}_{tool}),
+    /// Tool names are ALWAYS fully qualified (core__* / {plugin}__{tool}),
     /// so a name is returned as-is. Kept for callers that expect a
     /// qualification step; there is no short-name form anymore.
     pub fn qualified_name(&self, name: &str) -> String {
@@ -984,6 +1131,17 @@ fn warn_invalid_tool(plugin: &str, tool: &str, reason: &str) {
     );
 }
 
+/// Loudly report an alias REJECTED because it collides with another tool:
+/// resolving it would hand the caller an arbitrary tool.
+fn warn_alias_collision(alias: &str, incoming: &str, holder_plugin: &str) {
+    tracing::error!(
+        "tool-name alias collision on '{}': refusing to resolve it (incoming tool '{}', already held by plugin '{}')",
+        alias,
+        incoming,
+        holder_plugin
+    );
+}
+
 /// Loudly report two registrations under one exposed name.
 fn warn_collision(name: &str, existing_plugin: &str, incoming_plugin: &str) {
     tracing::error!(
@@ -997,7 +1155,7 @@ fn warn_collision(name: &str, existing_plugin: &str, incoming_plugin: &str) {
 /// Build the `poll-task` tool: check the status of a background task.
 fn poll_task_tool() -> McpTool {
     McpTool {
-        name: tool_qualify("builtin", "poll_task"),
+        name: tool_qualify(CORE_PLUGIN_NAME, "poll_task"),
         description: "Check the status of a previously started background tool task. Returns the task's current status (running/completed/failed/cancelled), elapsed time, and result if done.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -1021,7 +1179,7 @@ fn poll_task_tool() -> McpTool {
 /// Build the `wait-task` tool: wait for a background task to complete.
 fn wait_task_tool() -> McpTool {
     McpTool {
-        name: tool_qualify("builtin", "wait_task"),
+        name: tool_qualify(CORE_PLUGIN_NAME, "wait_task"),
         description: "Wait for a background tool task to complete, with a configurable timeout. Polls every 500ms and returns the result when done, or a timeout status if the task doesn't finish in time.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -1064,8 +1222,8 @@ fn wait_task_tool() -> McpTool {
 /// kanban/thread DB status and returns within ~1-2s of a transition.
 fn wait_for_status_tool() -> McpTool {
     McpTool {
-        name: tool_qualify("builtin", "wait_for_status"),
-        description: "Wait until a KANBAN TASK or THREAD reaches one of the target statuses; returns as soon as it does (checks the real DB status about every second). This is the first-class way to 'listen' to kanban/thread state changes - use it when you must act when a task or thread transitions (incident 1136/1146). It does NOT track background tool tasks: use builtin__wait_task / builtin__poll_task for docker/ssh exec processes that returned status=processing. Pass exactly one of task_id (kanban task, statuses e.g. done/blocked/review/testing/running/todo) or thread_id (conversation thread, statuses e.g. pending/processing/completed/failed/skipped). 'until' is a comma-separated list of target statuses. Bounded by timeout_s (default 900): on timeout it returns a timeout STATUS (not an error) - then re-check the real state (kanban_list-kanban-tasks / GET /kanban/tasks/{id}) and re-wait in bounded chunks only if the wait still makes sense.".to_string(),
+        name: tool_qualify(CORE_PLUGIN_NAME, "wait_for_status"),
+        description: "Wait until a KANBAN TASK or THREAD reaches one of the target statuses; returns as soon as it does (checks the real DB status about every second). This is the first-class way to 'listen' to kanban/thread state changes - use it when you must act when a task or thread transitions (incident 1136/1146). It does NOT track background tool tasks: use core__wait_task / core__poll_task for docker/ssh exec processes that returned status=processing. Pass exactly one of task_id (kanban task, statuses e.g. done/blocked/review/testing/running/todo) or thread_id (conversation thread, statuses e.g. pending/processing/completed/failed/skipped). 'until' is a comma-separated list of target statuses. Bounded by timeout_s (default 900): on timeout it returns a timeout STATUS (not an error) - then re-check the real state (kanban_list-kanban-tasks / GET /kanban/tasks/{id}) and re-wait in bounded chunks only if the wait still makes sense.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -1103,7 +1261,7 @@ fn wait_for_status_tool() -> McpTool {
 /// Build the `cancel-task` tool: cancel a running background task.
 fn cancel_task_tool() -> McpTool {
     McpTool {
-        name: tool_qualify("builtin", "cancel_task"),
+        name: tool_qualify(CORE_PLUGIN_NAME, "cancel_task"),
         description: "Cancel a running background task. The task's abort signal is sent and it will stop as soon as possible. Use when the task is no longer needed.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -1127,7 +1285,7 @@ fn cancel_task_tool() -> McpTool {
 /// Build the `read-task-logs` tool: stream log output from a background task.
 fn read_task_logs_tool() -> McpTool {
     McpTool {
-        name: tool_qualify("builtin", "read_task_logs"),
+        name: tool_qualify(CORE_PLUGIN_NAME, "read_task_logs"),
         description: "Read intermediate log output from a running or completed background task. Supports cursor-based pagination for long logs.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -1162,7 +1320,7 @@ fn read_attached_file_tool() -> McpTool {
     use base64::{engine::general_purpose, Engine};
 
     McpTool {
-        name: tool_qualify("builtin", "read_attached_file"),
+        name: tool_qualify(CORE_PLUGIN_NAME, "read_attached_file"),
         description: "Read the content of an attached file from a platform channel (e.g. Mattermost). \
                       Use this when a file is mentioned in a message but its content was not inlined \
                       (because it exceeds the inline size limit). Provide the `file_id` and optionally \
@@ -1320,7 +1478,7 @@ fn read_attached_file_tool() -> McpTool {
 /// catalog on AppContext, avoiding the cost of serializing the registry each call.
 fn list_tool_details_tool() -> McpTool {
     McpTool {
-        name: tool_qualify("builtin", "list_tool_details"),
+        name: tool_qualify(CORE_PLUGIN_NAME, "list_tool_details"),
         description: "Get the full definition (description, input schema / expected parameters) for a specific tool by name. Use this when a tool call returns an error about missing or invalid parameters: call this first to see the correct parameter names and types before retrying.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -1620,7 +1778,7 @@ fn core_api_url(base_url: &str, path: &str) -> String {
 fn omniagent_api_tool() -> McpTool {
     let base_url = core_api_base_url();
     McpTool {
-        name: tool_qualify("builtin", "omniagent_api"),
+        name: tool_qualify(CORE_PLUGIN_NAME, "omniagent_api"),
         description: format!(
             "Call the core omniagent HTTP API ({}). Specify an HTTP method, an API path and an optional JSON body; returns the response body as text. Covers kanban task CRUD (/kanban/tasks...), schedule CRUD (/schedule, /schedule/{{id}} incl. DELETE), run-cron (/schedule/{{id}}/run), review (/kanban/tasks/{{id}}/review), plugins and actions endpoints. This replaces the old kanban_*/cron_* plugin tools.",
             base_url
@@ -1718,7 +1876,7 @@ fn omniagent_api_tool() -> McpTool {
 /// metadata.workflow_step kanban transition (spec §8 N1, §3 F0-F4).
 fn fail_thread_tool() -> McpTool {
     McpTool {
-        name: tool_qualify("builtin", "fail_thread"),
+        name: tool_qualify(CORE_PLUGIN_NAME, "fail_thread"),
         description: "End the current thread as FAILED with an Error-type last message and apply the metadata.workflow_step kanban transition. workflow_step accepts STEP keys only: \"running\", \"testing\", \"blocked\" (empty string = executor default). Any other value (e.g. \"review\" or role names) is invalid and blocks the task.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -1889,7 +2047,7 @@ mod tests {
             tool_qualify("search", "channel_prompts"),
             "search__channel_prompts"
         );
-        assert_eq!(tool_qualify("builtin", "poll_task"), "builtin__poll_task");
+        assert_eq!(tool_qualify(CORE_PLUGIN_NAME, "poll_task"), "core__poll_task");
     }
 
     #[test]
@@ -1897,8 +2055,8 @@ mod tests {
         // VALIDATE, DON'T MANGLE: underscores stay underscores.
         assert_eq!(tool_qualify("server", "my_tool"), "server__my_tool");
         assert_eq!(
-            tool_qualify("builtin", "omniagent_api"),
-            "builtin__omniagent_api"
+            tool_qualify(CORE_PLUGIN_NAME, "omniagent_api"),
+            "core__omniagent_api"
         );
     }
 
@@ -1919,7 +2077,7 @@ mod tests {
     #[test]
     fn test_tool_round_trip_is_lossless() {
         for (plugin, tool) in [
-            ("builtin", "poll_task"),
+            (CORE_PLUGIN_NAME, "poll_task"),
             ("search", "channel_prompts"),
             ("filesystem", "read"),
             ("semantic_search", "semantic_search_index"),
@@ -1966,8 +2124,8 @@ mod tests {
     fn test_exposed_name_length_guard_accepts_64_rejects_65() {
         let plugin = "a".repeat(60);
         assert_eq!(plugin.len() + 2 + 3, 65);
-        assert!(validate_exposed_name(&plugin, "ab").is_ok());
-        assert!(validate_exposed_name(&plugin, "abc").is_err());
+        assert!(validate_exposed_name(&plugin, "ab", ToolKind::Core).is_ok());
+        assert!(validate_exposed_name(&plugin, "abc", ToolKind::Core).is_err());
     }
 
     #[test]
@@ -1985,23 +2143,132 @@ mod tests {
     #[test]
     fn test_duplicate_registration_is_reported_not_silent() {
         let mut reg = McpRegistry::new();
-        reg.register(make_tool("builtin__poll_task", None, None));
-        reg.register(make_tool("builtin__poll_task", None, None));
+        reg.register(make_tool("core__poll_task", None, None));
+        reg.register(make_tool("core__poll_task", None, None));
         assert_eq!(reg.all().len(), 1);
         assert_eq!(reg.collisions().len(), 1);
-        assert_eq!(reg.collisions()[0].name, "builtin__poll_task");
+        assert_eq!(reg.collisions()[0].name, "core__poll_task");
     }
 
     #[test]
     fn test_legacy_alias_window_resolves_pre_flip_names() {
         let mut reg = McpRegistry::new();
-        reg.register(make_tool("poll_task", Some("builtin"), None));
-        assert!(reg.get("builtin__poll_task").is_some());
+        reg.register(make_tool("filesystem_read", Some("filesystem"), None));
+        assert!(reg.get("filesystem__read").is_some());
         assert!(
-            reg.get("builtin_poll-task").is_some(),
+            reg.get("filesystem_read").is_some(),
             "the pre-flip name must still resolve during the alias window"
         );
-        assert_eq!(reg.allowed(&["builtin_poll-task".to_string()]).len(), 1);
+        assert_eq!(reg.allowed(&["filesystem_read".to_string()]).len(), 1);
+    }
+
+    #[test]
+    fn test_reserved_plugin_names_cannot_claim_a_namespace() {
+        // (d) the reserved names are rejected as PLUGIN names,
+        // case-insensitively, with an actionable message.
+        for reserved in ["core", "builtin", "Builtin", "CORE", "mcp", "system"] {
+            let err = match validate_plugin_name(reserved) {
+                Ok(()) => panic!("{} must be reserved", reserved),
+                Err(e) => e,
+            };
+            assert!(err.contains("reserved"), "unexpected error: {}", err);
+            assert!(
+                err.contains("core built-in tools"),
+                "error must be actionable: {}",
+                err
+            );
+        }
+        // ...while the component grammar itself still accepts them: the
+        // reserved rule is a PLUGIN-name rule, not a generic component rule.
+        assert!(validate_component("core").is_ok());
+        assert!(validate_component("builtin").is_ok());
+
+        // (a) a plugin named `core` cannot register a tool in the core
+        // namespace: rejected, never exposed.
+        let mut reg = McpRegistry::new();
+        let core_name = tool_qualify(CORE_PLUGIN_NAME, "poll_task");
+        reg.register(make_tool(&core_name, None, None));
+        assert_eq!(reg.all().len(), 1);
+        reg.register(make_tool("some_tool", Some(CORE_PLUGIN_NAME), None));
+        assert_eq!(reg.invalid_tools().len(), 1, "plugin claim must be rejected");
+        assert!(reg.invalid_tools()[0].reason.contains("reserved"));
+        assert_eq!(reg.all().len(), 1, "no extra tool may be registered");
+        let kept = reg.get(&core_name).expect("the core tool must still be there");
+        assert!(kept.server_name.is_none(), "the survivor must be the CORE tool");
+
+        // The retired `builtin` plugin name is rejected the same way.
+        let retired_plugin = "builtin";
+        reg.register(make_tool("other_tool", Some(retired_plugin), None));
+        assert_eq!(reg.invalid_tools().len(), 2);
+        assert!(reg.invalid_tools()[1].reason.contains("reserved"));
+    }
+
+    #[test]
+    fn test_core_tool_is_never_shadowed_by_a_plugin_registration() {
+        // (b) fail closed + kind-aware: an incoming tool of the OTHER kind
+        // never overwrites the registered core tool.
+        let mut reg = McpRegistry::new();
+        let core_name = tool_qualify(CORE_PLUGIN_NAME, "poll_task");
+        reg.register(make_tool(&core_name, None, None));
+        assert_eq!(reg.all().len(), 1);
+        let mut impostor = make_tool(&core_name, None, None);
+        impostor.server_name = Some(CORE_PLUGIN_NAME.to_string());
+        reg.register(impostor);
+        assert_eq!(reg.all().len(), 1, "the core tool must not be replaced");
+        let kept = reg.get(&core_name).expect("core tool still registered");
+        assert!(
+            kept.server_name.is_none(),
+            "the survivor must be the CORE tool (the plugin claim was rejected)"
+        );
+        assert_eq!(reg.invalid_tools().len(), 1);
+        assert!(
+            reg.invalid_tools()[0].reason.contains("already taken"),
+            "unexpected reason: {}",
+            reg.invalid_tools()[0].reason
+        );
+    }
+
+    #[test]
+    fn test_alias_collision_is_rejected_and_logged() {
+        // (c) `a__b_c` and `a__b-c` are distinct exposed names but the SAME
+        // legacy alias; the colliding alias must be rejected, not resolved
+        // to an arbitrary tool.
+        let mut reg = McpRegistry::new();
+        reg.register(make_tool("b_c", Some("a"), None));
+        reg.register(make_tool("b-c", Some("a"), None));
+        assert_eq!(reg.all().len(), 2, "both canonical names stay registered");
+        let alias = "a_b-c";
+        assert!(
+            reg.collisions().iter().any(|c| c.name == alias),
+            "the colliding alias must be recorded: {:?}",
+            reg.collisions()
+        );
+        assert!(reg.get("a__b_c").is_some());
+        assert!(reg.get("a__b-c").is_some());
+        assert!(
+            reg.get(alias).is_none(),
+            "an ambiguous alias must resolve to nothing"
+        );
+        assert!(reg.allowed(&[alias.to_string()]).is_empty());
+    }
+
+    #[test]
+    fn test_retired_builtin_prefix_is_not_accepted() {
+        // (e) HARD CUTOVER: the retired core namespace is not a valid
+        // exposed name any more (built via format! on purpose: no literal).
+        let retired_plugin = "builtin";
+        let retired = format!("{}__poll_task", retired_plugin);
+        let mut reg = McpRegistry::new();
+        let core_name = tool_qualify(CORE_PLUGIN_NAME, "poll_task");
+        reg.register(make_tool(&core_name, None, None));
+        reg.register(make_tool("poll_task", Some(retired_plugin), None));
+        assert!(
+            reg.get(&retired).is_none(),
+            "the retired exposed name must not resolve"
+        );
+        assert_eq!(reg.invalid_tools().len(), 1);
+        assert!(reg.invalid_tools()[0].reason.contains("reserved"));
+        assert!(reg.get(&core_name).is_some());
     }
 
     #[test]

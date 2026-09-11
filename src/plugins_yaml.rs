@@ -356,6 +356,7 @@ pub fn set_entry(
     enabled: bool,
     config: serde_json::Value,
 ) -> AppResult<PluginYamlEntry> {
+    validate_plugin_entry_name(name)?;
     // Whole read-modify-write under the process-wide lock: a concurrent
     // lifecycle call can neither lose this entry nor collide on the staging
     // file (see PLUGINS_YAML_WRITE_LOCK).
@@ -373,6 +374,18 @@ pub fn set_entry(
     entries.insert(name.to_string(), entry.clone());
     save_file(data_dir, pt, entries)?;
     Ok(entry)
+}
+
+/// Reject a plugin entry whose NAME claims a reserved namespace (`core`, the
+/// retired `builtin`, `mcp`, `system`).
+///
+/// Every install / install-from-url / install-from-git / download / reinstall
+/// path funnels through the YAML writers below, so this is the INSTALL-TIME
+/// boundary: the operator sees the actionable error before any entry is
+/// written, and the name is rejected AS-IS (never rewritten into a
+/// valid-looking variant).
+fn validate_plugin_entry_name(name: &str) -> AppResult<()> {
+    crate::mcp::validate_plugin_name(name).map_err(Error::Message)
 }
 
 /// Helper: determine if a plugin is built-in by checking if its source lives
@@ -398,6 +411,7 @@ pub fn set_entry_with_source(
     source: &str,
     config: serde_json::Value,
 ) -> AppResult<PluginYamlEntry> {
+    validate_plugin_entry_name(name)?;
     // Whole read-modify-write under the process-wide lock: a concurrent
     // lifecycle call can neither lose this entry nor collide on the staging
     // file (see PLUGINS_YAML_WRITE_LOCK).

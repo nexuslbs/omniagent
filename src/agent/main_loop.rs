@@ -2472,9 +2472,9 @@ Previous plan:\n{}",
                     bg_mcp_snapshot.execute(&bg_mcp_call, tool_ctx).await
                 });
 
-                let is_builtin_task_tool = is_builtin_task_tool(&tool_name);
+                let is_core_task_tool = is_core_task_tool(&tool_name);
 
-                let result = if is_builtin_task_tool {
+                let result = if is_core_task_tool {
                     // Run synchronously with the tool's own declared timeout
                     // (wait-task declares 310s; poll/cancel/read-task-logs are
                     // fast). If the tool declares NO timeout, await it directly
@@ -3808,35 +3808,35 @@ mod interactive_round_budget_tests {
 /// task_id instead of the awaited result, so the agent would loop forever
 /// waiting on a task that never resolves (deploy Groups 13/14 regression).
 ///
-/// The names are the EXPOSED names produced by `tool_qualify("builtin", <short
+/// The names are the EXPOSED names produced by `tool_qualify(crate::mcp::CORE_PLUGIN_NAME, <short
 /// name>)` under the `{plugin}__{tool}` grammar (never the dashed legacy
 /// spelling), so they must be kept in sync with the tool definitions in
 /// `src/mcp/mod.rs`. The unit tests below assert each one against
 /// `tool_qualify`, so a future rename cannot silently drop a tool from this
 /// guard.
-fn is_builtin_task_tool(name: &str) -> bool {
+fn is_core_task_tool(name: &str) -> bool {
     matches!(
         name,
-        "builtin__wait_task"
-            | "builtin__poll_task"
-            | "builtin__cancel_task"
-            | "builtin__read_task_logs"
-            | "builtin__read_attached_file"
-            | "builtin__wait_for_status"
+        "core__wait_task"
+            | "core__poll_task"
+            | "core__cancel_task"
+            | "core__read_task_logs"
+            | "core__read_attached_file"
+            | "core__wait_for_status"
     )
 }
 
 #[cfg(test)]
-mod builtin_task_tool_guard_tests {
-    use super::is_builtin_task_tool;
+mod core_task_tool_guard_tests {
+    use super::is_core_task_tool;
     use crate::mcp::tool_qualify;
 
     /// The guard list must match the real exposed names built by
     /// `tool_qualify`. Four of these were once spelled with a dash
-    /// (`builtin__wait-task`), which can never match the `__` grammar and
+    /// (`core__wait-task`), which can never match the `__` grammar and
     /// silently backgrounded `wait_task` (regression, deploy Groups 13/14).
     #[test]
-    fn guard_covers_every_builtin_task_tool() {
+    fn guard_covers_every_core_task_tool() {
         for short in [
             "wait_task",
             "poll_task",
@@ -3845,21 +3845,28 @@ mod builtin_task_tool_guard_tests {
             "read_attached_file",
             "wait_for_status",
         ] {
-            let exposed = tool_qualify("builtin", short);
+            let exposed = tool_qualify(crate::mcp::CORE_PLUGIN_NAME, short);
             assert!(
-                is_builtin_task_tool(&exposed),
+                is_core_task_tool(&exposed),
                 "background-task guard must know the real exposed name {exposed}"
             );
         }
-        assert!(!is_builtin_task_tool("builtin__wait-task"));
-        assert!(!is_builtin_task_tool("docker__compose"));
+        assert!(!is_core_task_tool("core__wait-task"));
+        assert!(!is_core_task_tool("docker__compose"));
+        // HARD CUTOVER: the retired `core__*` namespace is not a core
+        // task tool name any more (built via format! on purpose).
+        let retired = format!("{}__{}", "builtin", "wait_task");
+        assert!(
+            !is_core_task_tool(&retired),
+            "the retired core namespace must not be recognised"
+        );
     }
 
     /// `wait_task` / `wait_for_status` must stay synchronous (no bg switch),
     /// because they return the awaited RESULT, not a task handle.
     #[test]
     fn guard_covers_the_long_waiting_tools() {
-        assert!(is_builtin_task_tool("builtin__wait_task"));
-        assert!(is_builtin_task_tool("builtin__wait_for_status"));
+        assert!(is_core_task_tool("core__wait_task"));
+        assert!(is_core_task_tool("core__wait_for_status"));
     }
 }

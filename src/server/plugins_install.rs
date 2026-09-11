@@ -19,6 +19,24 @@ use super::plugins_compile::*;
 use super::plugins_reload::*;
 use super::plugins_types::*;
 
+/// Reject a plugin NAME that claims a reserved namespace (`core`, the
+/// retired `builtin`, `mcp`, `system`). VALIDATE, DON'T MANGLE: the name is
+/// rejected as-is with the actionable message from
+/// `crate::mcp::validate_plugin_name`, never rewritten. Returns the ready 400
+/// response when it must be rejected.
+fn reject_reserved_plugin_name(name: &str) -> Option<axum::response::Response> {
+    match crate::mcp::validate_plugin_name(name) {
+        Ok(()) => None,
+        Err(e) => Some(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "success": false, "error": e })),
+            )
+                .into_response(),
+        ),
+    }
+}
+
 pub(crate) async fn install_plugin_handler(
     Path((p_type, source, name)): Path<(String, String, String)>,
     State(state): State<Arc<AppState>>,
@@ -31,6 +49,13 @@ pub(crate) async fn install_plugin_handler(
     }
     if let Err(e) = validate_source(&source) {
         return e.into_response();
+    }
+
+    // Reserved namespace guard: a plugin may never claim the core namespace
+    // (`core`) nor its RETIRED name (`builtin`). The operator sees the
+    // actionable error here, at INSTALL time, before anything is cloned.
+    if let Some(response) = reject_reserved_plugin_name(&name) {
+        return response;
     }
 
     // Reject install for built-in plugins
@@ -695,6 +720,13 @@ pub(crate) async fn rename_plugin_handler(
     }
     if let Err(e) = reject_builtin_operation(&source, "rename", &name) {
         return e.into_response();
+    }
+    // Reserved namespace guard: neither the current nor the new name may
+    // claim a reserved namespace (see install_plugin_handler).
+    for candidate in [&name, &body.new_name] {
+        if let Some(response) = reject_reserved_plugin_name(candidate) {
+            return response;
+        }
     }
     let new_name = sanitize_plugin_name(&body.new_name);
     if new_name.is_empty() {

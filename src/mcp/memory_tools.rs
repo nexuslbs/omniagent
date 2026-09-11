@@ -27,7 +27,7 @@ fn profile_dir(ctx: &AppContext, profile: &str) -> String {
 
 fn manage_memory_tool() -> McpTool {
     McpTool {
-        name: crate::mcp::tool_qualify("builtin", "manage_memory"),
+        name: crate::mcp::tool_qualify(crate::mcp::CORE_PLUGIN_NAME, "manage_memory"),
         description: "Manage persistent memory entries (MEMORY.md). \
                       Actions: 'add' (prepend entry), 'remove' (entries matching substring), \
                       'clean' (remove all entries). \
@@ -193,7 +193,7 @@ fn manage_memory_tool() -> McpTool {
 
 fn promote_to_memory_tool() -> McpTool {
     McpTool {
-        name: crate::mcp::tool_qualify("builtin", "promote_to_memory"),
+        name: crate::mcp::tool_qualify(crate::mcp::CORE_PLUGIN_NAME, "promote_to_memory"),
         description: "Promote a validated fact to long-term memory by writing it to the wiki. \
                       Memories are stored as markdown files under Memory/Promoted/ with frontmatter \
                       containing provenance, confidence, and expiry information. \
@@ -348,7 +348,7 @@ expires_at: {}
 
 fn list_memories_tool() -> McpTool {
     McpTool {
-        name: crate::mcp::tool_qualify("builtin", "list_memories"),
+        name: crate::mcp::tool_qualify(crate::mcp::CORE_PLUGIN_NAME, "list_memories"),
         description: "List all promoted memories with their title, confidence, and expiry status. \
                       Optionally include expired entries. Reads from the wiki Memory/Promoted directory."
             .to_string(),
@@ -448,7 +448,7 @@ fn list_memories_tool() -> McpTool {
 
 fn review_memories_tool() -> McpTool {
     McpTool {
-        name: crate::mcp::tool_qualify("builtin", "review_memories"),
+        name: crate::mcp::tool_qualify(crate::mcp::CORE_PLUGIN_NAME, "review_memories"),
         description: "Review the status of all promoted memories, categorizing them as expired, \
                       expiring soon, or active. Provides a summary report with recommended actions."
             .to_string(),
