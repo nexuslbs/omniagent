@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed - Core tool namespace renamed `builtin` -> `core` (HARD CUTOVER, no alias)
+
+- Core built-in tools are now exposed as `core__*` (`core__poll_task`,
+  `core__wait_task`, `core__cancel_task`, `core__read_task_logs`,
+  `core__read_attached_file`, `core__wait_for_status`, `core__list_tool_details`,
+  `core__fail_thread`, `core__omniagent_api`). The plugin component constant is
+  `CORE_PLUGIN_NAME` (formerly `BUILTIN_PLUGIN_NAME`). Tool names, counts and
+  semantics are unchanged; only the prefix differs. A plugin whose source is
+  `builtin` can no longer be confused with the core namespace.
+- **Hard cutover:** the legacy `builtin__*` prefix is NOT accepted, aliased or
+  dispatched (`Unknown tool: builtin__list_tool_details`). Every config, toolset,
+  template, skill and wiki reference must be updated in the same change.
+- **Reserved plugin names:** `validate_plugin_name()` rejects `core`, the retired
+  `builtin`, `mcp` and `system` (case-insensitive) at plugin install/load time and
+  again in `validate_exposed_name()`; a reserved name is rejected AS-IS with an
+  actionable message, never rewritten.
+- **Fail-closed, kind-aware registry:** a tool registration whose exposed name
+  collides with a tool of the other kind (core vs plugin) is rejected and recorded
+  as an invalid tool (never exposed, never dispatchable) instead of silently
+  shadowing it.
+- **Alias safety:** a legacy alias is honoured only while it collides with nothing
+  else; a colliding alias is rejected and resolves to nothing (fail closed).
+
 ### Removed - builtin `code_exec` MCP tool
 
 - `builtin_code-exec` / `code_exec` removed from the MCP registry
