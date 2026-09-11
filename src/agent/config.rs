@@ -111,21 +111,21 @@ pub struct AgentConfig {
     /// MCP tool name for generating the LLM prompt (system prompt + context assembly).
     /// The tool is called by the executor before each LLM invocation to build
     /// the complete prompt from profile, memory, skills, thread context, etc.
-    /// Default: "prompt_generate": change this if the prompt plugin is registered
+    /// Default: "prompt__generate": change this if the prompt plugin is registered
     /// under a different name.
     pub prompt_tool_name: String,
     /// MCP tool name for compacting conversation history.
-    /// Default: "prompt_compact-messages".
+    /// Default: "prompt__compact_messages".
     pub compact_messages_tool_name: String,
     /// MCP tool name for redacting possible secrets from outgoing messages
     /// and tool output before delivery. Empty (default) = no redaction at
-    /// all. Example: "redaction_redact" (the omni-plugins redaction tool).
+    /// all. Example: "redaction__redact" (the omni-plugins redaction tool).
     pub redaction_tool: String,
     /// MCP tool name for detecting PROVIDER-SPECIFIC malformed LLM response
     /// forms (e.g. DeepSeek DSML text-mode tool-call markup) in the assistant's
     /// last message, and for returning the cleaned text. Empty (default) = the
     /// core's built-in provider-neutral heuristic is used (back-compat).
-    /// Example: "llm-response-hygiene_classify" (the omni-plugins tool).
+    /// Example: "llm-response-hygiene__classify" (the omni-plugins tool).
     pub malformed_response_tool: String,
 
     /// Cumulative char budget for appended sub-prompts per running thread
@@ -285,10 +285,10 @@ impl AgentConfig {
             kanban_dispatcher_interval_secs: get("kanban_dispatcher_interval", "15")
                 .parse()
                 .unwrap_or(15),
-            prompt_tool_name: get("prompt_generate_tool", "prompt_generate"),
+            prompt_tool_name: get("prompt_generate_tool", "prompt__generate"),
             compact_messages_tool_name: get(
                 "prompt_compact_messages_tool",
-                "prompt_compact-messages",
+                "prompt__compact_messages",
             ),
             redaction_tool: get("redaction_tool", ""),
             malformed_response_tool: get("malformed_response_tool", ""),
@@ -400,10 +400,10 @@ impl AgentConfig {
             kanban_dispatcher_interval_secs: get("kanban_dispatcher_interval", "15")
                 .parse()
                 .unwrap_or(15),
-            prompt_tool_name: get("prompt_generate_tool", "prompt_generate"),
+            prompt_tool_name: get("prompt_generate_tool", "prompt__generate"),
             compact_messages_tool_name: get(
                 "prompt_compact_messages_tool",
-                "prompt_compact-messages",
+                "prompt__compact_messages",
             ),
             redaction_tool: get("redaction_tool", ""),
             malformed_response_tool: get("malformed_response_tool", ""),
@@ -483,8 +483,8 @@ mod tests {
             provider_max_retries: 3,
             delete_after_days: 30,
             kanban_dispatcher_interval_secs: 15,
-            prompt_tool_name: "prompt_generate".to_string(),
-            compact_messages_tool_name: "prompt_compact-messages".to_string(),
+            prompt_tool_name: "prompt__generate".to_string(),
+            compact_messages_tool_name: "prompt__compact_messages".to_string(),
             redaction_tool: String::new(),
             malformed_response_tool: String::new(),
             sub_prompt_max_chars: 4000,

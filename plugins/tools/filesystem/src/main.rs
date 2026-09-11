@@ -1,10 +1,10 @@
 //! mcp-server-filesystem: standalone MCP server for local file operations.
 //! Communicates via stdio JSON-RPC (MCP protocol).
 //!
-//! Tools: filesystem_read (char paging; line-numbered output + line paging via lines=true),
-//! filesystem_write, filesystem_list, filesystem_search, filesystem_info,
-//! filesystem_grep (ripgrep-backed recursive content search, caps + spill to file),
-//! filesystem_str_replace, filesystem_insert, filesystem_apply_patch (precise, reviewable
+//! Tools: filesystem__read (char paging; line-numbered output + line paging via lines=true),
+//! filesystem__write, filesystem__list, filesystem__search, filesystem__info,
+//! filesystem__grep (ripgrep-backed recursive content search, caps + spill to file),
+//! filesystem__str_replace, filesystem__insert, filesystem__apply_patch (precise, reviewable
 //! file-edit primitives)
 //!
 //! SANDBOX: only WRITE operations are confined to the configured
@@ -186,13 +186,13 @@ fn format_size(size: u64) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Tool: filesystem_read
+// Tool: filesystem__read
 // ---------------------------------------------------------------------------
 
 /// R6: render a LINE-NUMBERED, line-paged read of `content`. Line numbers are
 /// 1-based and use the plugin's own line convention (a trailing newline does
 /// not open an extra empty line), so they match the line numbers reported by
-/// filesystem_insert and filesystem_apply_patch. `offset` is the 1-based
+/// filesystem__insert and filesystem__apply_patch. `offset` is the 1-based
 /// number of the first line to show; `limit` is the max number of lines. The
 /// returned text always ends with a bracket note describing the shown line
 /// range and the file's total line count, so callers can page forward
@@ -247,7 +247,7 @@ fn handle_read(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
         .map_err(|e| anyhow::anyhow!("Failed to read file '{}': {}", safe_path, e))?;
     // R6: optional LINE-NUMBERED mode (lines=true). Each shown line is
     // prefixed with its 1-based number and paging is in lines, so reads are
-    // cheap to reference (numbers match filesystem_insert/apply_patch) and
+    // cheap to reference (numbers match filesystem__insert/apply_patch) and
     // deterministic to page without re-reading.
     if args["lines"].as_bool().unwrap_or(false) {
         let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
@@ -285,7 +285,7 @@ fn handle_read(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
 }
 
 // ---------------------------------------------------------------------------
-// Tool: filesystem_write
+// Tool: filesystem__write
 // ---------------------------------------------------------------------------
 
 fn handle_write(args: Value, cfg: &Config) -> Result<(String, bool)> {
@@ -340,12 +340,12 @@ fn handle_write(args: Value, cfg: &Config) -> Result<(String, bool)> {
 }
 
 // ---------------------------------------------------------------------------
-// Tool: file-edit primitives (filesystem_str_replace / filesystem_insert /
-// filesystem_apply_patch)
+// Tool: file-edit primitives (filesystem__str_replace / filesystem__insert /
+// filesystem__apply_patch)
 //
 // R4: precise, reviewable edits instead of whole-file rewrites. Edits are
-// WRITES: the target path must pass the same sandbox as filesystem_write, and
-// the file must already exist (create files with filesystem_write first).
+// WRITES: the target path must pass the same sandbox as filesystem__write, and
+// the file must already exist (create files with filesystem__write first).
 // ---------------------------------------------------------------------------
 
 /// Load an existing file for editing: resolve the write sandbox, require the
@@ -355,7 +355,7 @@ fn load_file_for_edit(path: &str, cfg: &Config) -> Result<(String, String), Stri
     let safe_path = Path::new(&safe_path_str);
     if !safe_path.is_file() {
         return Err(format!(
-            "cannot edit '{}': file does not exist (create it with filesystem_write first)",
+            "cannot edit '{}': file does not exist (create it with filesystem__write first)",
             safe_path_str
         ));
     }
@@ -365,7 +365,7 @@ fn load_file_for_edit(path: &str, cfg: &Config) -> Result<(String, String), Stri
 }
 
 /// Snapshot the write-relevant config for an edit-handler closure (same
-/// pattern as the filesystem_write handler).
+/// pattern as the filesystem__write handler).
 fn snapshot_write_cfg(cfg: &Config) -> Config {
     Config {
         workspace_dir: cfg.workspace_dir.clone(),
@@ -531,7 +531,7 @@ fn do_insert(buf: &mut String, line: usize, content: &str) -> Result<String, Str
 }
 
 // ---------------------------------------------------------------------------
-// Tool: filesystem_str_replace
+// Tool: filesystem__str_replace
 // ---------------------------------------------------------------------------
 
 fn handle_str_replace(args: Value, cfg: &Config) -> Result<(String, bool)> {
@@ -565,7 +565,7 @@ fn handle_str_replace(args: Value, cfg: &Config) -> Result<(String, bool)> {
 }
 
 // ---------------------------------------------------------------------------
-// Tool: filesystem_insert
+// Tool: filesystem__insert
 // ---------------------------------------------------------------------------
 
 fn handle_insert(args: Value, cfg: &Config) -> Result<(String, bool)> {
@@ -595,7 +595,7 @@ fn handle_insert(args: Value, cfg: &Config) -> Result<(String, bool)> {
 }
 
 // ---------------------------------------------------------------------------
-// Tool: filesystem_apply_patch
+// Tool: filesystem__apply_patch
 // ---------------------------------------------------------------------------
 
 fn handle_apply_patch(args: Value, cfg: &Config) -> Result<(String, bool)> {
@@ -669,7 +669,7 @@ fn handle_apply_patch(args: Value, cfg: &Config) -> Result<(String, bool)> {
 }
 
 // ---------------------------------------------------------------------------
-// Tool: filesystem_list
+// Tool: filesystem__list
 // ---------------------------------------------------------------------------
 
 fn handle_list(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
@@ -714,7 +714,7 @@ fn handle_list(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
 }
 
 // ---------------------------------------------------------------------------
-// Tool: filesystem_search
+// Tool: filesystem__search
 // ---------------------------------------------------------------------------
 
 fn handle_search(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
@@ -812,7 +812,7 @@ fn handle_search(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
 }
 
 // ---------------------------------------------------------------------------
-// Tool: filesystem_info
+// Tool: filesystem__info
 // ---------------------------------------------------------------------------
 
 fn handle_info(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
@@ -861,11 +861,11 @@ fn handle_info(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
 }
 
 // ---------------------------------------------------------------------------
-// Tool: filesystem_grep (recursive regex content search)
+// Tool: filesystem__grep (recursive regex content search)
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Tool: filesystem_grep - RIPGREP-BACKED recursive content search (R5)
+// Tool: filesystem__grep - RIPGREP-BACKED recursive content search (R5)
 //
 // Directory traversal uses ignore::WalkBuilder, the same engine ripgrep is
 // built on (cycle-safe, no symlink following, opt-in hidden/.gitignore
@@ -927,7 +927,7 @@ impl GrepSpill {
         let tag = sanitize_spill_segment(base_tag);
         for nonce in 0..100u32 {
             let name = format!(
-                "filesystem_grep-{}-{}-{}.txt",
+                "filesystem__grep-{}-{}-{}.txt",
                 tag,
                 std::process::id(),
                 nonce
@@ -1356,7 +1356,7 @@ async fn main() -> Result<()> {
                 description:
                     "READ A LOCAL FILE from disk. Use this to read any file on the filesystem (markdown, text files, config files, code files, research documents). This is the ONLY tool for reading existing file content. Do NOT use search_messages for file reading. \
                     READS ARE UNRESTRICTED: any path on the filesystem can be read (only WRITES are confined to the workspace dir). \
-                    LARGE FILES: reads are CHAR-BASED SLICES. 'offset' (default 0) is the starting char position; 'limit' (default 50000) is the max chars returned. The response reports the slice returned, e.g. \"[showing chars 50000-100000 of 250000 total chars]\", so you can page deterministically. No args = first 50000 chars, with a truncation note when the file is bigger. LINE-NUMBERED READS (lines=true): use when you need to reference specific lines. Every shown line is prefixed with its 1-based line number ('N:line'; the numbers match filesystem_insert/filesystem_apply_patch line numbering). 'offset' (default 1) is the 1-based first line to show; 'limit' (default 500) is the max number of lines. The response always ends with a bracket note, e.g. \"[showing lines 1-500 of 1200 total lines]\" or \"[... truncated: showing lines 1-500 of 1200 total lines]\", so you know exactly which lines you saw and can page forward deterministically without re-reading."
+                    LARGE FILES: reads are CHAR-BASED SLICES. 'offset' (default 0) is the starting char position; 'limit' (default 50000) is the max chars returned. The response reports the slice returned, e.g. \"[showing chars 50000-100000 of 250000 total chars]\", so you can page deterministically. No args = first 50000 chars, with a truncation note when the file is bigger. LINE-NUMBERED READS (lines=true): use when you need to reference specific lines. Every shown line is prefixed with its 1-based line number ('N:line'; the numbers match filesystem__insert/filesystem__apply_patch line numbering). 'offset' (default 1) is the 1-based first line to show; 'limit' (default 500) is the max number of lines. The response always ends with a bracket note, e.g. \"[showing lines 1-500 of 1200 total lines]\" or \"[... truncated: showing lines 1-500 of 1200 total lines]\", so you know exactly which lines you saw and can page forward deterministically without re-reading."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -1490,8 +1490,8 @@ async fn main() -> Result<()> {
                     Returns 'path:line: content' matches, capped at max_results (default 200). \
                     CAPS + SPILL: when more than max_results matches exist the FULL result list is spilled \
                     verbatim to a file under OMNI_DIR/data/spill (or the workspace) and its path is reported \
-                    in the response - read that file with filesystem_read for the remaining hits, nothing is lost. \
-                    Prefer this over filesystem_search (names only): content discovery belongs in filesystem_grep."
+                    in the response - read that file with filesystem__read for the remaining hits, nothing is lost. \
+                    Prefer this over filesystem__search (names only): content discovery belongs in filesystem__grep."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -1539,14 +1539,14 @@ handler: grep_handler,
             def: McpToolDef {
                 name: "filesystem_str_replace".to_string(),
                 description:
-                    "REPLACE AN EXACT STRING INSIDE A FILE (surgical edit). Use for precise, reviewable edits instead of rewriting the whole file with filesystem_write: only the matched text changes, the rest of the file is untouched. 'old_string' must appear in the file - when it appears several times the call fails unless you pass occurrence=N (1-based) to pick the Nth match or extend old_string with surrounding context to make it unique. Pass new_string = \"\" (empty string) to delete the matched text. The file must already exist, and the path must be inside the same write sandbox as filesystem_write (workspace dir or enabled OMNI_DIR subdirs). Returns a confirmation with the affected line number, occurrence, previews and the new file size."
+                    "REPLACE AN EXACT STRING INSIDE A FILE (surgical edit). Use for precise, reviewable edits instead of rewriting the whole file with filesystem__write: only the matched text changes, the rest of the file is untouched. 'old_string' must appear in the file - when it appears several times the call fails unless you pass occurrence=N (1-based) to pick the Nth match or extend old_string with surrounding context to make it unique. Pass new_string = \"\" (empty string) to delete the matched text. The file must already exist, and the path must be inside the same write sandbox as filesystem__write (workspace dir or enabled OMNI_DIR subdirs). Returns a confirmation with the affected line number, occurrence, previews and the new file size."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Absolute path to the existing file to edit (same write sandbox as filesystem_write)"
+                            "description": "Absolute path to the existing file to edit (same write sandbox as filesystem__write)"
                         },
                         "old_string": {
                             "type": "string",
@@ -1570,14 +1570,14 @@ handler: grep_handler,
             def: McpToolDef {
                 name: "filesystem_insert".to_string(),
                 description:
-                    "INSERT LINES INTO AN EXISTING FILE at a 1-based line number (surgical edit). 'content' is inserted BEFORE 'line': line 1 inserts at the top of the file, line = last_line+1 appends at the end. The inserted content always occupies its own whole lines (newlines are added automatically where needed). Use for precise, reviewable edits instead of rewriting the whole file with filesystem_write. The file must already exist, and the path must be inside the same write sandbox as filesystem_write. Returns a confirmation with the inserted position/line count and the new file size."
+                    "INSERT LINES INTO AN EXISTING FILE at a 1-based line number (surgical edit). 'content' is inserted BEFORE 'line': line 1 inserts at the top of the file, line = last_line+1 appends at the end. The inserted content always occupies its own whole lines (newlines are added automatically where needed). Use for precise, reviewable edits instead of rewriting the whole file with filesystem__write. The file must already exist, and the path must be inside the same write sandbox as filesystem__write. Returns a confirmation with the inserted position/line count and the new file size."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Absolute path to the existing file to edit (same write sandbox as filesystem_write)"
+                            "description": "Absolute path to the existing file to edit (same write sandbox as filesystem__write)"
                         },
                         "line": {
                             "type": "integer",
@@ -1597,14 +1597,14 @@ handler: grep_handler,
             def: McpToolDef {
                 name: "filesystem_apply_patch".to_string(),
                 description:
-                    "APPLY A BATCH OF PRECISE EDITS TO A FILE, ATOMICALLY. 'edits' is an array of operations applied in order to an in-memory copy: if ANY operation fails to match, NOTHING is written and the file is left exactly as it was. Each operation: {\"op\": \"replace\", \"old_string\": ..., \"new_string\": ..., \"occurrence\": N?} replaces an exact string (new_string omitted or \"\" deletes; occurrence is an optional 1-based index for repeated matches), or {\"op\": \"insert\", \"line\": N, \"content\": ...} inserts content before the 1-based line N. Use apply_patch for multi-hunk edits in one reviewable call instead of several whole-file rewrites. Same rules as filesystem_str_replace/filesystem_insert: the file must exist and the path must be inside the write sandbox."
+                    "APPLY A BATCH OF PRECISE EDITS TO A FILE, ATOMICALLY. 'edits' is an array of operations applied in order to an in-memory copy: if ANY operation fails to match, NOTHING is written and the file is left exactly as it was. Each operation: {\"op\": \"replace\", \"old_string\": ..., \"new_string\": ..., \"occurrence\": N?} replaces an exact string (new_string omitted or \"\" deletes; occurrence is an optional 1-based index for repeated matches), or {\"op\": \"insert\", \"line\": N, \"content\": ...} inserts content before the 1-based line N. Use apply_patch for multi-hunk edits in one reviewable call instead of several whole-file rewrites. Same rules as filesystem__str_replace/filesystem__insert: the file must exist and the path must be inside the write sandbox."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Absolute path to the existing file to edit (same write sandbox as filesystem_write)"
+                            "description": "Absolute path to the existing file to edit (same write sandbox as filesystem__write)"
                         },
                         "edits": {
                             "type": "array",
@@ -2447,7 +2447,7 @@ mod tests {
     #[test]
     fn read_lines_mode_conventions_match_edit_tools() {
         // A trailing newline does not open an extra empty line: 'a\nb\n' has
-        // exactly 2 lines (the same convention filesystem_insert uses).
+        // exactly 2 lines (the same convention filesystem__insert uses).
         let dir = std::env::temp_dir().join(format!("fs-read-lines-c-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();

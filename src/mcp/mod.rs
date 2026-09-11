@@ -329,17 +329,148 @@ pub type McpToolHandler = Arc<
         + Sync,
 >;
 
-/// Build a fully-qualified tool name using the unified format:
-/// `{server}_{tool-name-with-dashes}`
-/// Strips redundant server prefix from the tool name when present
-/// (e.g. `filesystem` + `filesystem_read` → `filesystem_read`,
-/// not `filesystem_filesystem-read`).
-/// If stripping the prefix leaves an empty string (server == tool_name),
-/// the original tool name is kept so `fetch` + `fetch` → `fetch_fetch`.
+/// Maximum length of an EXPOSED tool name: `{plugin}__{tool}`.
+///
+/// The intersection of the constraints of the mainstream providers
+/// (Anthropic / OpenAI / Gemini / OpenAI-compatible) is exactly
+/// `[A-Za-z0-9_-]{1,64}`; core enforces that shared guard and nothing
+/// provider-specific.
+pub const MAX_EXPOSED_TOOL_NAME_LEN: usize = 64;
+
+/// The plugin component used for tools that core implements itself.
+pub const BUILTIN_PLUGIN_NAME: &str = "builtin";
+
+/// The RESERVED separator between the plugin component and the in-plugin tool
+/// component of an exposed tool name. It may never appear inside a component,
+/// which is what makes the decode unambiguous.
+pub const TOOL_NAME_SEPARATOR: &str = "__";
+
+/// Validate ONE component (plugin name or in-plugin tool name) of an exposed
+/// tool name.
+///
+/// VALIDATE, DON'T MANGLE: a declared component is either accepted as-is or
+/// rejected with an actionable error naming the failed rule - it is never
+/// rewritten into a valid-looking variant.
+pub fn validate_component(component: &str) -> Result<(), String> {
+    if component.is_empty() {
+        return Err("is empty".to_string());
+    }
+    if component.contains(TOOL_NAME_SEPARATOR) {
+        return Err(format!(
+            "contains the reserved separator \"{}\"",
+            TOOL_NAME_SEPARATOR
+        ));
+    }
+    if component.starts_with('_') {
+        return Err("starts with '_', the leading character of the separator".to_string());
+    }
+    if component.ends_with('_') {
+        return Err(
+            "ends with '_', which makes the separator ambiguous at the boundary".to_string(),
+        );
+    }
+    if let Some(c) = component
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_'))
+    {
+        return Err(format!(
+            "contains {:?}, outside the allowed charset [A-Za-z0-9_-]",
+            c
+        ));
+    }
+    if let Some(first) = component.chars().next() {
+        if !(first.is_ascii_alphanumeric() || first == '-') {
+            return Err(format!(
+                "starts with {:?}, must start with [A-Za-z0-9-]",
+                first
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate an exposed tool name built from its two components.
+///
+/// Returns the failed rule as an actionable message (naming the offending
+/// component and the offending exposed name) so every caller can reject the
+/// tool loudly instead of exposing a name a provider or a consumer would
+/// mis-read.
+pub fn validate_exposed_name(plugin: &str, tool: &str) -> Result<(), String> {
+    if let Err(e) = validate_component(plugin) {
+        return Err(format!("plugin name '{}' {}", plugin, e));
+    }
+    if let Err(e) = validate_component(tool) {
+        return Err(format!("tool name '{}' {}", tool, e));
+    }
+    let exposed = format!("{}{}{}", plugin, TOOL_NAME_SEPARATOR, tool);
+    if exposed.len() > MAX_EXPOSED_TOOL_NAME_LEN {
+        return Err(format!(
+            "exposed name '{}' is {} chars, over the {} char limit",
+            exposed,
+            exposed.len(),
+            MAX_EXPOSED_TOOL_NAME_LEN
+        ));
+    }
+    Ok(())
+}
+
+/// Build a fully-qualified tool name using the unified grammar:
+/// `{plugin}__{tool}` (double underscore).
+///
+/// The declared tool name is used VERBATIM except for one authoring
+/// convenience: a redundant plugin prefix is dropped (`filesystem` +
+/// `filesystem_read` -> `filesystem__read`, never
+/// `filesystem__filesystem_read`). Nothing is lowercased or hyphenated
+/// (VALIDATE, DON'T MANGLE): a name that violates the grammar is rejected by
+/// `validate_exposed_name` at registration time (see `McpRegistry::register`),
+/// never fixed up here.
+///
+/// `__` is reserved and may not appear inside a component, which is what makes
+/// the name round-trip through `tool_dequalify` (`split_once("__")`).
 pub fn tool_qualify(server: &str, tool_name: &str) -> String {
-    // Strip redundant server prefix from tool name if present
+    format!(
+        "{}{}{}",
+        server,
+        TOOL_NAME_SEPARATOR,
+        tool_component(server, tool_name)
+    )
+}
+
+/// The in-plugin tool component of a DECLARED tool name: the declared name
+/// with a redundant plugin prefix removed (`filesystem` + `filesystem_read` ->
+/// `read`). A pure, idempotent function of the declared pair
+/// (`tool_component(server, tool_component(server, t)) ==
+/// tool_component(server, t)`), so the exposed name is deterministic. This is
+/// not a mangle: the remainder is used verbatim and must still satisfy
+/// `validate_component`.
+fn tool_component<'a>(server: &str, tool_name: &'a str) -> &'a str {
+    if let Some(rest) = tool_name.strip_prefix(server) {
+        let trimmed = rest.trim_start_matches(['-', '_', '.']);
+        if !trimmed.is_empty() {
+            return trimmed;
+        }
+    }
+    tool_name
+}
+
+/// Decode an exposed tool name back into its `(plugin, tool)` components.
+///
+/// The single canonical decode path: `split_once("__")` is unambiguous
+/// because a component may never contain the separator. Callers that need the
+/// in-plugin tool name (e.g. invoking the tool over MCP) MUST use this.
+pub fn tool_dequalify(exposed: &str) -> Option<(&str, &str)> {
+    exposed.split_once(TOOL_NAME_SEPARATOR)
+}
+
+/// The pre-flip exposed name of a tool: `{plugin}_{tool-with-dashes}`.
+///
+/// LEGACY ALIAS WINDOW (one release): names produced by the old grammar keep
+/// resolving so `allowed_tools` entries, skills, kanban bodies and docs
+/// written before the separator flip do not silently drop tools. Removed in
+/// the P2 cleanup phase.
+pub fn tool_legacy_alias(server: &str, tool_name: &str) -> String {
+    // Reproduces the old algorithm EXACTLY (redundant-prefix strip + `_`->`-`).
     let tool = if let Some(rest) = tool_name.strip_prefix(server) {
-        // Remove any leading separator character after the prefix
         let trimmed = rest.trim_start_matches(['-', '_', '.']);
         if trimmed.is_empty() {
             tool_name
@@ -349,8 +480,7 @@ pub fn tool_qualify(server: &str, tool_name: &str) -> String {
     } else {
         tool_name
     };
-    let dasherized = tool.replace('_', "-");
-    format!("{}_{}", server, dasherized)
+    format!("{}_{}", server, tool.replace('_', "-"))
 }
 
 /// A registered MCP tool.
@@ -385,7 +515,7 @@ pub struct McpTool {
 impl McpTool {
     /// Build a built-in tool. `short_name` is the plugin-internal name
     /// (e.g. "poll_task"); the canonical `name` is ALWAYS derived via
-    /// `tool_qualify("builtin", short_name)` → `builtin_poll-task`. Only
+    /// `tool_qualify("builtin", short_name)` → `builtin__poll_task`. Only
     /// this constructor knows the builtin prefix - callers pass the short
     /// form and the full name is never hardcoded. This is the ONLY place a
     /// short name is acceptable: it is immediately qualified.
@@ -408,10 +538,78 @@ impl McpTool {
     }
 }
 
+/// The plugin component of a registered tool: its server name, or the
+/// `builtin` plugin for tools core implements itself.
+fn plugin_of(tool: &McpTool) -> String {
+    tool.server_name
+        .clone()
+        .unwrap_or_else(|| BUILTIN_PLUGIN_NAME.to_string())
+}
+
+impl McpTool {
+    /// The `(plugin, in-plugin tool name)` components of this tool's exposed
+    /// name. Derived from `name` + `server_name`: there is deliberately no
+    /// second stored copy of the short name.
+    pub fn components(&self) -> (String, String) {
+        let plugin = plugin_of(self);
+        let prefix = format!("{}{}", plugin, TOOL_NAME_SEPARATOR);
+        let tool = self
+            .name
+            .strip_prefix(&prefix)
+            .unwrap_or(self.name.as_str())
+            .to_string();
+        (plugin, tool)
+    }
+
+    /// Legacy (pre-separator-flip) exposed names of this tool: the one-release
+    /// alias window for callers and `allowed_tools` entries written before the
+    /// flip. Empty when the name cannot be represented in the legacy grammar.
+    pub fn legacy_names(&self) -> Vec<String> {
+        let (plugin, tool) = self.components();
+        if validate_component(&plugin).is_err() || validate_component(&tool).is_err() {
+            return Vec::new();
+        }
+        let alias = tool_legacy_alias(&plugin, &tool);
+        if alias == self.name {
+            Vec::new()
+        } else {
+            vec![alias]
+        }
+    }
+}
+
+/// A tool REJECTED at registration because its exposed name violates the
+/// exposed-name grammar (or exceeds the length limit).
+///
+/// Such a tool is never registered, never sent to a provider and never listed
+/// in the prompt's available tools; the API and the dashboard surface this
+/// record with plugin, tool and the failed rule.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InvalidTool {
+    pub plugin: String,
+    pub tool: String,
+    pub reason: String,
+    pub exposed_name: String,
+}
+
+/// Two registrations under one exposed name: the second one overwrote the
+/// first (reported, never silent).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ToolCollision {
+    pub name: String,
+    pub existing_plugin: String,
+    pub incoming_plugin: String,
+}
+
 /// Registry of all available MCP tools.
 #[derive(Clone)]
 pub struct McpRegistry {
     tools: HashMap<String, McpTool>,
+    /// Tools rejected by the exposed-name grammar at registration time.
+    /// Never registered, never sent to a provider.
+    invalid: Vec<InvalidTool>,
+    /// Exposed-name collisions observed while registering.
+    collisions: Vec<ToolCollision>,
 }
 
 impl Default for McpRegistry {
@@ -424,18 +622,50 @@ impl McpRegistry {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
+            invalid: Vec::new(),
+            collisions: Vec::new(),
         }
     }
 
     /// Register a tool.
+    ///
+    /// VALIDATE, DON'T MANGLE: a tool whose plugin or in-plugin name violates
+    /// the exposed-name grammar, or whose exposed name exceeds
+    /// `MAX_EXPOSED_TOOL_NAME_LEN`, is REJECTED. It is never registered, so
+    /// it is never sent to a provider, never listed in the prompt's available
+    /// tools and never dispatchable. The rejection is recorded in
+    /// `McpRegistry::invalid_tools` with plugin, tool and the failed rule.
+    ///
+    /// A second registration under an identical exposed name is REPORTED
+    /// (loud log + `McpRegistry::collisions`), never a silent overwrite.
     pub fn register(&mut self, tool: McpTool) {
+        let (plugin, short) = tool.components();
+        if let Err(reason) = validate_exposed_name(&plugin, &short) {
+            warn_invalid_tool(&plugin, &short, &reason);
+            self.invalid.push(InvalidTool {
+                plugin,
+                tool: short,
+                reason,
+                exposed_name: tool.name.clone(),
+            });
+            return;
+        }
+        if let Some(previous) = self.tools.get(&tool.name) {
+            let existing_plugin = plugin_of(previous);
+            warn_collision(&tool.name, &existing_plugin, &plugin);
+            self.collisions.push(ToolCollision {
+                name: tool.name.clone(),
+                existing_plugin,
+                incoming_plugin: plugin,
+            });
+        }
         self.tools.insert(tool.name.clone(), tool);
     }
 
     /// Register multiple tools at once (for batch loading from a server).
     pub fn register_all(&mut self, tools: Vec<McpTool>) {
         for tool in tools {
-            self.tools.insert(tool.name.clone(), tool);
+            self.register(tool);
         }
     }
 
@@ -512,13 +742,32 @@ impl McpRegistry {
     }
 
     /// Get a tool by name.
+    ///
+    /// Exact (canonical) match first; during the one-release alias window a
+    /// LEGACY name (`{plugin}_{tool-with-dashes}`) also resolves, so callers
+    /// and configs written before the separator flip keep working.
     pub fn get(&self, name: &str) -> Option<&McpTool> {
-        self.tools.get(name)
+        if let Some(tool) = self.tools.get(name) {
+            return Some(tool);
+        }
+        self.tools
+            .values()
+            .find(|tool| tool.legacy_names().iter().any(|alias| alias == name))
     }
 
     /// Get all tools.
     pub fn all(&self) -> Vec<&McpTool> {
         self.tools.values().collect()
+    }
+
+    /// Tools rejected by the exposed-name grammar at registration time.
+    pub fn invalid_tools(&self) -> &[InvalidTool] {
+        &self.invalid
+    }
+
+    /// Exposed-name collisions observed while registering.
+    pub fn collisions(&self) -> &[ToolCollision] {
+        &self.collisions
     }
 
     /// Priority ranking for tool ordering: all tools have equal priority.
@@ -540,7 +789,11 @@ impl McpRegistry {
         let mut tools: Vec<&McpTool> = self
             .tools
             .values()
-            .filter(|t| allowed_names.contains(&t.name))
+            .filter(|t| {
+                allowed_names.iter().any(|name| {
+                    name == &t.name || t.legacy_names().iter().any(|alias| alias == name)
+                })
+            })
             .collect();
         tools.sort_by_key(|t| Self::tool_priority(&t.name));
         tools
@@ -631,10 +884,44 @@ impl McpRegistry {
         )))
     }
 
+    /// True when an exposed name may be sent to a provider: non-empty,
+    /// inside `[A-Za-z0-9_-]` and at most `MAX_EXPOSED_TOOL_NAME_LEN` chars.
+    fn is_exposable(name: &str) -> bool {
+        !name.is_empty()
+            && name.len() <= MAX_EXPOSED_TOOL_NAME_LEN
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    }
+
+    /// Second line of defence behind `McpRegistry::register`: drop (and
+    /// loudly report) any tool whose exposed name must not reach a provider.
+    fn exposable(tools: Vec<&McpTool>) -> Vec<&McpTool> {
+        tools
+            .into_iter()
+            .filter(|tool| {
+                if Self::is_exposable(&tool.name) {
+                    true
+                } else {
+                    let (plugin, short) = tool.components();
+                    warn_invalid_tool(
+                        &plugin,
+                        &short,
+                        &format!(
+                            "exposed name '{}' is not provider-safe ([A-Za-z0-9_-]{{1,{}}})",
+                            tool.name, MAX_EXPOSED_TOOL_NAME_LEN
+                        ),
+                    );
+                    false
+                }
+            })
+            .collect()
+    }
+
     /// Build the OpenAI-compatible tools array for an OPTIONAL allow-list:
     /// `None` = every registered tool, `Some([])` = no tool at all.
     pub fn to_openai_tools_opt(&self, allowed_names: Option<&[String]>) -> Vec<Value> {
-        self.allowed_opt(allowed_names)
+        Self::exposable(self.allowed_opt(allowed_names))
             .iter()
             .map(|tool| {
                 serde_json::json!({
@@ -651,7 +938,7 @@ impl McpRegistry {
 
     /// Build the OpenAI-compatible tools array for the LLM.
     pub fn to_openai_tools(&self, allowed_names: &[String]) -> Vec<Value> {
-        self.allowed(allowed_names)
+        Self::exposable(self.allowed(allowed_names))
             .iter()
             .map(|tool| {
                 serde_json::json!({
@@ -669,7 +956,7 @@ impl McpRegistry {
     /// Build all tools for OpenAI format.
     #[allow(dead_code)]
     pub fn to_openai_tools_all(&self) -> Vec<Value> {
-        self.all()
+        Self::exposable(self.all())
             .iter()
             .map(|tool| {
                 serde_json::json!({
@@ -683,6 +970,28 @@ impl McpRegistry {
             })
             .collect()
     }
+}
+
+/// Loudly report a tool rejected by the exposed-name grammar (plugin, tool
+/// and failed rule). The tool is not registered and never reaches a provider;
+/// `McpRegistry::invalid_tools` and the dashboard surface it.
+fn warn_invalid_tool(plugin: &str, tool: &str, reason: &str) {
+    tracing::warn!(
+        "tool '{}__{}' REJECTED: {} (not registered, not exposed to the agent)",
+        plugin,
+        tool,
+        reason
+    );
+}
+
+/// Loudly report two registrations under one exposed name.
+fn warn_collision(name: &str, existing_plugin: &str, incoming_plugin: &str) {
+    tracing::error!(
+        "tool-name collision on '{}': plugin '{}' overwrote plugin '{}'",
+        name,
+        incoming_plugin,
+        existing_plugin
+    );
 }
 
 /// Build the `poll-task` tool: check the status of a background task.
@@ -756,7 +1065,7 @@ fn wait_task_tool() -> McpTool {
 fn wait_for_status_tool() -> McpTool {
     McpTool {
         name: tool_qualify("builtin", "wait_for_status"),
-        description: "Wait until a KANBAN TASK or THREAD reaches one of the target statuses; returns as soon as it does (checks the real DB status about every second). This is the first-class way to 'listen' to kanban/thread state changes - use it when you must act when a task or thread transitions (incident 1136/1146). It does NOT track background tool tasks: use builtin_wait-task / builtin_poll-task for docker/ssh exec processes that returned status=processing. Pass exactly one of task_id (kanban task, statuses e.g. done/blocked/review/testing/running/todo) or thread_id (conversation thread, statuses e.g. pending/processing/completed/failed/skipped). 'until' is a comma-separated list of target statuses. Bounded by timeout_s (default 900): on timeout it returns a timeout STATUS (not an error) - then re-check the real state (kanban_list-kanban-tasks / GET /kanban/tasks/{id}) and re-wait in bounded chunks only if the wait still makes sense.".to_string(),
+        description: "Wait until a KANBAN TASK or THREAD reaches one of the target statuses; returns as soon as it does (checks the real DB status about every second). This is the first-class way to 'listen' to kanban/thread state changes - use it when you must act when a task or thread transitions (incident 1136/1146). It does NOT track background tool tasks: use builtin__wait-task / builtin__poll_task for docker/ssh exec processes that returned status=processing. Pass exactly one of task_id (kanban task, statuses e.g. done/blocked/review/testing/running/todo) or thread_id (conversation thread, statuses e.g. pending/processing/completed/failed/skipped). 'until' is a comma-separated list of target statuses. Bounded by timeout_s (default 900): on timeout it returns a timeout STATUS (not an error) - then re-check the real state (kanban_list-kanban-tasks / GET /kanban/tasks/{id}) and re-wait in bounded chunks only if the wait still makes sense.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -1571,44 +1880,143 @@ mod tests {
         assert!(result.contains(&format!("{}", content.len())));
     }
 
-    // ─── tool_qualify tests ───
+    // --- tool_qualify / validate_component / tool_dequalify tests ---
 
     #[test]
-    fn test_tool_qualify_normal() {
-        assert_eq!(tool_qualify("filesystem", "read"), "filesystem_read");
+    fn test_tool_qualify_uses_double_underscore_separator() {
+        assert_eq!(tool_qualify("filesystem", "read"), "filesystem__read");
+        assert_eq!(
+            tool_qualify("search", "channel_prompts"),
+            "search__channel_prompts"
+        );
+        assert_eq!(tool_qualify("builtin", "poll_task"), "builtin__poll_task");
+    }
+
+    #[test]
+    fn test_tool_qualify_keeps_declared_names_verbatim() {
+        // VALIDATE, DON'T MANGLE: underscores stay underscores.
+        assert_eq!(tool_qualify("server", "my_tool"), "server__my_tool");
+        assert_eq!(
+            tool_qualify("builtin", "omniagent_api"),
+            "builtin__omniagent_api"
+        );
     }
 
     #[test]
     fn test_tool_qualify_redundant_prefix() {
         assert_eq!(
             tool_qualify("filesystem", "filesystem_read"),
-            "filesystem_read"
+            "filesystem__read"
         );
-    }
-
-    #[test]
-    fn test_tool_qualify_redundant_prefix_with_dash() {
-        assert_eq!(tool_qualify("my-srv", "my-srv-read"), "my-srv_read");
+        assert_eq!(tool_qualify("my-srv", "my-srv-read"), "my-srv__read");
     }
 
     #[test]
     fn test_tool_qualify_empty_after_stripping() {
-        assert_eq!(tool_qualify("fetch", "fetch"), "fetch_fetch");
+        assert_eq!(tool_qualify("fetch", "fetch"), "fetch__fetch");
     }
 
     #[test]
-    fn test_tool_qualify_underscore_to_dash_in_tool_name() {
-        assert_eq!(tool_qualify("server", "my_tool"), "server_my-tool");
+    fn test_tool_round_trip_is_lossless() {
+        for (plugin, tool) in [
+            ("builtin", "poll_task"),
+            ("search", "channel_prompts"),
+            ("filesystem", "read"),
+            ("semantic_search", "semantic_search_index"),
+        ] {
+            let exposed = tool_qualify(plugin, tool);
+            let (p, t) = tool_dequalify(&exposed).expect("must decode");
+            assert_eq!(p, plugin, "decoded plugin of '{}'", exposed);
+            assert!(
+                validate_component(t).is_ok(),
+                "decoded tool '{}' must be valid",
+                t
+            );
+        }
     }
 
     #[test]
-    fn test_tool_qualify_redundant_with_dash_separator() {
-        assert_eq!(tool_qualify("server", "server.my_tool"), "server_my-tool");
+    fn test_validate_component_rejects_reserved_separator() {
+        let err = validate_component("my__plugin").unwrap_err();
+        assert!(err.contains("separator"), "unexpected error: {}", err);
     }
 
     #[test]
-    fn test_tool_qualify_redundant_with_underscore_separator() {
-        assert_eq!(tool_qualify("server", "server_my_tool"), "server_my-tool");
+    fn test_validate_component_rejects_leading_underscore() {
+        assert!(validate_component("_plugin").is_err());
+        assert!(validate_component("_").is_err());
+    }
+
+    #[test]
+    fn test_validate_component_rejects_trailing_underscore() {
+        let err = validate_component("my_plugin_").unwrap_err();
+        assert!(err.contains("ends with '_'"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn test_validate_component_rejects_charset_and_empty() {
+        assert!(validate_component("").is_err());
+        assert!(validate_component("my.plugin").is_err());
+        assert!(validate_component("my plugin").is_err());
+        assert!(validate_component("my/plugin").is_err());
+        assert!(validate_component("-ok-name_1").is_ok());
+    }
+
+    #[test]
+    fn test_exposed_name_length_guard_accepts_64_rejects_65() {
+        let plugin = "a".repeat(60);
+        assert_eq!(plugin.len() + 2 + 3, 65);
+        assert!(validate_exposed_name(&plugin, "ab").is_ok());
+        assert!(validate_exposed_name(&plugin, "abc").is_err());
+    }
+
+    #[test]
+    fn test_invalid_component_is_rejected_and_recorded() {
+        let mut reg = McpRegistry::new();
+        reg.register(make_tool("my_tool", Some("my_plugin_"), None));
+        assert!(reg.all().is_empty(), "invalid tool must not be registered");
+        let invalid = reg.invalid_tools();
+        assert_eq!(invalid.len(), 1);
+        assert_eq!(invalid[0].plugin, "my_plugin_");
+        assert_eq!(invalid[0].tool, "my_tool");
+        assert!(invalid[0].reason.contains("ends with '_'"));
+    }
+
+    #[test]
+    fn test_duplicate_registration_is_reported_not_silent() {
+        let mut reg = McpRegistry::new();
+        reg.register(make_tool("builtin__poll_task", None, None));
+        reg.register(make_tool("builtin__poll_task", None, None));
+        assert_eq!(reg.all().len(), 1);
+        assert_eq!(reg.collisions().len(), 1);
+        assert_eq!(reg.collisions()[0].name, "builtin__poll_task");
+    }
+
+    #[test]
+    fn test_legacy_alias_window_resolves_pre_flip_names() {
+        let mut reg = McpRegistry::new();
+        reg.register(make_tool("poll_task", Some("builtin"), None));
+        assert!(reg.get("builtin__poll_task").is_some());
+        assert!(
+            reg.get("builtin_poll-task").is_some(),
+            "the pre-flip name must still resolve during the alias window"
+        );
+        assert_eq!(reg.allowed(&["builtin_poll-task".to_string()]).len(), 1);
+    }
+
+    #[test]
+    fn test_to_openai_tools_excludes_invalid_names() {
+        let mut reg = McpRegistry::new();
+        reg.register(make_tool("read", Some("filesystem"), None));
+        let long = "x".repeat(70);
+        reg.register(make_tool(&long, Some("filesystem"), None));
+        let names: Vec<String> = reg
+            .to_openai_tools_all()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, vec!["filesystem__read".to_string()]);
+        assert!(names.iter().all(|n| n.len() <= MAX_EXPOSED_TOOL_NAME_LEN));
     }
 
     // ─── levenshtein_distance tests ───
@@ -1733,11 +2141,11 @@ mod tests {
         };
         reg.register(zap);
 
-        assert!(reg.own_stack_tools().contains("docker_compose"));
+        assert!(reg.own_stack_tools().contains("docker__compose"));
         assert!(reg
             .family_tools("subtasks")
-            .contains("subtasks_zap-thread-items"));
-        assert!(!reg.own_stack_tools().contains("subtasks_zap-thread-items"));
+            .contains("subtasks__zap_thread_items"));
+        assert!(!reg.own_stack_tools().contains("subtasks__zap_thread_items"));
     }
 
     fn make_tool(name: &str, server: Option<&str>, timeout: Option<u64>) -> McpTool {

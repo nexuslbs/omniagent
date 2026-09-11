@@ -202,6 +202,7 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
             post(prompt_preview_handler),
         )
         .route("/mcp/tools", get(list_mcp_tools_handler))
+        .route("/mcp/tools/invalid", get(list_invalid_mcp_tools_handler))
         .route("/mcp/execute", post(execute_mcp_tool_handler))
         // ── Context preview (section [3] only, no messages written) ──
         .route("/api/context/{channel_name}", get(context_preview_handler))
@@ -1184,6 +1185,24 @@ async fn list_mcp_tools_handler(State(state): State<Arc<AppState>>) -> Json<serd
         })
         .collect();
     Json(serde_json::json!(tools))
+}
+
+/// GET /mcp/tools/invalid: tools REJECTED by the exposed-name grammar.
+///
+/// A tool whose exposed name `{plugin}__{tool}` is empty, contains the reserved
+/// separator inside a component, starts or ends with `_`, leaves the
+/// `[A-Za-z0-9_-]` charset or exceeds 64 chars is NEVER registered, never sent
+/// to a provider and never listed in the agent's available tools. This endpoint
+/// is how the dashboard surfaces plugin, tool and the failed rule to the
+/// operator.
+async fn list_invalid_mcp_tools_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let registry = state.plugin_manager.snapshot_registry().await;
+    Json(serde_json::json!({
+        "invalid": registry.invalid_tools(),
+        "collisions": registry.collisions(),
+    }))
 }
 
 /// Request body for `POST /mcp/execute`.

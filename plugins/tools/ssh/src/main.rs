@@ -830,7 +830,7 @@ async fn main() -> Result<()> {
                     cd's to a remote dir first. 'script' (optional) pipes a multi-line script \
                     to the remote `sh` via stdin (alternative to command). 'timeout' (optional) \
                     bounds the command in seconds - when omitted there is NO timeout (long \
-                    commands run as tracked background tasks; use builtin_wait-task to follow). \
+                    commands run as tracked background tasks; use builtin__wait_task to follow). \
                     'ssh_dir' (optional) overrides the configured ssh dir (default \
                     {OMNI_DIR}/data/ssh). 'ssh_key_secret_name' (optional): name of a secret in the omniagent secrets store \
                     (e.g. SSH_PRIVATE_KEY) whose VALUE is the private SSH key used for \

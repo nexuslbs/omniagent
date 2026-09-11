@@ -54,7 +54,7 @@ data queries only for structured aggregations (counts, sums, averages, groupings
 operation. Do NOT write placeholder content expecting to fill in values afterward. \
 EXCEPTION - LARGE OUTPUTS: if the file content is too large to fit in a single \
 response (approaching your output token limit), split it across multiple \
-filesystem_write calls: first with append=false, then append=true for each \
+filesystem__write calls: first with append=false, then append=true for each \
 subsequent chunk. Never abandon a large write - chunk it. Never let an output \
 length limit cause task failure.\n\
 4. RENAME INSTEAD OF RECREATE: When a file or directory already exists and you \
@@ -71,13 +71,13 @@ present what you will do and wait for confirmation.\n\
 try once more with a different approach, then move on. Do NOT retry the same \
 failing call more than once. There is no hidden state that changes between retries.\n\
 10. TAKE NOTES: maintain a durable working memory with the note_* tools \
-(notes_note-write/notes_note-append/notes_note-read/notes_note-list/notes_note-rm) after every non-trivial \
+(notes__note_write/notes__note_append/notes__note_read/notes__note_list/notes__note_rm) after every non-trivial \
 discovery (paths, line numbers, commands, root causes, decisions). Notes \
 survive compaction and thread death - the retry thread starts with them.\n\
-11. VERIFY-ONCE: read a file ONCE with `filesystem_read` (offset/limit paging - ONE
+11. VERIFY-ONCE: read a file ONCE with `filesystem__read` (offset/limit paging - ONE
 call per page) and write the facts you need into your working notes; never re-read the
-same file or line range. NEVER use `docker_compose exec ... sed -n` / `grep -n` to read
-file contents: docker_compose is for RUNNING commands/builds, not reading files.
+same file or line range. NEVER use `docker__compose exec ... sed -n` / `grep -n` to read
+file contents: docker__compose is for RUNNING commands/builds, not reading files.
 Re-reading overlapping line ranges of the same file is the #1 budget killer (threads have
 died at 120/120 after 100+ sed windows with zero commits). Consult your notes, not the
 disk, when you need content again.\n\
@@ -86,7 +86,7 @@ thread - a second read returns a '[duplicate read ...]' marker, not content. \
 Trust the injected '=== Context Compacted ===' summary and your notes instead; \
 re-reading dumps is a forbidden anti-loop that wastes iterations.\n\
 13. SUBTASKS: after planning a multi-step task, create one subtask per plan step \
-with the subtasks tool (subtasks_manage-subtasks, action=\"add\"); as you finish \
+with the subtasks tool (subtasks__manage_subtasks, action=\"add\"); as you finish \
 each step mark its subtask completed (action=\"update\", subtask_id=N, \
 status=\"completed\"); cancel any subtask that is no longer needed \
 (status=\"cancelled\"); before your final answer, complete or cancel ALL subtasks \
@@ -415,7 +415,7 @@ mod tests {
             None,
             Some("system override"),
             "omni",
-            &["fetch".to_string(), "filesystem_read".to_string()],
+            &["fetch".to_string(), "filesystem__read".to_string()],
             &PromptBuilderConfig::default(),
         );
         let parts = build_system_prompt_parts(
@@ -424,7 +424,7 @@ mod tests {
             None,
             Some("system override"),
             "omni",
-            &["fetch".to_string(), "filesystem_read".to_string()],
+            &["fetch".to_string(), "filesystem__read".to_string()],
             &PromptBuilderConfig::default(),
         );
         // Same push order → same joined text (legacy byte-identical).

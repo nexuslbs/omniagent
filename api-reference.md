@@ -19,7 +19,7 @@ docker exec <container> ls /opt/omni/docs
 ## Calling conventions
 
 - Base URL: `http://localhost:8080` (internal only).
-- From inside the agent: use the `builtin_omniagent-api` tool with
+- From inside the agent: use the `builtin__omniagent_api` tool with
   `method` + `path` (+ optional `body`) - no host/scheme/port needed.
 - From a shell: `docker exec <container> curl -s http://localhost:8080/kanban/tasks`
 - All JSON bodies are `application/json`. Responses are

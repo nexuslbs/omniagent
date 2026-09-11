@@ -194,15 +194,15 @@ pub(crate) async fn assess(ctx: &AppContext, raw: &str, continuation_gate: bool)
     }
 }
 
-/// Call `{server}_{tool}` with `{"text": text}` and parse its verdict.
+/// Call `{plugin}__{tool}` with `{"text": text}` and parse its verdict.
 async fn call_malformed_response_tool(
     ctx: &AppContext,
     qualified_tool: &str,
     text: &str,
 ) -> Result<ToolVerdict, String> {
-    let (server, tool) = qualified_tool.split_once('_').ok_or_else(|| {
+    let (server, tool) = crate::mcp::tool_dequalify(qualified_tool).ok_or_else(|| {
         format!(
-            "malformed-response tool '{}' must be of the form '{{server}}_{{tool}}'",
+            "malformed-response tool '{}' must be of the form '{{plugin}}__{{tool}}'",
             qualified_tool
         )
     })?;

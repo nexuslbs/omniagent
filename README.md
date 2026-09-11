@@ -162,7 +162,7 @@ VALUES (
   'research',
   'anthropic',
   'claude-sonnet-4',
-  '["filesystem_read", "filesystem_write", "fetch", "search_messages", "search_wiki"]'
+  '["filesystem__read", "filesystem_write", "fetch", "search__messages", "search__wiki"]'
 );
 ```
 

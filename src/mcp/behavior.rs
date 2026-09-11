@@ -133,14 +133,21 @@ pub fn behavior_map(entries: &[ToolManifestEntry]) -> ToolBehaviorMap {
 }
 
 /// Resolve a tool's declared behaviour: the descriptor's own name wins,
-/// otherwise the qualified registry name (`{server}_{tool}`) is matched so a
-/// manifest may declare either form.
+/// otherwise the qualified registry name (`{plugin}__{tool}`) is matched so a
+/// manifest may declare either form. During the one-release alias window the
+/// PRE-FLIP qualified name (`{plugin}_{tool-with-dashes}`) also resolves.
 pub fn for_tool(map: &ToolBehaviorMap, server: &str, tool_name: &str) -> ToolBehavior {
     if let Some(behavior) = map.get(tool_name) {
         return behavior.clone();
     }
     for (name, behavior) in map {
         if crate::mcp::tool_qualify(server, name) == tool_name {
+            return behavior.clone();
+        }
+        // LEGACY ALIAS WINDOW (one release): a name produced by the old
+        // grammar still resolves, so descriptors keep working for callers
+        // and configs written before the separator flip.
+        if crate::mcp::tool_legacy_alias(server, name) == tool_name {
             return behavior.clone();
         }
     }
@@ -243,6 +250,8 @@ mod tests {
         // Raw plugin name.
         assert!(for_tool(&map, "notes", "note_read").read_only);
         // Qualified registry name (plugin reports the bare tool name).
+        assert!(for_tool(&map, "notes", "notes__note_read").read_only);
+        // Legacy (pre-flip) qualified name: the one-release alias window.
         assert!(for_tool(&map, "notes", "notes_note-read").read_only);
         // Unknown tool: fail closed (no declared behaviour).
         assert!(!for_tool(&map, "notes", "notes_note-write").read_only);

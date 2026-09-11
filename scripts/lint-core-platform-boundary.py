@@ -42,7 +42,7 @@ provider or tool BY NAME" class:
       the plugin/config declared is fine; a silent fallback to a provider is
       not.
 
-  R5. No first-party tool-name literal in core (`tool_name == "docker_compose"`
+  R5. No first-party tool-name literal in core (`tool_name == "docker__compose"`
       C1, the hand-maintained read-only allowlists C2/C3, a literal
       prompt-tool fallback C5). Tool behavior comes from the plugin tool
       descriptors (audit V-2). Documented exception: a tool name used as the
@@ -117,17 +117,18 @@ PROVIDER_NAMES = frozenset({
 # First-party tool ids named by the audit (C1-C5). Extend as the toolset grows;
 # a tool id that is not listed here is simply not guarded yet.
 TOOL_NAMES = frozenset({
-    "docker_compose",
-    "filesystem_read", "filesystem_list", "filesystem_search",
-    "filesystem_info", "filesystem_grep",
-    "search_messages", "search_wiki", "search_database",
-    "search_channel-prompts", "search_thread-messages",
-    "note_read", "notes_note-read", "notes_note-list", "notes_note-write",
-    "memory_list-memories", "memory_manage-memory",
-    "skills_list-skills", "skills_view-skill",
-    "manage_subtasks", "subtasks_manage-subtasks", "subtasks_list-subtasks",
-    "subtasks_add-subtask", "prompt_generate", "prompt_compact-messages",
-    "git_status", "git_run-command",
+    "docker__compose",
+    "filesystem__read", "filesystem__list", "filesystem__search",
+    "filesystem__info", "filesystem__grep",
+    "search__messages", "search__wiki", "search__database",
+    "search__channel_prompts", "search__thread_messages",
+    "note_read", "notes__note_read", "notes__note_list", "notes_note-write",
+    "memory__list_memories", "memory_manage-memory",
+    "skills__list_skills", "skills__view_skill",
+    "manage_subtasks", "subtasks__manage_subtasks", "subtasks__list_subtasks",
+    "subtasks__add_subtask", "prompt_generate", "prompt_compact-messages",
+    "prompt__generate", "prompt__compact_messages",
+    "git__status", "git__run_command",
 })
 
 PLATFORM_LHS = r"\b(?:plugin_name|platform|platform_name|channel_platform|plat)\b"

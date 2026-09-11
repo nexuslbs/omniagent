@@ -823,6 +823,6 @@ in the next release image.
 - Profile wiki (omni-root `wiki/Projects/Omniagent/`): standing improvement
   plans (e.g. `Omniagent-Code-Improvement-Plan.md`) and deep dives.
 - `wiki/Memory/Promoted/`: validated cross-thread memories surfaced by
-  `search_wiki`; MEMORY.md holds only short cross-cutting rules.
+  `search__wiki`; MEMORY.md holds only short cross-cutting rules.
 - `CHANGELOG.md` / `RELEASE.md`: release notes. User docs: `README.md` +
   `api-reference.md` (curated from `src/server/*.rs` routers).

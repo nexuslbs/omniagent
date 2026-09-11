@@ -60,20 +60,20 @@ fn read_only_tool_under_a_new_id_is_guarded() {
 
     let guarded = registry.guarded_read_only_tools();
     assert!(
-        guarded.contains("zorp_inspect-widget"),
+        guarded.contains("zorp__inspect_widget"),
         "a declared read-only tool must be guarded whatever its id: {guarded:?}"
     );
-    assert!(is_guarded_read_only(&guarded, "zorp_inspect-widget"));
+    assert!(is_guarded_read_only(&guarded, "zorp__inspect_widget"));
     assert!(
-        !is_guarded_read_only(&guarded, "zorp_mutate-widget"),
+        !is_guarded_read_only(&guarded, "zorp__mutate_widget"),
         "an undeclared tool must not be treated as read-only"
     );
     assert!(registry
         .read_only_tools()
-        .contains(&"zorp_inspect-widget".to_string()));
+        .contains(&"zorp__inspect_widget".to_string()));
     assert!(!registry
         .read_only_tools()
-        .contains(&"zorp_mutate-widget".to_string()));
+        .contains(&"zorp__mutate_widget".to_string()));
 }
 
 /// (b) The self-restart guard follows the descriptor: a container tool renamed
@@ -96,12 +96,12 @@ fn renamed_own_stack_tool_still_triggers_the_self_restart_guard() {
     registry.register(mcp_tool("containers", "ps"));
 
     let own_stack = registry.own_stack_tools();
-    assert!(own_stack.contains("docker_compose"));
+    assert!(own_stack.contains("docker__compose"));
     assert!(
-        own_stack.contains("containers_compose-stack"),
+        own_stack.contains("containers__compose_stack"),
         "the self-restart guard must follow the declared behaviour, not the name"
     );
-    assert!(!own_stack.contains("containers_ps"));
+    assert!(!own_stack.contains("containers__ps"));
 }
 
 /// (c) A coordination tool declared with `"family": "subtasks"` is recognised
@@ -122,9 +122,9 @@ fn subtask_family_tools_are_recognised_under_any_id() {
     registry.register(renamed);
 
     let family = registry.family_tools("subtasks");
-    assert!(family.contains("subtasks_manage-subtasks"));
+    assert!(family.contains("subtasks__manage_subtasks"));
     assert!(
-        family.contains("coordination_zap-thread-items"),
+        family.contains("coordination__zap_thread_items"),
         "a renamed subtask tool must still reset the reminder counter: {family:?}"
     );
     assert!(registry.family_tools("kanban").is_empty());
@@ -135,22 +135,22 @@ fn subtask_family_tools_are_recognised_under_any_id() {
 #[test]
 fn shipped_manifests_reproduce_the_legacy_guarded_read_set() {
     let expected: BTreeSet<&str> = [
-        "filesystem_read",
-        "filesystem_info",
-        "filesystem_list",
-        "filesystem_search",
-        "git_status",
-        "git_run-command",
-        "git_sync",
-        "memory_list-memories",
-        "notes_note-read",
-        "search_messages",
-        "search_wiki",
-        "search_database",
-        "search_thread-messages",
-        "search_channel-prompts",
-        "skills_list-skills",
-        "skills_view-skill",
+        "filesystem__read",
+        "filesystem__info",
+        "filesystem__list",
+        "filesystem__search",
+        "git__status",
+        "git__run_command",
+        "git__sync",
+        "memory__list_memories",
+        "notes__note_read",
+        "search__messages",
+        "search__wiki",
+        "search__database",
+        "search__thread_messages",
+        "search__channel_prompts",
+        "skills__list_skills",
+        "skills__view_skill",
     ]
     .into_iter()
     .collect();

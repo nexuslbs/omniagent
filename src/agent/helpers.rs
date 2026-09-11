@@ -392,17 +392,17 @@ pub(crate) async fn platform_prompt_hint(ctx: &AppContext, platform: &str) -> Op
 
 /// Invoke the configured redaction MCP tool on `content`.
 ///
-/// The configured tool name is qualified as `{server}_{tool}` (e.g.
-/// "redaction_redact"). The tool receives `{"text": <content>}` and returns
+/// The configured tool name is qualified as `{plugin}__{tool}` (e.g.
+/// "redaction__redact"). The tool receives `{"text": <content>}` and returns
 /// the redacted text as its tool result.
 async fn redact_with_tool(
     ctx: &AppContext,
     qualified_tool: &str,
     content: &str,
 ) -> Result<String, String> {
-    let (server, tool) = qualified_tool.split_once('_').ok_or_else(|| {
+    let (server, tool) = crate::mcp::tool_dequalify(qualified_tool).ok_or_else(|| {
         format!(
-            "redaction tool '{}' must be of the form '{{server}}_{{tool}}'",
+            "redaction tool '{}' must be of the form '{{plugin}}__{{tool}}'",
             qualified_tool
         )
     })?;

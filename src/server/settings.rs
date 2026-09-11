@@ -351,7 +351,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
                 description: "Name of the MCP tool to call for generating prompts".into(),
                 options: None,
                 readonly: false,
-                default: Some("prompt_generate".into()),
+                default: Some("prompt__generate".into()),
             },
         ),
         (
@@ -361,7 +361,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
                 description: "Name of the MCP tool to call for compacting conversation history".into(),
                 options: None,
                 readonly: false,
-                default: Some("prompt_compact-messages".into()),
+                default: Some("prompt__compact_messages".into()),
             },
         ),
         (

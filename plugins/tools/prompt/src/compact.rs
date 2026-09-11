@@ -62,7 +62,14 @@ fn is_read_type_tool(name: &str, settings: &CompactSettings) -> bool {
 /// Legacy fallback (no descriptors supplied by the core): tools whose names
 /// start with these prefixes get the generous read excerpt.
 fn legacy_read_type_tool(name: &str) -> bool {
-    name.starts_with("filesystem_read")
+    // Current grammar `{plugin}__{tool}`.
+    name.starts_with("filesystem__")
+        || name.starts_with("search__")
+        || name.starts_with("skills__view")
+        || name.starts_with("git__status")
+        || name.starts_with("git__run_command")
+        // Pre-separator-flip names: the one-release alias window.
+        || name.starts_with("filesystem_read")
         || name.starts_with("filesystem_list")
         || name.starts_with("filesystem_search")
         || name.starts_with("filesystem_info")

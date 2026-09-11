@@ -1909,7 +1909,7 @@ messages.content in search_database: that full-table scan has no usable \
 index and costs ~30 s per call, so the 8 s statement timeout cancels it \
 and returns a hint to switch tools.\n\nFor common lookups prefer the \
 purpose-built tools: search_messages (keyword), \
-search_thread-messages (thread contents), search_channel-prompts (channel prompt history), \
+search__thread_messages (thread contents), search__channel_prompts (channel prompt history), \
 search_channels (channel ids)."
                     .to_string(),
                 input_schema: serde_json::json!({
@@ -1974,7 +1974,7 @@ to the CURRENT channel; pass channel_id for a different one."
             def: McpToolDef {
                 name: "search_channels".to_string(),
                 description: "List all channels with their id, name, platform. \
-Use to discover channel_id values needed by channel-scoped tools (search_channel-prompts, \
+Use to discover channel_id values needed by channel-scoped tools (search__channel_prompts, \
 search_messages)."
                     .to_string(),
                 input_schema: serde_json::json!({

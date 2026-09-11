@@ -1,7 +1,7 @@
 //! POST /git/sync: the canonical git sync entrypoint.
 //!
 //! Executes the configurable sync tool (settings `git_sync_tool`, default
-//! `git_sync` from the builtin git plugin) via the MCP registry. This is the
+//! `git__sync` from the builtin git plugin) via the MCP registry. This is the
 //! SAME call the dashboard explorer sync button (bottom of the left panel)
 //! and the toolbox backup/restore hooks use, so the whole stack shares one
 //! sync implementation and one token-recovery path.
@@ -16,26 +16,26 @@ use crate::mcp::McpToolCall;
 pub(crate) fn fallback_sync_tool_name(raw: Option<&str>) -> String {
     match raw {
         Some(v) if !v.trim().is_empty() => v.trim().to_string(),
-        _ => "git_sync".to_string(),
+        _ => "git__sync".to_string(),
     }
 }
 
 /// Resolve the configured git sync tool name (settings `git_sync_tool`,
-/// default `git_sync`), resolving `$env:`/`$secret:` refs against the DB.
+/// default `git__sync`), resolving `$env:`/`$secret:` refs against the DB.
 pub(crate) async fn resolve_sync_tool_name(data_dir: &str, pool: &sqlx::PgPool) -> String {
     let raw = crate::server::settings::load_settings_file(data_dir)
         .get("git_sync_tool")
         .cloned();
     let value = match raw {
         Some(v) => crate::server::settings::resolve_setting_value(&v, pool).await,
-        None => "git_sync".to_string(),
+        None => "git__sync".to_string(),
     };
     fallback_sync_tool_name(Some(&value))
 }
 
 /// POST /git/sync: run the configured sync tool (fetch/pull --rebase/push).
 ///
-/// The tool runs with empty arguments: `git_sync` defaults to the omni_dir
+/// The tool runs with empty arguments: `git__sync` defaults to the omni_dir
 /// config repo (the same repo the explorer syncs). Token regeneration on
 /// expired/revoked tokens happens inside the git plugin itself, so a 401
 /// mid-sync is retried transparently and the caller sees a 200.
@@ -86,14 +86,14 @@ mod tests {
 
     #[test]
     fn fallback_defaults_to_git_sync() {
-        assert_eq!(fallback_sync_tool_name(None), "git_sync");
-        assert_eq!(fallback_sync_tool_name(Some("")), "git_sync");
-        assert_eq!(fallback_sync_tool_name(Some("   ")), "git_sync");
+        assert_eq!(fallback_sync_tool_name(None), "git__sync");
+        assert_eq!(fallback_sync_tool_name(Some("")), "git__sync");
+        assert_eq!(fallback_sync_tool_name(Some("   ")), "git__sync");
     }
 
     #[test]
     fn fallback_keeps_configured_tool() {
-        assert_eq!(fallback_sync_tool_name(Some("git_sync")), "git_sync");
+        assert_eq!(fallback_sync_tool_name(Some("git__sync")), "git__sync");
         assert_eq!(
             fallback_sync_tool_name(Some("my_plugin_sync")),
             "my_plugin_sync"

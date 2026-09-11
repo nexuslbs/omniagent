@@ -842,19 +842,19 @@ mod tests {
         // descriptor must resolve to the registry name docker_compose so the
         // self-restart guard protects the stack the agent runs in.
         let docker = manifest_tool_behavior(&dir("docker"));
-        let compose = crate::mcp::behavior::for_tool(&docker, "docker", "docker_compose");
+        let compose = crate::mcp::behavior::for_tool(&docker, "docker", "docker__compose");
         assert!(compose.affects_own_stack);
 
         let subtasks = manifest_tool_behavior(&dir("subtasks"));
         let manage =
-            crate::mcp::behavior::for_tool(&subtasks, "subtasks", "subtasks_manage-subtasks");
+            crate::mcp::behavior::for_tool(&subtasks, "subtasks", "subtasks__manage_subtasks");
         assert_eq!(manage.family.as_deref(), Some("subtasks"));
 
         let fs = manifest_tool_behavior(&dir("filesystem"));
-        let read = crate::mcp::behavior::for_tool(&fs, "filesystem", "filesystem_read");
+        let read = crate::mcp::behavior::for_tool(&fs, "filesystem", "filesystem__read");
         assert!(read.read_only && read.repeat_guard_enabled());
         // No descriptor for the write tool: fail closed.
-        assert!(!crate::mcp::behavior::for_tool(&fs, "filesystem", "filesystem_write").read_only);
+        assert!(!crate::mcp::behavior::for_tool(&fs, "filesystem", "filesystem__write").read_only);
     }
 
     #[test]

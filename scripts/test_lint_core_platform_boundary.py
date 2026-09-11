@@ -11,7 +11,7 @@ Reference/Omniagent/Hardcoded-Dependency-Audit.md, sections 4-6):
                                                             B3 cli, B4/B5)
   R4  provider-name comparison / provider catch-all        (A1 anthropic,
                                                             A3 fallback openai)
-  R5  hardcoded tool-name literal                          (C1 docker_compose .. C5)
+  R5  hardcoded tool-name literal                          (C1 docker__compose .. C5)
   R6  hardcoded service endpoint                           (D1 qdrant, D2 localhost:8080)
 
 The fixtures prove the lint FAILS on the pre-fix shapes (a tree without the
@@ -201,10 +201,10 @@ class TestR5ToolNameLiterals(unittest.TestCase):
 
     def test_tool_literals_in_core_are_flagged(self):
         for name, code in (
-            ("docker_compose", 'guard("docker_compose");'),
-            ("filesystem_read", 'if tc.function.name == "filesystem_read" {'),
-            ("subtasks_manage-subtasks",
-             'tc.function.name == "subtasks_manage-subtasks"'),
+            ("docker__compose", 'guard("docker__compose");'),
+            ("filesystem__read", 'if tc.function.name == "filesystem__read" {'),
+            ("subtasks__manage_subtasks",
+             'tc.function.name == "subtasks__manage_subtasks"'),
         ):
             v = scan_rules("src/agent/main_loop.rs", code + "\n", ("R5",))
             self.assertEqual(len(v), 1, name)
@@ -212,7 +212,7 @@ class TestR5ToolNameLiterals(unittest.TestCase):
 
     def test_python_twin_literals_are_flagged(self):
         v = scan_rules("tools/prompt/server.py",
-                       'READ_TOOL_PREFIXES = ("filesystem_read", "search_wiki")\n',
+                       'READ_TOOL_PREFIXES = ("filesystem__read", "search__wiki")\n',
                        ("R5",))
         self.assertEqual(len(v), 2, v)
 
@@ -231,7 +231,7 @@ class TestR5ToolNameLiterals(unittest.TestCase):
         text = ('fn real() {}\n'
                 '#[cfg(test)]\n'
                 'mod tests {\n'
-                '    fn t() { let n = "docker_compose"; }\n'
+                '    fn t() { let n = "docker__compose"; }\n'
                 '}\n')
         self.assertEqual(scan_rules("src/agent/main_loop.rs", text, ("R5",)), [])
 
@@ -286,15 +286,15 @@ class TestPluginOwnToolIds(unittest.TestCase):
             (fs / "src").mkdir(parents=True)
             (fs / "plugin.json").write_text(json.dumps({
                 "name": "filesystem",
-                "tools": [{"name": "filesystem_read"}],
+                "tools": [{"name": "filesystem__read"}],
             }), encoding="utf-8")
             (fs / "src" / "main.rs").write_text(
-                'let a = "filesystem_read";\nlet b = "filesystem_list";\n',
+                'let a = "filesystem__read";\nlet b = "filesystem__list";\n',
                 encoding="utf-8")
             notes = root / "plugins" / "tools" / "notes"
             (notes / "src").mkdir(parents=True)
             (notes / "src" / "main.rs").write_text(
-                'let c = "docker_compose";\n', encoding="utf-8")
+                'let c = "docker__compose";\n', encoding="utf-8")
 
             old = os.environ.pop("OMNI_PLUGINS_DIR", None)
             try:
@@ -305,7 +305,7 @@ class TestPluginOwnToolIds(unittest.TestCase):
 
             msgs = [v.display() for v in violations]
             self.assertEqual(len(msgs), 1, msgs)
-            self.assertIn("docker_compose", msgs[0])
+            self.assertIn("docker__compose", msgs[0])
             self.assertIn("notes", msgs[0])
 
 

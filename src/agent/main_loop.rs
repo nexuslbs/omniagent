@@ -2474,12 +2474,12 @@ Previous plan:\n{}",
 
                 let is_builtin_task_tool = matches!(
                     tool_name.as_str(),
-                    "builtin_wait-task"
-                        | "builtin_poll-task"
-                        | "builtin_cancel-task"
-                        | "builtin_read-task-logs"
-                        | "builtin_read-attached-file"
-                        | "builtin_wait-for-status"
+                    "builtin__wait-task"
+                        | "builtin__poll_task"
+                        | "builtin__cancel_task"
+                        | "builtin__read-task-logs"
+                        | "builtin__read-attached-file"
+                        | "builtin__wait-for-status"
                 );
 
                 let result = if is_builtin_task_tool {
