@@ -458,6 +458,19 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .await
         .ok();
 
+    // Messages: sub-cause reverse lookup (threads list "merged_into_thread_id":
+    // WHERE msg_type='sub_cause' AND original_thread_id = ?). Without it the
+    // correlated subquery sequentially scans the whole messages table per list
+    // row (3.6 GB / 107k rows in production -> ~1.4 s for a 50-row page).
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_messages_subcause_original_thread
+            ON messages(original_thread_id) WHERE msg_type = 'sub_cause';
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     tracing::info!(
         "[migration] Schema v5: messages.channel_id + seq-0 external_id dedup index added"
     );
@@ -796,7 +809,8 @@ async fn create_tables(pool: &PgPool) -> Result<()> {
             created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             msg_type          TEXT NOT NULL DEFAULT 'message',
             msg_subtype       TEXT,
-            iteration_number  INT NOT NULL DEFAULT 0
+            iteration_number  INT NOT NULL DEFAULT 0,
+            original_thread_id BIGINT
         );
         "#,
     )
@@ -1013,19 +1027,6 @@ async fn create_indexes(pool: &PgPool) -> Result<()> {
         r#"
         CREATE INDEX IF NOT EXISTS idx_messages_thread_id_desc
             ON messages(thread_id, id DESC);
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    // Messages: sub-cause reverse lookup (threads list "merged_into_thread_id":
-    // WHERE msg_type='sub_cause' AND original_thread_id = ?). Without it the
-    // correlated subquery sequentially scans the whole messages table per list
-    // row (3.6 GB / 107k rows in production -> ~1.4 s for a 50-row page).
-    sqlx::query(
-        r#"
-        CREATE INDEX IF NOT EXISTS idx_messages_subcause_original_thread
-            ON messages(original_thread_id) WHERE msg_type = 'sub_cause';
         "#,
     )
     .execute(pool)
