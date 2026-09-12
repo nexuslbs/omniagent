@@ -132,6 +132,10 @@ fn subtask_family_tools_are_recognised_under_any_id() {
 
 /// (d) No behaviour change: the descriptors shipped in `plugins/tools/*` must
 /// derive EXACTLY the guarded-read set the removed name allowlist produced.
+///
+/// The builtin Rust memory plugin was removed (remote Python plugin only), so
+/// `memory__list_memories` is no longer declared by any manifest shipped in
+/// this repository and is intentionally absent from the expected set.
 #[test]
 fn shipped_manifests_reproduce_the_legacy_guarded_read_set() {
     let expected: BTreeSet<&str> = [
@@ -142,7 +146,6 @@ fn shipped_manifests_reproduce_the_legacy_guarded_read_set() {
         "git__status",
         "git__run_command",
         "git__sync",
-        "memory__list_memories",
         "notes__note_read",
         "search__messages",
         "search__wiki",
@@ -197,7 +200,7 @@ fn shipped_manifests_reproduce_the_legacy_guarded_read_set() {
     }
 
     assert!(
-        declaring_plugins >= 8,
+        declaring_plugins >= 7,
         "most tool plugins must declare descriptors, only {declaring_plugins} did"
     );
     assert!(
