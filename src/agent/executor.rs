@@ -139,23 +139,14 @@ pub async fn process_thread(
         )
         .await;
 
-        // Custom per-provider HTTP headers: base layer from the provider
-        // plugin config `headers` (same schema as models.yml), then models.yml
-        // provider/model headers override per header name. Channel/profile
-        // typed values resolve against the current channel and profile.
-        let header_specs: Vec<(String, crate::models_yaml::HeaderValue)> = {
-            let mut merged: std::collections::BTreeMap<String, crate::models_yaml::HeaderValue> =
-                crate::plugins_yaml::provider_plugin_config_headers(
-                    &cfg.ctx.data_dir,
-                    &provider_name_val,
-                );
-            for (name, spec) in eff_cfg.headers.clone() {
-                merged.insert(name, spec);
-            }
-            merged.into_iter().collect()
-        };
-        let extra_headers = crate::models_yaml::resolve_header_specs(
-            &header_specs,
+        // Custom per-provider HTTP headers - one shared, provider-agnostic
+        // resolver (provider plugin config `headers` as the base layer, then
+        // models.yml provider/model headers overriding per header name, with
+        // typed channel/profile values resolved against this request context).
+        let extra_headers = crate::models_yaml::resolve_extra_headers(
+            &cfg.ctx.data_dir,
+            &provider_name_val,
+            &model_name_val,
             Some(channel.name.as_str()),
             Some(profile_name.as_str()),
         );

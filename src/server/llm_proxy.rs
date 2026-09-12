@@ -21,6 +21,13 @@ pub struct LlmChatRequest {
     pub max_tokens: Option<u32>,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
+    /// Optional request context used to resolve typed headers declared for
+    /// this provider in models.yml (e.g. `{ type: channel }`). When omitted,
+    /// typed headers cannot be resolved and are skipped.
+    #[serde(default)]
+    pub channel: Option<String>,
+    #[serde(default)]
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,7 +93,18 @@ pub(crate) async fn llm_chat_handler(
         max_tokens: body.max_tokens.unwrap_or(8192),
         temperature: body.temperature,
         supports_reasoning: false,
-        extra_headers: vec![],
+        // Custom headers declared for this provider in models.yml, merged with
+        // the provider plugin config headers and resolved with the optional
+        // request context - the same provider-agnostic resolver the agent path
+        // uses, so a code-less (plugin: false) provider whose endpoint needs a
+        // header works through this endpoint too.
+        extra_headers: crate::models_yaml::resolve_extra_headers(
+            &state.data_dir,
+            provider_name,
+            model_name,
+            body.channel.as_deref(),
+            body.profile.as_deref(),
+        ),
     };
 
     let llm = LLMClient::new(llm_config);

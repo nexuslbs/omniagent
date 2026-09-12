@@ -638,6 +638,47 @@ pub fn resolve_header_specs(
         .collect()
 }
 
+/// Resolve the custom HTTP headers a request to (provider, model) must carry:
+/// the provider plugin config `headers` are the base layer, models.yml
+/// provider/model header specs override them per header name, and typed
+/// `channel`/`profile` values resolve against the supplied request context
+/// (skipped when that context is unavailable).
+///
+/// This is the single provider-agnostic entry point for header resolution:
+/// every LLMConfig builder (agent run, LLM proxy, ...) uses it, so a header
+/// declared in models.yml reaches the upstream request no matter the caller.
+/// No provider name is ever special-cased here.
+pub fn resolve_extra_headers(
+    data_dir: &str,
+    provider: &str,
+    model: &str,
+    channel_name: Option<&str>,
+    profile_name: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut merged: BTreeMap<String, HeaderValue> =
+        crate::plugins_yaml::provider_plugin_config_headers(data_dir, provider);
+    let file = load_models_file(data_dir).unwrap_or_default();
+    if let Some(ov) = file.providers.get(provider) {
+        if let Some(h) = ov.headers.as_ref() {
+            for (name, spec) in h {
+                merged.insert(name.clone(), spec.clone());
+            }
+        }
+        if let Some(h) = ov
+            .model_config
+            .as_ref()
+            .and_then(|m| m.get(model))
+            .and_then(|c| c.headers.as_ref())
+        {
+            for (name, spec) in h {
+                merged.insert(name.clone(), spec.clone());
+            }
+        }
+    }
+    let specs: Vec<(String, HeaderValue)> = merged.into_iter().collect();
+    resolve_header_specs(&specs, channel_name, profile_name)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -924,6 +965,59 @@ providers:
         );
         let no_ctx = crate::models_yaml::resolve_header_specs(&specs, None, None);
         assert_eq!(no_ctx, vec![("x-static".to_string(), "v".to_string())]);
+    }
+
+    #[test]
+    fn test_resolve_extra_headers_merges_models_and_context() {
+        let dir =
+            std::env::temp_dir().join(format!("omnidev-modelsyml-extra-{}", std::process::id()));
+        let cfg_dir = dir.join("config");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join("models.yml"),
+            r#"
+providers:
+  p1:
+    plugin: false
+    api_mode: "chat_completions"
+    headers:
+      x-provider: "base"
+      x-chan: { type: channel }
+    model_config:
+      m1:
+        headers:
+          x-provider: "model-override"
+"#,
+        )
+        .unwrap();
+
+        // models.yml provider+model merge, typed channel resolved from context.
+        let with_ctx = resolve_extra_headers(
+            dir.to_str().unwrap(),
+            "p1",
+            "m1",
+            Some("main"),
+            Some("omni"),
+        );
+        assert_eq!(
+            with_ctx,
+            vec![
+                ("x-chan".to_string(), "main".to_string()),
+                ("x-provider".to_string(), "model-override".to_string()),
+            ]
+        );
+
+        // Without request context the typed header cannot resolve: skipped.
+        let no_ctx = resolve_extra_headers(dir.to_str().unwrap(), "p1", "m1", None, None);
+        assert_eq!(
+            no_ctx,
+            vec![("x-provider".to_string(), "model-override".to_string())]
+        );
+
+        // Unknown provider -> empty, no panic.
+        let unknown =
+            resolve_extra_headers(dir.to_str().unwrap(), "nope", "m1", Some("main"), None);
+        assert!(unknown.is_empty());
     }
 
     #[test]
