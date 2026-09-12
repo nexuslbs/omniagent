@@ -1296,4 +1296,55 @@ mod tests {
             "soft in prompt: {prompt_names:?}"
         );
     }
+    #[test]
+    fn legacy_retention_keys_are_normalized_on_read() {
+        // Back-compat regression guard: a settings.yml still carrying the
+        // PREVIOUS key names (`soft_delete_after_days` / `hard_delete_after_days`)
+        // must yield the same effective values under the CURRENT names when the
+        // file is read, and the current name must win when both are present.
+        let dir = std::env::temp_dir().join(format!(
+            "omniagent-settings-legacy-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cfg = dir.join("config");
+        std::fs::create_dir_all(&cfg).expect("create config dir");
+        let file = cfg.join("settings.yml");
+        let data_dir = dir.to_str().expect("utf8 temp dir");
+
+        // Previous names only: values are carried over to the current names.
+        std::fs::write(
+            &file,
+            "general:\n  soft_delete_after_days: 30\n  hard_delete_after_days: 90\n",
+        )
+        .expect("write settings.yml");
+        let map = load_settings_file(data_dir);
+        assert_eq!(
+            map.get("delete_after_days_soft").map(String::as_str),
+            Some("30"),
+            "legacy soft value must land on the current name"
+        );
+        assert_eq!(
+            map.get("delete_after_days_hard").map(String::as_str),
+            Some("90"),
+            "legacy hard value must land on the current name"
+        );
+        assert!(!map.contains_key("soft_delete_after_days"));
+        assert!(!map.contains_key("hard_delete_after_days"));
+
+        // Both names present: the current name is never overwritten.
+        std::fs::write(
+            &file,
+            "general:\n  delete_after_days_soft: 7\n  soft_delete_after_days: 30\n",
+        )
+        .expect("write settings.yml");
+        let map = load_settings_file(data_dir);
+        assert_eq!(
+            map.get("delete_after_days_soft").map(String::as_str),
+            Some("7"),
+            "current key wins over the legacy alias"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
