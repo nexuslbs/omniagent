@@ -17,6 +17,8 @@
 //! - `PATCH  /hooks/{id}/toggle`: toggle enabled state
 //! - `DELETE /hooks/{id}`       : delete hook (also removes its counter row)
 //! - `POST   /hooks/{id}/fire`  : manually trigger a hook (no counter)
+//! - `GET    /hooks/{id}/threads`: threads spawned by a hook (parity with
+//!   `/schedule/{id}/threads`: same query params and response shape)
 
 use axum::{
     extract::{Path, Query, State},
@@ -26,14 +28,16 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::{FromRow, PgPool};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::error;
 
+use super::schedule::{ScheduleThread, ScheduleThreadsResponse, ThreadsQueryParams};
 use super::{err_json, ok_json, AppState};
 use crate::hooks::default_counter;
 use crate::tasks_yaml::{self, HookDef};
+use sql_forge::sql_forge;
 
 // ---------------------------------------------------------------------------
 // Router
@@ -48,6 +52,7 @@ pub fn hooks_router() -> Router<Arc<AppState>> {
         .route("/hooks/{id}/toggle", patch(toggle_hook_handler))
         .route("/hooks/{id}", delete(delete_hook_handler))
         .route("/hooks/{id}/fire", post(fire_hook_handler))
+        .route("/hooks/{id}/threads", get(hook_threads_handler))
 }
 
 // ---------------------------------------------------------------------------
@@ -540,6 +545,154 @@ async fn delete_hook_handler(
         );
     }
     ok_json(serde_json::json!({ "deleted": id }))
+}
+
+// ---------------------------------------------------------------------------
+// GET /hooks/{id}/threads: activity for one hook
+// ---------------------------------------------------------------------------
+
+#[derive(FromRow)]
+struct HookThreadCountRow {
+    total: Option<i64>,
+}
+
+#[derive(FromRow)]
+struct HookThreadRow {
+    id: i64,
+    thread_id: i64,
+    role: Option<String>,
+    content: Option<String>,
+    msg_type: Option<String>,
+    subtype: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    processing_time_ms: Option<i32>,
+    token_usage: Option<String>,
+    iteration_number: Option<i32>,
+    thread_sequence: Option<i32>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    metadata: Option<String>,
+    thread_status: Option<String>,
+    channel_name: Option<String>,
+}
+
+/// GET /hooks/{id}/threads: last message per thread spawned by a hook.
+///
+/// Parity with `/schedule/{id}/threads` (same `offset`/`limit`/`order` query
+/// params and the same `{ rows, total }` response shape), so the dashboard
+/// reuses its schedule-activity renderer for hooks. Hook threads carry
+/// `external_id = "hook:{hook_id}:{ts}"` (see `crate::hooks::fire`), so a hook's
+/// threads are selected by that prefix.
+///
+async fn hook_threads_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(params): Query<ThreadsQueryParams>,
+) -> impl IntoResponse {
+    let offset = params.offset.unwrap_or(0).max(0);
+    let limit = params.limit.unwrap_or(10).clamp(1, 100);
+    let order_asc = params.order.as_deref() == Some("asc");
+    let pattern = format!("hook:{}:%", id);
+
+    let total = match sql_forge!(
+        HookThreadCountRow,
+        r#"SELECT COUNT(*) AS total FROM threads t WHERE EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = t.id AND m.external_id LIKE :pattern)"#,
+        ( :pattern = &pattern )
+    )
+    .fetch_one(&state.pool)
+    .await
+    {
+        Ok(row) => row.total.unwrap_or(0),
+        Err(e) => {
+            error!("[hooks/{}/threads] count query failed: {:?}", id, e);
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to count threads");
+        }
+    };
+
+    let rows = match sql_forge!(
+        HookThreadRow,
+        r#"
+        SELECT
+            last_msg.id,
+            last_msg.thread_id,
+            last_msg.role,
+            last_msg.content,
+            last_msg.msg_type,
+            last_msg.msg_subtype AS subtype,
+            t.provider,
+            t.model,
+            t.duration_ms AS processing_time_ms,
+            last_msg.token_usage,
+            last_msg.iteration_number,
+            last_msg.thread_sequence,
+            last_msg.created_at,
+            last_msg.metadata::text AS metadata,
+            t.status AS thread_status,
+            t.channel_id AS channel_name
+        FROM threads t
+        LEFT JOIN LATERAL (
+            SELECT m.id, m.thread_id, m.role, m.content, m.msg_type,
+                   m.msg_subtype, NULL::text AS token_usage,
+                   m.iteration_number, m.thread_sequence,
+                   m.created_at, m.metadata
+            FROM messages m
+            WHERE m.thread_id = t.id
+            ORDER BY m.id DESC
+            LIMIT 1
+        ) last_msg ON true
+        WHERE EXISTS (
+            SELECT 1 FROM messages hm
+            WHERE hm.thread_id = t.id AND hm.external_id LIKE :pattern
+        )
+        ORDER BY
+            CASE WHEN :order_asc THEN last_msg.created_at END ASC,
+            CASE WHEN :order_asc = false THEN last_msg.created_at END DESC
+            NULLS LAST
+        OFFSET :offset LIMIT :limit
+        "#,
+        ( :pattern = &pattern,
+          :order_asc = order_asc,
+          :offset = offset,
+          :limit = limit )
+    )
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!("[hooks/{}/threads] data query failed: {:?}", id, e);
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch threads");
+        }
+    };
+
+    let thread_rows: Vec<ScheduleThread> = rows
+        .into_iter()
+        .map(|r| ScheduleThread {
+            id: r.id,
+            thread_id: r.thread_id,
+            role: r.role,
+            content: r.content,
+            msg_type: r.msg_type,
+            subtype: r.subtype,
+            provider: r.provider,
+            model: r.model,
+            processing_time_ms: r.processing_time_ms.map(|v| v as i64),
+            token_usage: r.token_usage.and_then(|s| serde_json::from_str(&s).ok()),
+            iteration_number: r.iteration_number,
+            thread_sequence: r.thread_sequence,
+            created_at: r
+                .created_at
+                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+            metadata: r.metadata.and_then(|s| serde_json::from_str(&s).ok()),
+            thread_status: r.thread_status,
+            channel: r.channel_name,
+        })
+        .collect();
+
+    ok_json(ScheduleThreadsResponse {
+        rows: thread_rows,
+        total,
+    })
 }
 
 /// Manually trigger a hook (no counter increment, no reset).
