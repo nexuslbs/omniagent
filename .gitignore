@@ -50,7 +50,6 @@ plugins/.remote/
 # Compiled binaries
 /omniagent
 /omniagent.new
-mcp-server-memory
 /mcp-server-*
 plugins/tools/*/mcp-server-*
 

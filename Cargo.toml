@@ -7,7 +7,6 @@ members = [
     "plugins/tools/docker",
     "plugins/tools/kanban",
     "plugins/tools/search",
-    "plugins/tools/memory",
     "plugins/tools/plugin-manager",
     "plugins/tools/subtasks",
     "plugins/tools/prompt",
