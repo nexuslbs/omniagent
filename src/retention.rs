@@ -11,7 +11,7 @@
 //! reports `status: "disabled"` (never an error). Only `> 0` enables it.
 //!
 //! No-defaults convention (operator amendment 3): neither
-//! `soft_delete_after_days` nor `hard_delete_after_days` has a default value.
+//! `delete_after_days_soft` nor `delete_after_days_hard` has a default value.
 //! Both are empty/unset out of the box, so both operations are disabled until
 //! an operator explicitly sets a value `> 0`.
 //!
@@ -130,9 +130,9 @@ fn disabled_report(operation: &str, days: Option<u32>, started: Instant) -> Rete
 
 fn setting_name(operation: &str) -> &'static str {
     if operation == "soft_delete" {
-        "soft_delete_after_days"
+        "delete_after_days_soft"
     } else {
-        "hard_delete_after_days"
+        "delete_after_days_hard"
     }
 }
 

@@ -36,12 +36,12 @@ use super::AppState;
 
 /// Live configured soft-delete horizon (None = empty/unset = disabled).
 fn soft_days(state: &AppState) -> Option<u32> {
-    state.shared_config.read().soft_delete_after_days
+    state.shared_config.read().delete_after_days_soft
 }
 
 /// Live configured hard-delete horizon (None = empty/unset = disabled).
 fn hard_days(state: &AppState) -> Option<u32> {
-    state.shared_config.read().hard_delete_after_days
+    state.shared_config.read().delete_after_days_hard
 }
 
 /// `POST /api/retention/soft-delete` - imperative soft-delete trigger.

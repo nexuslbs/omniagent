@@ -106,14 +106,18 @@ pub struct AgentConfig {
     /// SOFT delete horizon (days): `messages` older than this are deleted,
     /// EXCEPT the first and the last message of every thread. NO DEFAULT:
     /// empty/unset means the operation is DISABLED (0 also disables it); only a
-    /// value > 0 enables it. See src/retention.rs.
-    pub soft_delete_after_days: Option<u32>,
+    /// value > 0 enables it. See src/retention.rs. The previous key name
+    /// `soft_delete_after_days` is accepted ONLY as a legacy migration alias
+    /// (see server::settings::load_settings_file).
+    pub delete_after_days_soft: Option<u32>,
     /// HARD delete horizon (days): rows older than this are deleted from
     /// kanban_history, messages, secret_versions, thread_subtasks and threads
     /// (the `secrets` rows themselves are NEVER deleted). NO DEFAULT:
     /// empty/unset means DISABLED (0 also disables it); only a value > 0
-    /// enables it. When BOTH are enabled, hard must be >= soft.
-    pub hard_delete_after_days: Option<u32>,
+    /// enables it. When BOTH are enabled, hard must be >= soft. The previous
+    /// key name `hard_delete_after_days` is accepted ONLY as a legacy migration
+    /// alias (see server::settings::load_settings_file).
+    pub delete_after_days_hard: Option<u32>,
     /// Interval (seconds) between in-process kanban dispatcher runs (0 disables; default 15).
     pub kanban_dispatcher_interval_secs: u64,
     /// MCP tool name for generating the LLM prompt (system prompt + context assembly).
@@ -289,8 +293,8 @@ impl AgentConfig {
                 .parse()
                 .unwrap_or(3),
             provider_max_retries: get("provider_max_retries", "3").parse().unwrap_or(3),
-            soft_delete_after_days: opt_u32(&get("soft_delete_after_days", "")),
-            hard_delete_after_days: opt_u32(&get("hard_delete_after_days", "")),
+            delete_after_days_soft: opt_u32(&get("delete_after_days_soft", "")),
+            delete_after_days_hard: opt_u32(&get("delete_after_days_hard", "")),
             kanban_dispatcher_interval_secs: get("kanban_dispatcher_interval", "15")
                 .parse()
                 .unwrap_or(15),
@@ -405,8 +409,8 @@ impl AgentConfig {
                 .parse()
                 .unwrap_or(3),
             provider_max_retries: get("provider_max_retries", "3").parse().unwrap_or(3),
-            soft_delete_after_days: opt_u32(&get("soft_delete_after_days", "")),
-            hard_delete_after_days: opt_u32(&get("hard_delete_after_days", "")),
+            delete_after_days_soft: opt_u32(&get("delete_after_days_soft", "")),
+            delete_after_days_hard: opt_u32(&get("delete_after_days_hard", "")),
             kanban_dispatcher_interval_secs: get("kanban_dispatcher_interval", "15")
                 .parse()
                 .unwrap_or(15),
@@ -491,8 +495,8 @@ mod tests {
             interactive_max_iterations: 12,
             max_unfinished_subtask_retries: 1,
             provider_max_retries: 3,
-            soft_delete_after_days: None,
-            hard_delete_after_days: None,
+            delete_after_days_soft: None,
+            delete_after_days_hard: None,
             kanban_dispatcher_interval_secs: 15,
             prompt_tool_name: "prompt__generate".to_string(),
             compact_messages_tool_name: "prompt__compact_messages".to_string(),
@@ -564,8 +568,8 @@ mod tests {
             interactive_max_iterations: 0,
             max_unfinished_subtask_retries: 0,
             provider_max_retries: 0,
-            soft_delete_after_days: None,
-            hard_delete_after_days: None,
+            delete_after_days_soft: None,
+            delete_after_days_hard: None,
             kanban_dispatcher_interval_secs: 0,
             prompt_tool_name: String::new(),
             compact_messages_tool_name: String::new(),

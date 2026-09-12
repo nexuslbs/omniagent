@@ -109,7 +109,34 @@ pub(crate) fn load_settings_file(data_dir: &str) -> HashMap<String, String> {
             }
         }
     }
+    normalize_legacy_setting_keys(&mut map);
     map
+}
+
+/// Legacy key names of settings that were RENAMED, mapped to their current
+/// names. They are accepted ONLY as migration/lookup aliases: an operator
+/// upgrading from an older release keeps the value, and the legacy YAML key is
+/// rewritten to the current name the next time the settings file is written.
+/// The current name always wins when both are present.
+///
+/// The even older `delete_after_days` (soft-delete horizon) is NOT listed here:
+/// it was intentionally dropped WITHOUT carrying its value over (see
+/// `config_path::migrate_legacy_settings`).
+const LEGACY_SETTING_KEYS: [(&str, &str); 2] = [
+    ("soft_delete_after_days", "delete_after_days_soft"),
+    ("hard_delete_after_days", "delete_after_days_hard"),
+];
+
+/// Rewrite legacy setting keys in-place onto their current names (see
+/// [`LEGACY_SETTING_KEYS`]); an explicitly set current key is never overwritten.
+fn normalize_legacy_setting_keys(map: &mut HashMap<String, String>) {
+    for (legacy, current) in LEGACY_SETTING_KEYS {
+        if !map.contains_key(current) {
+            if let Some(value) = map.remove(legacy) {
+                map.insert(current.to_string(), value);
+            }
+        }
+    }
 }
 
 /// Extract key-value pairs from a single section mapping (no recursion -
@@ -156,8 +183,8 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
             "general",
             vec![
                 "condense_keep_turns",
-                "soft_delete_after_days",
-                "hard_delete_after_days",
+                "delete_after_days_soft",
+                "delete_after_days_hard",
                 "git_sync_tool",
                 "default_provider",
                 "llm_provider",
@@ -427,7 +454,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "soft_delete_after_days".into(),
+            "delete_after_days_soft".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Days before old messages are SOFT-deleted (the first and last message of every thread are never deleted). NO DEFAULT. 0 or empty = disabled.".into(),
@@ -437,10 +464,10 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "hard_delete_after_days".into(),
+            "delete_after_days_hard".into(),
             SettingMeta {
                 field_type: "number".into(),
-                description: "Days before rows are HARD-deleted from kanban history, messages, secret versions, subtasks and threads (secret values are never deleted). NO DEFAULT. Must be >= soft_delete_after_days when both are set. 0 or empty = disabled.".into(),
+                description: "Days before rows are HARD-deleted from kanban history, messages, secret versions, subtasks and threads (secret values are never deleted). NO DEFAULT. Must be >= delete_after_days_soft when both are set. 0 or empty = disabled.".into(),
                 options: None,
                 readonly: false,
                 default: None,
@@ -658,7 +685,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "temperature"
             | "tool_bg_secs" => "execution",
             // general category (default; matches state_block_update_interval)
-            "kanban_dispatcher_interval" | "soft_delete_after_days" | "hard_delete_after_days" => {
+            "kanban_dispatcher_interval" | "delete_after_days_soft" | "delete_after_days_hard" => {
                 "general"
             }
             // system : bootstrap from env
@@ -781,8 +808,8 @@ fn writable_setting_keys() -> std::collections::HashSet<&'static str> {
         "redaction_tool",
         "malformed_response_tool",
         "git_sync_tool",
-        "soft_delete_after_days",
-        "hard_delete_after_days",
+        "delete_after_days_soft",
+        "delete_after_days_hard",
         "kanban_dispatcher_interval",
         "memory_max_chars",
         "default_provider",
@@ -945,7 +972,7 @@ pub async fn update_settings_handler(
         applied.push(update.name.clone());
     }
 
-    // Retention guard: `hard_delete_after_days` must be >= `soft_delete_after_days`
+    // Retention guard: `delete_after_days_hard` must be >= `delete_after_days_soft`
     // whenever BOTH are enabled (> 0). With either one empty/unset (= disabled)
     // or 0 there is no comparison, no error. 0 or empty = disabled.
     let retention_days = |name: &str| -> Option<u32> {
@@ -955,18 +982,18 @@ pub async fn update_settings_handler(
             .filter(|v| *v > 0)
     };
     if let (Some(soft), Some(hard)) = (
-        retention_days("soft_delete_after_days"),
-        retention_days("hard_delete_after_days"),
+        retention_days("delete_after_days_soft"),
+        retention_days("delete_after_days_hard"),
     ) {
         if hard < soft {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
                     "error": format!(
-                        "hard_delete_after_days ({}) must be >= soft_delete_after_days ({})",
+                        "delete_after_days_hard ({}) must be >= delete_after_days_soft ({})",
                         hard, soft
                     ),
-                    "field": "hard_delete_after_days",
+                    "field": "delete_after_days_hard",
                 })),
             );
         }
@@ -1140,7 +1167,7 @@ mod tests {
 
         // Retention settings: number type, writable, NO DEFAULT (empty/unset =
         // disabled, per the "0 or empty = disabled" convention).
-        for name in ["soft_delete_after_days", "hard_delete_after_days"] {
+        for name in ["delete_after_days_soft", "delete_after_days_hard"] {
             let meta = by_name
                 .get(name)
                 .unwrap_or_else(|| panic!("{name} must be defined"));
@@ -1154,8 +1181,8 @@ mod tests {
             "sub_prompt_max_chars",
             "sub_prompt_iteration_percent",
             "memory_max_chars",
-            "soft_delete_after_days",
-            "hard_delete_after_days",
+            "delete_after_days_soft",
+            "delete_after_days_hard",
         ] {
             assert!(keys.contains(name), "{name} must be writable");
         }
@@ -1168,8 +1195,8 @@ mod tests {
                     "sub_prompt_max_chars"
                         | "sub_prompt_iteration_percent"
                         | "memory_max_chars"
-                        | "soft_delete_after_days"
-                        | "hard_delete_after_days"
+                        | "delete_after_days_soft"
+                        | "delete_after_days_hard"
                 )
             })
             .map(|(n, m)| (n.clone(), String::new(), m.clone()))
@@ -1200,7 +1227,7 @@ mod tests {
             .find(|c| c.name == "general")
             .unwrap_or_else(|| panic!("general category must exist"));
         let general_names: Vec<&str> = general.settings.iter().map(|s| s.name.as_str()).collect();
-        for name in ["soft_delete_after_days", "hard_delete_after_days"] {
+        for name in ["delete_after_days_soft", "delete_after_days_hard"] {
             assert!(
                 general_names.contains(&name),
                 "{name} in general: {general_names:?}"

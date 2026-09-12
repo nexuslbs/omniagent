@@ -160,9 +160,12 @@ async fn run_server() -> AppResult<()> {
 
     // Ensure the config/ subdir exists (root-level yml config files live there).
     config_path::ensure_config_dir(&data_dir);
-    // One-time migration: drop the legacy `delete_after_days` key. Its VALUE
-    // is intentionally NOT carried over: `soft_delete_after_days` has NO
-    // default and must start empty (= disabled).
+    // One-time migration of the legacy retention keys: the previous names
+    // `soft_delete_after_days` / `hard_delete_after_days` are RENAMED in place
+    // (value carried over) to `delete_after_days_soft` / `delete_after_days_hard`;
+    // the even older `delete_after_days` key is dropped with its VALUE
+    // intentionally NOT carried over (neither new setting has a default and
+    // must start empty = disabled).
     config_path::migrate_legacy_settings(&data_dir);
 
     // Provider/model overrides via config/models.yml: fail loud on a malformed
@@ -411,7 +414,8 @@ async fn run_server() -> AppResult<()> {
         let interval = tokio::time::Duration::from_secs(soft_interval);
         loop {
             tokio::time::sleep(interval).await;
-            let days = agent::config::get_global().and_then(|c| c.read().soft_delete_after_days);
+            let days =
+                agent::config::get_global().and_then(|c| c.read().delete_after_days_soft);
             match omniagent::retention::run_soft_delete(&pool_retention_soft, days).await {
                 Ok(report) => tracing::info!(
                     "Retention soft-delete run: status={} rows={:?} total={} ms={}",
@@ -429,7 +433,8 @@ async fn run_server() -> AppResult<()> {
         let interval = tokio::time::Duration::from_secs(hard_interval);
         loop {
             tokio::time::sleep(interval).await;
-            let days = agent::config::get_global().and_then(|c| c.read().hard_delete_after_days);
+            let days =
+                agent::config::get_global().and_then(|c| c.read().delete_after_days_hard);
             match omniagent::retention::run_hard_delete(&pool_retention_hard, days).await {
                 Ok(report) => tracing::info!(
                     "Retention hard-delete run: status={} rows={:?} total={} ms={}",
