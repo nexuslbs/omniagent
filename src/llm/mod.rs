@@ -1699,8 +1699,11 @@ mod tests {
 
     #[test]
     fn test_resolve_default_model_returns_none_in_test() {
-        // Without provider manifests, all providers return None.
-        let model = resolve_default_model("openai");
+        // Only providers declared by a plugin manifest or by the stack's
+        // models.yml resolve to a model, so the assertion must use a name no
+        // stack can ever declare (`openai` IS declared plugin-less by the dev
+        // models.yml). Unknown providers still return None here.
+        let model = resolve_default_model("no-such-provider-kvx");
         assert!(model.is_none());
     }
 
@@ -1756,9 +1759,11 @@ mod tests {
 
     #[test]
     fn test_provider_throttle_available_permits_unknown_provider() {
-        // Without provider metadata, all providers are unknown.
+        // PROVIDER_METADATA now contains models.yml plugin-less providers too
+        // (e.g. `openai` on the dev stack), so use a name that can never be a
+        // declared provider: an unknown provider still gets no throttling.
         let throttle = ProviderThrottle::new();
-        assert!(throttle.available_permits("openai").is_none());
+        assert!(throttle.available_permits("no-such-provider-kvx").is_none());
     }
 
     #[test]

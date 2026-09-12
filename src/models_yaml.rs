@@ -1194,6 +1194,72 @@ providers:
     }
 
     #[test]
+    fn apply_provider_overrides_registers_plugin_less_provider_without_any_plugin() {
+        let dir = tmp_dir();
+        write_models(
+            &dir,
+            r#"
+providers:
+  deepseek:
+    plugin: false
+    api_mode: "chat_completions"
+    supports_reasoning: true
+    default_base_url: "https://api.deepseek.com/v1"
+    default_model: "deepseek-v4-flash"
+    api_key: "$secret:DEEPSEEK_API_KEY"
+    models: ["deepseek-v4-flash"]
+  plugin_backed:
+    api_mode: "anthropic_messages"
+    default_base_url: "https://override.example/v1"
+"#,
+        );
+        let d = dir.path().to_str().unwrap();
+
+        // Simulate the provider registry built with ZERO provider plugins
+        // enabled (plus one pre-existing plugin-manifest entry).
+        let mut map: std::collections::HashMap<String, crate::llm::ProviderMetadata> =
+            std::collections::HashMap::new();
+        map.insert(
+            "plugin_backed".to_string(),
+            crate::llm::ProviderMetadata {
+                name: "plugin_backed".to_string(),
+                default_base_url: "https://manifest.example/v1".to_string(),
+                api_mode: "chat_completions".to_string(),
+                api_modes: std::collections::HashMap::new(),
+                default_model: "manifest-model".to_string(),
+                supports_reasoning: false,
+                auth_style: None,
+                api_key_header_name: None,
+                api_version_header: None,
+                thinking_param: None,
+            },
+        );
+
+        apply_provider_overrides(d, &mut map);
+
+        // The code-less provider is a first-class provider definition even
+        // though it has no plugin manifest and no plugins.yml entry - this is
+        // what makes it listed/selectable with no provider plugin enabled.
+        let ds = map
+            .get("deepseek")
+            .expect("plugin-less provider registered");
+        assert_eq!(ds.api_mode, "chat_completions");
+        assert_eq!(ds.default_base_url, "https://api.deepseek.com/v1");
+        assert_eq!(ds.default_model, "deepseek-v4-flash");
+        assert!(ds.supports_reasoning);
+
+        // A plugin-backed entry keeps working: models.yml fields override the
+        // manifest field by field, unset fields stay untouched.
+        let pb = map.get("plugin_backed").expect("existing entry kept");
+        assert_eq!(pb.api_mode, "anthropic_messages");
+        assert_eq!(pb.default_base_url, "https://override.example/v1");
+        assert_eq!(
+            pb.default_model, "manifest-model",
+            "fields absent from models.yml must not be clobbered"
+        );
+    }
+
+    #[test]
     fn save_roundtrip_and_upsert_preserves_fields() {
         let dir = tmp_dir();
         write_models(&dir, SAMPLE);
