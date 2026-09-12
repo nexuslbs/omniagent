@@ -1544,7 +1544,17 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
             if ov.plugin.is_true() {
                 continue;
             }
-            if results.iter().any(|r| r.name == *name) {
+            // A plugins.yml entry pointing at a plugin that is NOT on disk
+            // (status "not_found") is a stale/broken reference: the models.yml
+            // plugin-less definition is authoritative and must still surface as
+            // a usable provider (registry listing + selectors). An existing,
+            // working plugin-backed entry wins (plugin first).
+            if results
+                .iter()
+                .any(|r| r.name == *name && r.status == "not_found")
+            {
+                results.retain(|r| !(r.name == *name && r.status == "not_found"));
+            } else if results.iter().any(|r| r.name == *name) {
                 continue;
             }
             let manifest = crate::plugin::PluginManifest {
@@ -2157,6 +2167,7 @@ pub async fn refresh_plugin_models(
     data_dir: &str,
     name: &str,
     pt: &PluginYamlType,
+    pool: &sqlx::PgPool,
 ) -> AppResult<Option<PluginDetail>> {
     // REWORKED (task 16): the dashboard refresh button now writes models.yml -
     // it NEVER mutates the plugin's config_schema or DYNAMIC_ENUM_CACHE. The
@@ -2190,22 +2201,13 @@ pub async fn refresh_plugin_models(
 
     // API key: models.yml api_key ($env:/$secret: expansion) first, else the
     // plugin's resolved api_key (same expansion path as plugins.yml).
-    let api_key = if let Some(raw) = crate::models_yaml::models_api_key_raw(data_dir, name) {
-        Some(crate::plugins_yaml::resolve_config_value(&raw))
+    // Same shared resolver as every other LLM call site: models.yml api_key
+    // ($env:/$secret: expanded here, at use time) then the plugin config.
+    let resolved_key = crate::models_yaml::resolve_provider_api_key(data_dir, name, pool).await;
+    let api_key = if resolved_key.is_empty() {
+        None
     } else {
-        get_plugin(data_dir, name, pt).ok().flatten().and_then(|d| {
-            d.resolved_env
-                .get("api_key")
-                .filter(|s| !s.is_empty())
-                .cloned()
-                .or_else(|| {
-                    d.config
-                        .get("api_key")
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                        .map(crate::plugins_yaml::resolve_config_value)
-                })
-        })
+        Some(resolved_key)
     };
 
     // Fetch the remote models list (OpenAI /v1/models format) and UPSERT into
@@ -2506,6 +2508,106 @@ providers:
     // ------------------------------------------------------------------
     // remote.yml is the SOURCE OF TRUTH for remote plugins (WS1 regression)
     // ------------------------------------------------------------------
+
+    #[test]
+    fn test_list_plugins_includes_models_yml_only_provider() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        // plugins.yml declares NO provider at all.
+        std::fs::write(
+            dir.path().join("config").join("plugins.yml"),
+            "platforms:\n  mattermost:\n    enabled: true\n",
+        )
+        .unwrap();
+        // models.yml declares a plugin-less provider served by the CORE path.
+        std::fs::write(
+            dir.path().join("config").join("models.yml"),
+            r#"providers:
+  probe:
+    plugin: false
+    api_mode: "chat_completions"
+    default_base_url: "http://127.0.0.1:9099/v1"
+    default_model: "probe-model"
+    api_key: "$secret:PROBE_KEY"
+    models: ["probe-model", "probe-model-2"]
+"#,
+        )
+        .unwrap();
+        let data_dir = dir.path().to_str().unwrap().to_string();
+
+        let details = list_plugins(&data_dir).unwrap();
+        let probe = details
+            .iter()
+            .find(|d| d.name == "probe")
+            .expect("a models.yml-only provider must be listed even with ZERO provider plugins");
+        assert_eq!(probe.plugin_type, "provider");
+        assert_eq!(probe.status, "enabled");
+        assert_eq!(
+            probe
+                .manifest
+                .get("default_base_url")
+                .and_then(|v| v.as_str()),
+            Some("http://127.0.0.1:9099/v1")
+        );
+        assert_eq!(
+            probe.manifest.get("api_mode").and_then(|v| v.as_str()),
+            Some("chat_completions")
+        );
+        let models = probe
+            .config_schema
+            .iter()
+            .find(|f| f.key == "default_model")
+            .and_then(|f| f.allowed_values.clone());
+        assert_eq!(
+            models,
+            Some(vec!["probe-model".to_string(), "probe-model-2".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_models_yml_plugin_less_provider_overrides_broken_plugins_yml_entry() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        // plugins.yml references the provider but NO manifest exists on disk
+        // (the baked-manifest removal situation) -> discovered as not_found.
+        std::fs::write(
+            dir.path().join("config").join("plugins.yml"),
+            "providers:\n  probe:\n    enabled: true\n    source: built-in\n    config: {}\n",
+        )
+        .unwrap();
+        // models.yml serves the SAME name with NO plugin code at all.
+        std::fs::write(
+            dir.path().join("config").join("models.yml"),
+            r#"providers:
+  probe:
+    plugin: false
+    api_mode: "chat_completions"
+    default_base_url: "http://127.0.0.1:9099/v1"
+    default_model: "probe-model"
+    api_key: "$secret:PROBE_KEY"
+    models: ["probe-model"]
+"#,
+        )
+        .unwrap();
+        let data_dir = dir.path().to_str().unwrap().to_string();
+
+        let details = list_plugins(&data_dir).unwrap();
+        let probes: Vec<_> = details.iter().filter(|d| d.name == "probe").collect();
+        assert_eq!(
+            probes.len(),
+            1,
+            "the broken plugins.yml entry must be replaced by the models.yml entry"
+        );
+        assert_eq!(probes[0].source.as_deref(), Some("models.yml"));
+        assert_eq!(probes[0].status, "enabled");
+        assert_eq!(
+            probes[0]
+                .manifest
+                .get("default_base_url")
+                .and_then(|v| v.as_str()),
+            Some("http://127.0.0.1:9099/v1")
+        );
+    }
 
     #[test]
     fn test_list_plugins_includes_remote_yml_only_entry() {

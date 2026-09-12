@@ -48,28 +48,31 @@ pub(crate) async fn llm_chat_handler(
     // Resolve base URL from provider plugin metadata
     let base_url = crate::llm::resolve_default_base_url(provider_name);
 
-    // Look up api_key from the provider's resolved plugin config
-    let api_key = match crate::plugins_yaml::get_plugin(
-        &state.data_dir,
-        provider_name,
-        &crate::plugins_yaml::PluginYamlType::Provider,
-    ) {
-        Ok(Some(detail)) => detail
-            .config
-            .get("api_key")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .unwrap_or_default(),
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": format!("Provider '{}' not found or not configured", provider_name)
-                })),
-            );
-        }
-    };
+    // Known provider? Either a plugin (disk/YAML) or a models.yml-only
+    // (plugin-less) provider declared with `plugin: false`.
+    let known = matches!(
+        crate::plugins_yaml::get_plugin(
+            &state.data_dir,
+            provider_name,
+            &crate::plugins_yaml::PluginYamlType::Provider,
+        ),
+        Ok(Some(_))
+    ) || crate::models_yaml::is_plugin_less(&state.data_dir, provider_name);
+    if !known {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("Provider '{}' not found or not configured", provider_name)
+            })),
+        );
+    }
+
+    // Single shared resolver: models.yml api_key ($env:/$secret: expanded by
+    // core at request time) first, else the provider plugin config (same
+    // expansion path as every other plugin config value).
+    let api_key =
+        crate::models_yaml::resolve_provider_api_key(&state.data_dir, provider_name, &state.pool)
+            .await;
 
     let api_mode = ApiMode::resolve(provider_name, model_name);
     let resolved_provider = crate::llm::ProviderId::new(provider_name);

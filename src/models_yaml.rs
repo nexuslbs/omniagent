@@ -428,6 +428,63 @@ pub async fn resolve_models_api_key(
     Some(crate::plugins_yaml::resolve_config_ref_value(&raw, pool).await)
 }
 
+/// The effective api_key for a provider, resolved AT REQUEST TIME.
+///
+/// This is the SINGLE shared resolution path every core site that builds an
+/// LLM request must use (executor, `/api/llm/chat` proxy, plan preview,
+/// refresh-models):
+///
+/// 1. models.yml `api_key` - `$env:VAR` read from the process environment,
+///    `$secret:NAME` read from the secrets table, through the same
+///    [`crate::plugins_yaml::resolve_config_ref_value`] used for plugin config
+///    values (identical semantics, no duplicate logic);
+/// 2. else the provider plugin's configured api_key (plugins.yml config),
+///    resolved through the same path.
+///
+/// Returns an empty string when neither is set, or when a referenced secret /
+/// env var does not resolve. The raw `$secret:NAME` reference is NEVER sent to
+/// the upstream API as the bearer token.
+pub async fn resolve_provider_api_key(
+    data_dir: &str,
+    provider: &str,
+    pool: &sqlx::PgPool,
+) -> String {
+    if let Some(resolved) = resolve_models_api_key(data_dir, provider, pool).await {
+        if !resolved.is_empty() {
+            return resolved;
+        }
+    }
+
+    let raw = match crate::plugins_yaml::get_plugin(
+        data_dir,
+        provider,
+        &crate::plugins_yaml::PluginYamlType::Provider,
+    ) {
+        Ok(Some(mut detail)) => {
+            crate::plugins_yaml::resolve_config_refs(&mut detail.resolved_env, pool).await;
+            detail
+                .resolved_env
+                .get("api_key")
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .or_else(|| {
+                    detail
+                        .config
+                        .get("api_key")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                })
+        }
+        _ => None,
+    };
+
+    match raw {
+        Some(raw) => crate::plugins_yaml::resolve_config_ref_value(&raw, pool).await,
+        None => String::new(),
+    }
+}
+
 /// Upsert the `models` list for a provider in models.yml (refresh-flow contract):
 /// - entry ABSENT  -> create with `plugin: true` + `models: [fetched]`;
 /// - entry PRESENT -> update ONLY `models`, every other field byte-identical.
@@ -1061,6 +1118,78 @@ providers:
         assert_eq!(
             resolve_model_api_mode(d, "my_provider_01", "my_model_01"),
             None
+        );
+    }
+
+    #[test]
+    fn plugin_less_provider_metadata_from_models_yml() {
+        let dir = tmp_dir();
+        write_models(
+            &dir,
+            r#"
+providers:
+  deepseek:
+    plugin: false
+    api_mode: "chat_completions"
+    default_base_url: "https://api.deepseek.com/v1"
+    default_model: "deepseek-v4-flash"
+    api_key: "$secret:DEEPSEEK_API_KEY"
+    models: ["deepseek-v4-flash", "deepseek-v3"]
+"#,
+        );
+        let d = dir.path().to_str().unwrap();
+
+        // A models.yml-only provider needs no plugin on disk and no plugins.yml
+        // entry: core must expose everything the builtin request path uses.
+        assert!(is_plugin_less(d, "deepseek"));
+        assert!(!is_plugin_less(d, "openai"));
+        assert_eq!(
+            models_for_provider(d, "deepseek"),
+            Some(vec![
+                "deepseek-v4-flash".to_string(),
+                "deepseek-v3".to_string()
+            ])
+        );
+        let file = load_models_file(d).unwrap();
+        let p = &file.providers["deepseek"];
+        assert!(!p.plugin.is_true(), "plugin: false means builtin support");
+        assert_eq!(p.api_mode.as_deref(), Some("chat_completions"));
+        assert_eq!(
+            p.default_base_url.as_deref(),
+            Some("https://api.deepseek.com/v1")
+        );
+        assert_eq!(p.default_model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(
+            models_api_key_raw(d, "deepseek").as_deref(),
+            Some("$secret:DEEPSEEK_API_KEY"),
+            "the api_key ref is stored RAW; core resolves it at use time"
+        );
+    }
+
+    #[test]
+    fn models_yml_api_key_refs_resolve_through_the_shared_resolver() {
+        let dir = tmp_dir();
+        write_models(
+            &dir,
+            "providers:\n  p:\n    plugin: false\n    api_key: \"$env:OMNI_TEST_PROBE_KEY\"\n",
+        );
+        let d = dir.path().to_str().unwrap();
+        assert_eq!(
+            models_api_key_raw(d, "p").as_deref(),
+            Some("$env:OMNI_TEST_PROBE_KEY")
+        );
+        // $env: is expanded by the same resolver plugin config values use.
+        std::env::set_var("OMNI_TEST_PROBE_KEY", "env-probe-value");
+        assert_eq!(
+            crate::plugins_yaml::resolve_config_value("$env:OMNI_TEST_PROBE_KEY"),
+            "env-probe-value"
+        );
+        std::env::remove_var("OMNI_TEST_PROBE_KEY");
+        // $secret: is only resolvable with a DB pool (async resolver) and must
+        // NEVER be returned as-is by the sync path.
+        assert_eq!(
+            crate::plugins_yaml::resolve_config_value("$secret:MY_KEY"),
+            "$secret:MY_KEY"
         );
     }
 

@@ -213,7 +213,7 @@ pub(crate) async fn refresh_models_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let pt = plugins_yaml::PluginYamlType::from_type_str(&p_type);
-    match plugins_yaml::refresh_plugin_models(&state.data_dir, &name, &pt).await {
+    match plugins_yaml::refresh_plugin_models(&state.data_dir, &name, &pt, &state.pool).await {
         Ok(Some(detail)) => {
             let model_count = detail
                 .config_schema

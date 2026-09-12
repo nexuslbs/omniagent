@@ -129,40 +129,15 @@ pub async fn process_thread(
             &model_name_val,
             &model_defaults,
         );
-        let api_key = match crate::models_yaml::resolve_models_api_key(
+        // Single shared resolver: models.yml api_key ($env:/$secret: expanded
+        // by core at request time) first, else the provider plugin config
+        // (identical expansion semantics - one resolver, no duplicate logic).
+        let api_key = crate::models_yaml::resolve_provider_api_key(
             &cfg.ctx.data_dir,
             &provider_name_val,
             &cfg.pool,
         )
-        .await
-        {
-            Some(k) if !k.is_empty() => k,
-            _ => match crate::plugins_yaml::get_plugin(
-                &cfg.ctx.data_dir,
-                &provider_name_val,
-                &crate::plugins_yaml::PluginYamlType::Provider,
-            ) {
-                Ok(Some(mut detail)) => {
-                    crate::plugins_yaml::resolve_config_refs(&mut detail.resolved_env, &cfg.pool)
-                        .await;
-                    detail
-                        .resolved_env
-                        .get("api_key")
-                        .filter(|s| !s.is_empty())
-                        .cloned()
-                        .or_else(|| {
-                            detail
-                                .config
-                                .get("api_key")
-                                .and_then(|v| v.as_str())
-                                .filter(|s| !s.is_empty())
-                                .map(crate::plugins_yaml::resolve_config_value)
-                        })
-                        .unwrap_or_default()
-                }
-                _ => String::new(),
-            },
-        };
+        .await;
 
         // Custom per-provider HTTP headers: base layer from the provider
         // plugin config `headers` (same schema as models.yml), then models.yml

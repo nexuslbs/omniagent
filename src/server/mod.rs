@@ -1112,21 +1112,15 @@ evaluate: if the task was completed, call the completion tool.",
         // (not from hardcoded {PROVIDER}_API_KEY env var names).
         let base_url = crate::llm::resolve_default_base_url(&provider_name);
 
-        // Look up api_key from the provider's resolved plugin config
-        let api_key = match crate::plugins_yaml::get_plugin(
+        // Single shared resolver: models.yml api_key ($env:/$secret: expanded
+        // by core at request time) first, else the provider plugin config
+        // (identical expansion semantics - one resolver, no duplicate logic).
+        let api_key = crate::models_yaml::resolve_provider_api_key(
             &state.data_dir,
             &provider_name,
-            &crate::plugins_yaml::PluginYamlType::Provider,
-        ) {
-            Ok(Some(detail)) => detail
-                .config
-                .get("api_key")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .unwrap_or_default(),
-            _ => String::new(),
-        };
+            &state.pool,
+        )
+        .await;
         let api_mode = crate::llm::ApiMode::resolve(&provider_name, &model_name);
 
         let llm_config = crate::llm::LLMConfig {
