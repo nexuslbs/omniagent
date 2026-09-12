@@ -1123,6 +1123,19 @@ evaluate: if the task was completed, call the completion tool.",
         .await;
         let api_mode = crate::llm::ApiMode::resolve(&provider_name, &model_name);
 
+        // Custom headers declared for this provider/model in models.yml (and in
+        // the provider plugin config), resolved with this request's channel and
+        // profile context - the same provider-agnostic resolver the thread and
+        // proxy clients use, so a code-less provider whose endpoint needs a
+        // header also works on the planning/preview call.
+        let extra_headers = crate::models_yaml::resolve_extra_headers(
+            &state.data_dir,
+            &provider_name,
+            &model_name,
+            channel.as_ref().map(|c| c.name.as_str()),
+            Some(profile_name),
+        );
+
         let llm_config = crate::llm::LLMConfig {
             provider: resolved_provider,
             api_key,
@@ -1136,7 +1149,7 @@ evaluate: if the task was completed, call the completion tool.",
                 .get(&provider_name)
                 .map(|m| m.supports_reasoning)
                 .unwrap_or(false),
-            extra_headers: vec![],
+            extra_headers,
         };
         let llm = LLMClient::new(llm_config);
 
