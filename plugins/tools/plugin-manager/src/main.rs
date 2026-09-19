@@ -738,4 +738,28 @@ mod tests {
         apply_live_unavailable(&mut details, "connection refused");
         assert!(details[0].status_message.is_empty());
     }
+    #[test]
+    fn tool_plugin_absent_from_live_listing_is_explicit_not_ambiguous() {
+        // A tool plugin missing from the core live listing must not read as a
+        // clean `enabled` with an empty tool list: that is indistinguishable
+        // from an enabled plugin that is not running (the operator confusion
+        // this tool fixes).
+        let mut details = vec![detail("workbench", "enabled")];
+        apply_live_entries(&mut details, &HashMap::new());
+        assert_eq!(details[0].status, "enabled");
+        assert!(details[0]
+            .status_message
+            .contains("live runtime status unknown"));
+        assert!(details[0].tool_names.is_empty());
+
+        // Non-tool plugins and non-enabled tool plugins are left untouched.
+        let mut platform = detail("mattermost", "enabled");
+        platform.plugin_type = "platform".to_string();
+        let mut disabled = detail("prompt", "disabled");
+        disabled.status_message = "kept".to_string();
+        let mut many = vec![platform, disabled];
+        apply_live_entries(&mut many, &HashMap::new());
+        assert!(many[0].status_message.is_empty());
+        assert_eq!(many[1].status_message, "kept");
+    }
 }
