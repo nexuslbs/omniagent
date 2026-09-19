@@ -1380,6 +1380,7 @@ dependencies = [
  "anyhow",
  "mcp-server-util",
  "omniagent",
+ "reqwest",
  "serde",
  "serde_json",
  "sql-forge",

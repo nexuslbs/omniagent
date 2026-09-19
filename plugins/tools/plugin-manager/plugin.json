@@ -16,6 +16,13 @@
       "type": "string",
       "default": "$env:OMNI_DIR",
       "description": "Data directory for plugin file operations"
+    },
+    {
+      "key": "base_url",
+      "label": "Core API base URL",
+      "type": "string",
+      "default": "http://127.0.0.1:8080",
+      "description": "Base URL of the core omniagent HTTP API, used to read the LIVE plugin/tool runtime status"
     }
   ]
 }
