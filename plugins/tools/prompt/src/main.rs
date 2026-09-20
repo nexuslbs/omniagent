@@ -1820,7 +1820,7 @@ fn is_shrinkable(
 /// Each round removes the estimated token deficit from the LARGEST eligible
 /// message, so the work is bounded by SHRINK_MAX_ROUNDS and always terminates.
 fn shrink_messages_to_target(
-    messages: &mut Vec<crate::chat_message::ChatMessage>,
+    messages: &mut [crate::chat_message::ChatMessage],
     target: usize,
     tokenizer_encoding: &str,
 ) -> usize {
@@ -1861,10 +1861,10 @@ fn shrink_messages_to_target(
             let removable = chars.saturating_sub(floor);
             // Deficit in tokens -> chars via this array's own chars/token ratio.
             let total_chars: usize = messages.iter().map(message_chars).sum();
-            let chars_per_token = if size > 0 {
-                (total_chars / size).max(1)
-            } else {
-                4
+            let chars_per_token = match total_chars.checked_div(size) {
+                Some(ratio) => ratio.max(1),
+                // size == 0: the array is empty, the ratio is irrelevant.
+                None => 4,
             };
             let deficit = size.saturating_sub(target);
             let mut to_remove = deficit.saturating_mul(chars_per_token).max(3 * marker_cost);
