@@ -79,6 +79,210 @@ fn known_thread_scope(thread_key: &str) -> Option<bool> {
         .copied()
 }
 
+// ---------------------------------------------------------------------------
+// Mattermost API errors and post-size policy
+// ---------------------------------------------------------------------------
+
+/// Mattermost's default `ServiceSettings.MaxPostSize` (16383 characters): a
+/// longer post `message` is rejected with HTTP 400
+/// `model.post.is_valid.message_length.app_error`
+/// ("Post Message property is longer than the maximum permitted length.").
+/// Verified against a live Mattermost server (2026-09-20): a 16383-char
+/// message is accepted, a 20000-char message is rejected with that 400.
+const MATTERMOST_DEFAULT_MAX_POST_CHARS: usize = 16383;
+
+/// Chunk target used when splitting an oversized message: comfortably below
+/// the default server limit so the `_(part i/n)_` marker and the tool/plan
+/// prefix still fit. A server configured with a LOWER `MaxPostSize` is handled
+/// too: its 400 "message too long" answer triggers an adaptive halving split.
+const MATTERMOST_CHUNK_CHARS: usize = 12_000;
+
+/// Room reserved inside a chunk budget for the `_(part i/n)_` marker that is
+/// appended to every chunk when it is posted, so the FINAL post body stays
+/// within `MATTERMOST_CHUNK_CHARS` (a 12000-char chunk plus its marker used to
+/// be 12013 chars, i.e. above the budget the test pins).
+const MATTERMOST_PART_MARKER_RESERVE: usize = 32;
+
+/// Bounded retry budget for TRANSIENT Mattermost failures (HTTP 429 / 5xx /
+/// transport). Permanent answers (400 payload errors, 403 permissions) are
+/// never blind-retried: they either get a targeted remedy or surface loudly.
+const MATTERMOST_POST_ATTEMPTS: usize = 3;
+const MATTERMOST_POST_RETRY_BASE_MS: u64 = 400;
+
+/// A Mattermost API error with the FULL response payload preserved.
+///
+/// The 400/403 `createPost` classes must never be reduced to a bare "Bad
+/// Request": a delivery failure that is dropped silently is indistinguishable
+/// from a delivered message. Keeping the Mattermost error `id`, `message`,
+/// `detailed_error` and `request_id` makes the log line actionable.
+#[derive(Debug, Clone)]
+struct MattermostApiError {
+    /// None for a transport error (no HTTP response at all).
+    status: Option<u16>,
+    /// "400 Bad Request" as rendered by reqwest (or "transport error").
+    status_text: String,
+    /// Mattermost error id, e.g. `model.post.is_valid.message_length.app_error`.
+    id: String,
+    message: String,
+    detailed_error: String,
+    request_id: String,
+    /// Raw body, kept (truncated) for the rare non-JSON / empty-body answer.
+    raw_body: String,
+}
+
+impl MattermostApiError {
+    fn from_body(status: reqwest::StatusCode, body: &str) -> Self {
+        let parsed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+        Self {
+            status: Some(status.as_u16()),
+            status_text: status.to_string(),
+            id: parsed["id"].as_str().unwrap_or("").to_string(),
+            message: parsed["message"].as_str().unwrap_or("").to_string(),
+            detailed_error: parsed["detailed_error"].as_str().unwrap_or("").to_string(),
+            request_id: parsed["request_id"].as_str().unwrap_or("").to_string(),
+            raw_body: body.chars().take(600).collect(),
+        }
+    }
+
+    fn transport(err: &reqwest::Error) -> Self {
+        Self {
+            status: None,
+            status_text: "transport error".to_string(),
+            id: String::new(),
+            message: err.to_string(),
+            detailed_error: String::new(),
+            request_id: String::new(),
+            raw_body: String::new(),
+        }
+    }
+
+    /// 403 `api.context.permissions.app_error`: the bot may not post to that
+    /// channel. Mattermost returns the SAME answer both when the bot is not a
+    /// channel member and when the channel id does not exist on this server,
+    /// which is exactly the production `createPost` 403 class.
+    fn is_permissions(&self) -> bool {
+        self.status == Some(403) || self.id == "api.context.permissions.app_error"
+    }
+
+    /// 400 answer to an oversized `message` (the server `MaxPostSize` limit).
+    fn is_message_too_long(&self) -> bool {
+        self.status == Some(400)
+            && (self.id.contains("message_length")
+                || self
+                    .message
+                    .contains("longer than the maximum permitted length"))
+    }
+
+    /// 400 "Invalid RootId parameter.": the `root_id` is not a post of the
+    /// target channel (stale, deleted, or a post of another channel), so the
+    /// reply can never be threaded there. Production class: 49 such answers.
+    fn is_invalid_root_id(&self) -> bool {
+        self.status == Some(400)
+            && (self.id.contains("invalid_root")
+                || self.id.contains("root_id")
+                || self.message.to_lowercase().contains("invalid rootid"))
+    }
+
+    /// Worth a bounded retry: rate limit, server error, or no HTTP response.
+    fn is_transient(&self) -> bool {
+        matches!(
+            self.status,
+            None | Some(429) | Some(500) | Some(502) | Some(503) | Some(504)
+        )
+    }
+
+    /// Log-line form: keeps the historical
+    /// `Mattermost <context> error (<status>): <message>` prefix (existing log
+    /// greps keep working) and appends the rest of the Mattermost payload plus
+    /// the target channel, so a 400/403 is never anonymous.
+    fn describe(&self, context: &str, channel_id: Option<&str>) -> String {
+        let mut out = format!(
+            "Mattermost {} error ({}): {}",
+            context, self.status_text, self.message
+        );
+        if !self.id.is_empty() {
+            out.push_str(&format!(" [id={}]", self.id));
+        }
+        if let Some(ch) = channel_id {
+            out.push_str(&format!(" [channel={}]", ch));
+        }
+        if !self.detailed_error.is_empty() {
+            out.push_str(&format!(" [detailed_error={}]", self.detailed_error));
+        }
+        if !self.request_id.is_empty() {
+            out.push_str(&format!(" [request_id={}]", self.request_id));
+        }
+        if !self.raw_body.is_empty() && self.id.is_empty() {
+            out.push_str(&format!(" [body={}]", self.raw_body));
+        }
+        out
+    }
+}
+
+impl std::fmt::Display for MattermostApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.status_text, self.message)
+    }
+}
+
+impl std::error::Error for MattermostApiError {}
+
+/// Split `message` into chunks of at most `max_chars` CHARACTERS (Mattermost
+/// counts runes, not bytes), preferring newline boundaries so markdown stays
+/// readable. A single line longer than the limit is hard-split.
+fn split_message_chunks(message: &str, max_chars: usize) -> Vec<String> {
+    if max_chars == 0 || message.chars().count() <= max_chars {
+        return vec![message.to_string()];
+    }
+
+    let mut chunks: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0usize;
+
+    for line in message.split_inclusive('\n') {
+        let line_len = line.chars().count();
+        if line_len > max_chars {
+            if !current.is_empty() {
+                chunks.push(std::mem::take(&mut current));
+                current_len = 0;
+            }
+            let mut piece = String::new();
+            let mut piece_len = 0usize;
+            for ch in line.chars() {
+                piece.push(ch);
+                piece_len += 1;
+                if piece_len == max_chars {
+                    chunks.push(std::mem::take(&mut piece));
+                    piece_len = 0;
+                }
+            }
+            if !piece.is_empty() {
+                current = piece;
+                current_len = piece_len;
+            }
+            continue;
+        }
+        if current_len + line_len > max_chars {
+            chunks.push(std::mem::take(&mut current));
+            current_len = 0;
+        }
+        current.push_str(line);
+        current_len += line_len;
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
+/// Split a string at a CHARACTER index (byte-safe).
+fn split_at_char(s: &str, char_index: usize) -> (String, String) {
+    match s.char_indices().nth(char_index) {
+        Some((byte_idx, _)) => (s[..byte_idx].to_string(), s[byte_idx..].to_string()),
+        None => (s.to_string(), String::new()),
+    }
+}
+
 struct MattermostClient {
     http_client: reqwest::Client,
     api_base: String,
@@ -87,6 +291,9 @@ struct MattermostClient {
     /// id, or None for a channel-level post). Typing repeats every ~5s while a
     /// thread runs, so the same cause post is resolved over and over.
     typing_parent_cache: std::sync::Mutex<HashMap<String, Option<String>>>,
+    /// Cached id of the authenticated bot user (the bearer of `auth_header`),
+    /// resolved lazily and used to self-join a channel after a 403.
+    self_user_id: std::sync::Mutex<Option<String>>,
 }
 
 impl MattermostClient {
@@ -97,6 +304,7 @@ impl MattermostClient {
             api_base,
             auth_header: format!("Bearer {}", access_token),
             typing_parent_cache: std::sync::Mutex::new(HashMap::new()),
+            self_user_id: std::sync::Mutex::new(None),
         }
     }
 
@@ -109,34 +317,59 @@ impl MattermostClient {
             api_base,
             auth_header: format!("Bearer {}", session_token),
             typing_parent_cache: std::sync::Mutex::new(HashMap::new()),
+            self_user_id: std::sync::Mutex::new(None),
         }
     }
 
-    /// Create a new post in a channel.
+    /// Create a new post in a channel, CHUNKED when the message exceeds the
+    /// Mattermost post-size limit.
+    ///
+    /// Mattermost rejects a `message` longer than `ServiceSettings.MaxPostSize`
+    /// (16383 chars by default) with HTTP 400
+    /// `model.post.is_valid.message_length.app_error`; before this, oversized
+    /// tool messages and summaries were dropped entirely. The message is split
+    /// into chunks (newline-preferred) and posted as a chain: the first chunk is
+    /// the post this delivery points at (or a reply in `root_id`), the
+    /// following chunks reply to it so they stay together in one thread.
+    ///
     /// If `root_id` is Some, the post is a reply in that thread.
     async fn create_post(
         &self,
         channel_id: &str,
         message: &str,
         root_id: Option<&str>,
-    ) -> Result<String> {
-        let mut body = serde_json::json!({
-            "channel_id": channel_id,
-            "message": message,
-        });
-        if let Some(rid) = root_id {
-            body["root_id"] = serde_json::json!(rid);
+    ) -> std::result::Result<String, MattermostApiError> {
+        let chunks = split_message_chunks(
+            message,
+            MATTERMOST_CHUNK_CHARS.saturating_sub(MATTERMOST_PART_MARKER_RESERVE),
+        );
+        let total = chunks.len();
+        if total <= 1 {
+            return self.post_one(channel_id, message, root_id).await;
         }
 
-        let resp = self
-            .http_client
-            .post(format!("{}/api/v4/posts", self.api_base))
-            .header("Authorization", &self.auth_header)
-            .json(&body)
-            .send()
-            .await?;
+        tracing::info!(
+            "createPost: message of {} chars split into {} chunk(s) for channel {} (Mattermost max post size {})",
+            message.chars().count(),
+            total,
+            channel_id,
+            MATTERMOST_DEFAULT_MAX_POST_CHARS
+        );
 
-        Self::extract_post_id(resp, "createPost").await
+        let mut first_id: Option<String> = None;
+        let mut parent = root_id.map(|s| s.to_string());
+        for (idx, chunk) in chunks.iter().enumerate() {
+            let text = format!("{} _(part {}/{})_", chunk, idx + 1, total);
+            let id = self.post_one(channel_id, &text, parent.as_deref()).await?;
+            if first_id.is_none() {
+                first_id = Some(id.clone());
+            }
+            if parent.is_none() {
+                // Keep the remaining chunks together as replies to chunk 1.
+                parent = Some(id);
+            }
+        }
+        Ok(first_id.unwrap_or_default())
     }
 
     /// Update an existing post (replace message text).
@@ -614,31 +847,253 @@ impl MattermostClient {
     }
 
     /// Extract the post ID from a Mattermost API response.
+    ///
+    /// On an error response the FULL Mattermost payload is preserved
+    /// (`id`, `message`, `detailed_error`, `request_id`, `status_code`), so a
+    /// 400/403 is never reduced to a bare "Bad Request".
     async fn extract_post_id(resp: reqwest::Response, context: &str) -> Result<String> {
         let status = resp.status();
-        let body: Value = resp
-            .json()
-            .await
-            .context(format!("Failed to parse {} response JSON", context))?;
+        let text = resp.text().await.unwrap_or_default();
 
         if !status.is_success() {
-            let msg = body["message"].as_str().unwrap_or("unknown error");
-            let detail = body["detailed_error"].as_str().unwrap_or("");
-            let full_msg = if detail.is_empty() {
-                format!("Mattermost {} error ({}): {}", context, status, msg)
-            } else {
-                format!(
-                    "Mattermost {} error ({}): {} - {}",
-                    context, status, msg, detail
-                )
-            };
-            return Err(anyhow::anyhow!(full_msg));
+            return Err(anyhow::anyhow!(
+                "{}",
+                MattermostApiError::from_body(status, &text).describe(context, None)
+            ));
         }
 
+        let body: Value = serde_json::from_str(&text)
+            .with_context(|| format!("Failed to parse {} response JSON", context))?;
         body["id"]
             .as_str()
             .map(|s| s.to_string())
             .ok_or_else(|| anyhow::anyhow!("Mattermost {} response missing post id", context))
+    }
+
+    /// `POST /api/v4/posts` with ONE message: returns the created post id or
+    /// the FULL Mattermost error payload (never a lossy "Bad Request").
+    async fn post_message_raw(
+        &self,
+        channel_id: &str,
+        message: &str,
+        root_id: Option<&str>,
+    ) -> std::result::Result<String, MattermostApiError> {
+        let mut body = serde_json::json!({
+            "channel_id": channel_id,
+            "message": message,
+        });
+        if let Some(rid) = root_id {
+            body["root_id"] = serde_json::json!(rid);
+        }
+
+        let resp = self
+            .http_client
+            .post(format!("{}/api/v4/posts", self.api_base))
+            .header("Authorization", &self.auth_header)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| MattermostApiError::transport(&e))?;
+
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(MattermostApiError::from_body(status, &text));
+        }
+
+        let parsed: Value = serde_json::from_str(&text).map_err(|e| MattermostApiError {
+            status: Some(status.as_u16()),
+            status_text: status.to_string(),
+            id: "invalid_json".to_string(),
+            message: format!("could not parse createPost response: {}", e),
+            detailed_error: String::new(),
+            request_id: String::new(),
+            raw_body: text.chars().take(600).collect(),
+        })?;
+        parsed["id"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| MattermostApiError {
+                status: Some(status.as_u16()),
+                status_text: status.to_string(),
+                id: "missing_post_id".to_string(),
+                message: "createPost response missing post id".to_string(),
+                detailed_error: String::new(),
+                request_id: String::new(),
+                raw_body: text.chars().take(600).collect(),
+            })
+    }
+
+    /// Cached id of the authenticated bot user (needed to self-join a channel).
+    async fn self_user_id(&self) -> Option<String> {
+        if let Some(id) = self
+            .self_user_id
+            .lock()
+            .expect("self user id poisoned")
+            .clone()
+        {
+            return Some(id);
+        }
+        match self.get_me().await {
+            Ok(user) => {
+                *self.self_user_id.lock().expect("self user id poisoned") = Some(user.id.clone());
+                Some(user.id)
+            }
+            Err(e) => {
+                tracing::warn!("createPost: could not resolve the bot user id: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Try to add the bot to `channel_id` so a 403 `api.context.permissions.
+    /// app_error` is not a dead end: Mattermost lets a user add THEMSELVES to a
+    /// public channel (a private channel needs an admin, so this returns false
+    /// and the caller surfaces the full error).
+    async fn join_channel(&self, channel_id: &str) -> bool {
+        let Some(user_id) = self.self_user_id().await else {
+            return false;
+        };
+        let resp = self
+            .http_client
+            .post(format!(
+                "{}/api/v4/channels/{}/members",
+                self.api_base, channel_id
+            ))
+            .header("Authorization", &self.auth_header)
+            .json(&serde_json::json!({ "user_id": user_id }))
+            .send()
+            .await;
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    "createPost: self-join of channel {} failed (transport): {}",
+                    channel_id,
+                    e
+                );
+                return false;
+            }
+        };
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if status.is_success() {
+            tracing::info!(
+                "createPost: added the bot {} to channel {} ({})",
+                user_id,
+                channel_id,
+                status
+            );
+            return true;
+        }
+        let err = MattermostApiError::from_body(status, &text);
+        if err.id.contains("already") || err.message.to_lowercase().contains("already") {
+            // Already a member: the 403 came from something else (typically a
+            // channel id that does not exist on this server) - do not retry.
+            return false;
+        }
+        tracing::warn!(
+            "createPost: cannot add the bot to channel {}: {}",
+            channel_id,
+            err.describe("addChannelMember", Some(channel_id))
+        );
+        false
+    }
+
+    /// Send ONE message with the adapter's delivery policy:
+    ///   - 400 "message too long" -> adaptive split (the server `MaxPostSize`
+    ///     may be lower than the default we assume),
+    ///   - 400 "Invalid RootId parameter." -> retry once WITHOUT `root_id` (a
+    ///     stale / cross-channel thread root must not drop the message),
+    ///   - 403 permissions -> self-join the channel once and retry,
+    ///   - 429 / 5xx / transport -> bounded retry with a linear backoff.
+    ///
+    /// A permanent failure is returned to the caller: never silently dropped.
+    async fn post_one(
+        &self,
+        channel_id: &str,
+        message: &str,
+        root_id: Option<&str>,
+    ) -> std::result::Result<String, MattermostApiError> {
+        let mut attempt = 0usize;
+        let mut joined = false;
+        let mut root = root_id.map(|s| s.to_string());
+        let current = message.to_string();
+
+        loop {
+            attempt += 1;
+            match self
+                .post_message_raw(channel_id, &current, root.as_deref())
+                .await
+            {
+                Ok(id) => return Ok(id),
+                Err(err) => {
+                    if err.is_permissions() && !joined {
+                        joined = true;
+                        tracing::warn!(
+                            "createPost 403 on channel {}: adding the bot to the channel and retrying. {}",
+                            channel_id,
+                            err.describe("createPost", Some(channel_id))
+                        );
+                        if self.join_channel(channel_id).await {
+                            continue;
+                        }
+                        return Err(err);
+                    }
+
+                    if err.is_message_too_long() {
+                        let chars = current.chars().count();
+                        let half = std::cmp::max(1, chars / 2);
+                        let (first_half, second_half) = split_at_char(&current, half);
+                        if chars <= 1 || second_half.is_empty() {
+                            // A single character cannot be split further: the
+                            // too-long answer is permanent, surface it.
+                            return Err(err);
+                        }
+                        tracing::warn!(
+                            "createPost: message of {} chars rejected as too long on channel {}; splitting into {}+{} chars. {}",
+                            chars,
+                            channel_id,
+                            first_half.chars().count(),
+                            second_half.chars().count(),
+                            err.describe("createPost", Some(channel_id))
+                        );
+                        let first =
+                            Box::pin(self.post_one(channel_id, &first_half, root.as_deref()))
+                                .await?;
+                        let reply_to = root.clone().unwrap_or_else(|| first.clone());
+                        Box::pin(self.post_one(channel_id, &second_half, Some(&reply_to))).await?;
+                        return Ok(first);
+                    }
+
+                    if err.is_invalid_root_id() && root.is_some() {
+                        tracing::warn!(
+                            "createPost: invalid root_id {:?} on channel {}; retrying without the thread root so the message is delivered. {}",
+                            root,
+                            channel_id,
+                            err.describe("createPost", Some(channel_id))
+                        );
+                        root = None;
+                        continue;
+                    }
+
+                    if err.is_transient() && attempt < MATTERMOST_POST_ATTEMPTS {
+                        let backoff = MATTERMOST_POST_RETRY_BASE_MS * attempt as u64;
+                        tracing::warn!(
+                            "createPost transient failure (attempt {}/{}), retrying in {}ms: {}",
+                            attempt,
+                            MATTERMOST_POST_ATTEMPTS,
+                            backoff,
+                            err.describe("createPost", Some(channel_id))
+                        );
+                        tokio::time::sleep(Duration::from_millis(backoff)).await;
+                        continue;
+                    }
+
+                    return Err(err);
+                }
+            }
+        }
     }
 }
 
@@ -984,6 +1439,48 @@ impl MattermostClient {
         ))
     }
 
+    /// Find a channel id by its NAME inside a team.
+    ///
+    /// Used to resolve the fallback target (`setup_team` + `setup_channel`) on
+    /// the server when the configured delivery target is unreachable: a name
+    /// lookup survives a channel that was re-created (a stale channel id does
+    /// not). Only called on a delivery failure, never on the happy path.
+    async fn find_channel_id_by_name(
+        &self,
+        team_name: &str,
+        channel_name: &str,
+    ) -> Result<Option<String>> {
+        if team_name.is_empty() || channel_name.is_empty() {
+            return Ok(None);
+        }
+        let Some(team_id) = self.find_team_by_name(team_name).await? else {
+            return Ok(None);
+        };
+        let resp = self
+            .http_client
+            .get(format!(
+                "{}/api/v4/teams/{}/channels/name/{}",
+                self.api_base, team_id, channel_name
+            ))
+            .header("Authorization", &self.auth_header)
+            .send()
+            .await?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let text = resp.text().await.unwrap_or_default();
+        if status.is_success() {
+            let channel: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+            return Ok(channel["id"].as_str().map(|s| s.to_string()));
+        }
+        Err(anyhow::anyhow!(
+            "Mattermost findChannelIdByName failed ({}): {}",
+            status,
+            text
+        ))
+    }
+
     /// Find user by username.
     async fn find_user_by_username(&self, username: &str) -> Result<Option<(String, bool)>> {
         let users = self.get_users_all().await?;
@@ -1271,6 +1768,12 @@ struct PluginConfig {
     /// to Mattermost; every intermediate delivery is suppressed (no API call).
     #[serde(default, deserialize_with = "deserialize_bool_from_string_or_bool")]
     first_last_only: bool,
+    /// Channel that receives a message the configured channel cannot accept
+    /// (Mattermost answers 403 `api.context.permissions.app_error` for a
+    /// missing or inaccessible channel). Without it such a delivery fails
+    /// loudly instead of being silently dropped.
+    #[serde(default)]
+    fallback_channel_id: Option<String>,
 }
 
 impl PluginConfig {
@@ -1513,7 +2016,7 @@ async fn main() -> Result<()> {
     writer.flush().await?;
 
     let api_base = config.agent_api_base();
-    let server_url = config.server_url;
+    let server_url = config.server_url.clone();
     let secret_name = config
         .access_token_name
         .as_deref()
@@ -2090,7 +2593,16 @@ async fn main() -> Result<()> {
             "deliver" => {
                 if let Some(params) = request.params {
                     match serde_json::from_value::<DeliverParams>(params) {
-                        Ok(p) => handle_deliver(req_id, &client, &p, config.first_last_only).await,
+                        Ok(p) => {
+                            handle_deliver(
+                                req_id,
+                                &client,
+                                &p,
+                                config.first_last_only,
+                                &FallbackTarget::from_config(&config),
+                            )
+                            .await
+                        }
                         Err(e) => make_error(req_id, -1, &format!("Invalid deliver params: {}", e)),
                     }
                 } else {
@@ -2184,11 +2696,92 @@ async fn handle_initialize(id: u64) -> PluginResponse {
     make_success(id, result)
 }
 
+/// Deliver a message to the FALLBACK channel when the configured channel is
+/// unreachable (403 `api.context.permissions.app_error`, which Mattermost also
+/// returns for a channel id that does not exist on the server): keeping the
+/// message beats dropping it. The fallback post carries a header naming the
+/// original channel and the Mattermost error, so the routing problem stays
+/// visible. The original `root_id` is NOT reused: it belongs to the primary
+/// channel and Mattermost would reject it as an invalid root id.
+/// Where a delivery goes when the target channel is unreachable.
+///
+/// Both production classes (2026-09-20, 403 `api.context.permissions.app_error`)
+/// were delivery targets whose channel id does not exist on the Mattermost
+/// server: Mattermost hides a missing (or inaccessible) channel behind that
+/// 403. Resolution order:
+///   1. an explicitly configured `fallback_channel_id`;
+///   2. otherwise the agent's OWN setup channel (`setup_team` + `setup_channel`)
+///      resolved BY NAME on the server, so a message is still delivered
+///      somewhere visible with zero operator configuration.
+///   3. otherwise no fallback: the failure is surfaced loudly (never dropped).
+#[derive(Debug, Clone, Default)]
+struct FallbackTarget {
+    /// Explicit `fallback_channel_id` config value (a Mattermost channel id).
+    channel_id: Option<String>,
+    /// Team name used for the by-name lookup when no id is configured.
+    team: String,
+    /// Channel name used for the by-name lookup when no id is configured.
+    channel: String,
+}
+
+impl FallbackTarget {
+    fn from_config(config: &PluginConfig) -> Self {
+        Self {
+            channel_id: config
+                .fallback_channel_id
+                .clone()
+                .filter(|id| !id.is_empty()),
+            team: config.setup_team.clone(),
+            channel: config.setup_channel.clone(),
+        }
+    }
+
+    /// The channel id to deliver to, or None when nothing can be resolved.
+    async fn resolve(&self, client: &MattermostClient) -> Option<String> {
+        if let Some(id) = self.channel_id.as_deref() {
+            return Some(id.to_string());
+        }
+        match client
+            .find_channel_id_by_name(&self.team, &self.channel)
+            .await
+        {
+            Ok(Some(id)) => Some(id),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(
+                    "createPost: could not resolve the setup channel '{}' in team '{}' as a fallback: {}",
+                    self.channel,
+                    self.team,
+                    e
+                );
+                None
+            }
+        }
+    }
+}
+
+async fn deliver_to_fallback(
+    client: &MattermostClient,
+    fallback_channel_id: &str,
+    channel_id: &str,
+    content: &str,
+    err: &MattermostApiError,
+) -> std::result::Result<String, MattermostApiError> {
+    let message = format!(
+        ":warning: could not post to channel `{}` ({}); delivering here instead. Mattermost error: {} ({})\n\n{}",
+        channel_id, err.status_text, err.message, err.id, content
+    );
+    client
+        .create_post(fallback_channel_id, &message, None)
+        .await
+}
+
 async fn handle_deliver(
     id: u64,
     client: &MattermostClient,
     params: &DeliverParams,
     first_last_only: bool,
+    fallback: &FallbackTarget,
 ) -> PluginResponse {
     let channel_id = &params.resource_identifier;
     let content = &params.content;
@@ -2260,7 +2853,15 @@ async fn handle_deliver(
         );
     }
 
-    match params.msg_type.as_str() {
+    // Delivery with a permanent-failure remedy. `create_post` already handles the
+    // recoverable classes (chunking of oversized posts, stale root_id, 403
+    // self-join, bounded retry of transient errors); what remains here is a
+    // channel the bot cannot post to at all (Mattermost answers 403
+    // `api.context.permissions.app_error` for a missing OR inaccessible
+    // channel). With a fallback channel configured the message is delivered
+    // there with a warning header instead of being dropped; otherwise the FULL
+    // Mattermost error surfaces to the core, which logs it.
+    let (result, content_to_send) = match params.msg_type.as_str() {
         "tool" | "plan" | "reasoning" => {
             let prefix = match params.msg_type.as_str() {
                 "tool" => ":wrench:",
@@ -2273,53 +2874,68 @@ async fn handle_deliver(
             } else {
                 format!("{} {}", prefix, content)
             };
-
-            match client.create_post(channel_id, &display, root_id).await {
-                Ok(post_id) => make_success(
-                    id,
-                    serde_json::json!({
-                        "delivered": true,
-                        "external_id": post_id,
-                    }),
-                ),
-                Err(e) => make_error(id, -1, &format!("Failed to send tool message: {}", e)),
-            }
+            let result = client.create_post(channel_id, &display, root_id).await;
+            (result, display)
         }
+        "summary" => (
+            client.create_post(channel_id, content, root_id).await,
+            content.clone(),
+        ),
+        _ => (
+            client.create_post(channel_id, content, root_id).await,
+            content.clone(),
+        ),
+    };
 
-        "summary" => match client.create_post(channel_id, content, root_id).await {
-            Ok(post_id) => make_success(
-                id,
-                serde_json::json!({
-                    "delivered": true,
-                    "external_id": post_id,
-                }),
-            ),
-            Err(e) => make_error(id, -1, &format!("Failed to send summary: {}", e)),
-        },
-
-        "message" | "error" | "notification" => {
-            match client.create_post(channel_id, content, root_id).await {
-                Ok(post_id) => make_success(
-                    id,
-                    serde_json::json!({
-                        "delivered": true,
-                        "external_id": post_id,
-                    }),
-                ),
-                Err(e) => make_error(id, -1, &format!("Failed to send message: {}", e)),
+    match result {
+        Ok(post_id) => make_success(
+            id,
+            serde_json::json!({
+                "delivered": true,
+                "external_id": post_id,
+            }),
+        ),
+        Err(err) => {
+            let resolved_fallback = fallback.resolve(client).await;
+            if let Some(fallback) = resolved_fallback.as_deref() {
+                match deliver_to_fallback(client, fallback, channel_id, &content_to_send, &err)
+                    .await
+                {
+                    Ok(post_id) => {
+                        tracing::error!(
+                            "createPost: channel {} unreachable, delivered to fallback channel {} instead. {}",
+                            channel_id,
+                            fallback,
+                            err.describe("createPost", Some(channel_id))
+                        );
+                        return make_success(
+                            id,
+                            serde_json::json!({
+                                "delivered": true,
+                                "external_id": post_id,
+                                "fallback_channel_id": fallback,
+                                "primary_channel_id": channel_id,
+                            }),
+                        );
+                    }
+                    Err(fallback_err) => {
+                        tracing::error!(
+                            "createPost: channel {} unreachable AND fallback channel {} failed: {}",
+                            channel_id,
+                            fallback,
+                            fallback_err.describe("createPost", Some(fallback))
+                        );
+                    }
+                }
             }
+            tracing::error!(
+                "createPost: message NOT delivered ({} chars to channel {}): {}",
+                content_to_send.chars().count(),
+                channel_id,
+                err.describe("createPost", Some(channel_id))
+            );
+            make_error(id, -1, &err.describe("createPost", Some(channel_id)))
         }
-
-        _ => match client.create_post(channel_id, content, root_id).await {
-            Ok(post_id) => make_success(
-                id,
-                serde_json::json!({
-                    "delivered": true,
-                    "external_id": post_id,
-                }),
-            ),
-            Err(e) => make_error(id, -1, &format!("Failed to send message: {}", e)),
-        },
     }
 }
 
@@ -2493,6 +3109,7 @@ async fn login_admin_client(
         http_client,
         api_base: server_url.trim_end_matches('/').to_string(),
         auth_header: session_auth,
+        self_user_id: std::sync::Mutex::new(None),
         typing_parent_cache: std::sync::Mutex::new(HashMap::new()),
     })
 }
@@ -4802,5 +5419,519 @@ mod tests {
         // A blank post id and root are ignored.
         note_thread_scope("", "");
         assert_eq!(known_thread_scope(""), None);
+    }
+    // ── createPost delivery: 400 / 403 classes (production 2026-09-20) ───────
+    //
+    // Measured against a live Mattermost team-edition server (2026-09-20):
+    //   * a 20000-char message -> HTTP 400
+    //     `model.post.is_valid.message_length.app_error`
+    //     ("Post Message property is longer than the maximum permitted length."),
+    //     a 16383-char message -> HTTP 201 (default ServiceSettings.MaxPostSize),
+    //     so the whole tool/summary message was dropped (65x/24h in production);
+    //   * a post to a channel the bot cannot write to -> HTTP 403
+    //     `api.context.permissions.app_error` (19x/24h; Mattermost answers this
+    //     also for a channel id that does not exist on the server);
+    //   * a `root_id` that is not a post of the target channel -> HTTP 400
+    //     "Invalid RootId parameter." (49x/24h).
+
+    const MM_TOO_LONG_ERROR: &str = r#"{"id":"model.post.is_valid.message_length.app_error","message":"Post Message property is longer than the maximum permitted length.","detailed_error":"","request_id":"req-too-long","status_code":400}"#;
+    const MM_PERMISSION_ERROR: &str = r#"{"id":"api.context.permissions.app_error","message":"You do not have the appropriate permissions.","detailed_error":"","request_id":"req-403","status_code":403}"#;
+    const MM_INVALID_ROOT_ERROR: &str = r#"{"id":"api.post.create_post.root_id.app_error","message":"Invalid RootId parameter.","detailed_error":"","request_id":"req-root","status_code":400}"#;
+
+    /// HTTP server that reads the FULL request body (honouring Content-Length)
+    /// and answers it through `handler(body) -> (status, response_body)`.
+    struct PostServer {
+        addr: String,
+        bodies: CapturedRequests,
+    }
+
+    impl PostServer {
+        fn start<F>(handler: F) -> Self
+        where
+            F: Fn(&str) -> (u16, String) + Send + Sync + 'static,
+        {
+            let captured: CapturedRequests = Arc::new(Mutex::new(Vec::new()));
+            let sink = captured.clone();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind post server");
+            let addr = format!("http://{}", listener.local_addr().unwrap());
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { break };
+                    let mut buf: Vec<u8> = Vec::new();
+                    let mut head_end: Option<usize> = None;
+                    let mut content_length = 0usize;
+                    loop {
+                        if head_end.is_none() {
+                            if let Some(pos) = find_bytes(&buf, b"\r\n\r\n") {
+                                head_end = Some(pos + 4);
+                                let head = String::from_utf8_lossy(&buf[..pos]).to_string();
+                                for line in head.lines() {
+                                    let lower = line.to_ascii_lowercase();
+                                    if let Some(v) = lower.strip_prefix("content-length:") {
+                                        content_length = v.trim().parse().unwrap_or(0);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(start) = head_end {
+                            if buf.len() >= start + content_length {
+                                break;
+                            }
+                        }
+                        let mut chunk = [0u8; 8192];
+                        let n = std::io::Read::read(&mut stream, &mut chunk).unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                    let start = head_end.unwrap_or(buf.len()).min(buf.len());
+                    let body = String::from_utf8_lossy(&buf[start..]).to_string();
+                    let path = String::from_utf8_lossy(&buf)
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .unwrap_or_default()
+                        .to_string();
+                    sink.lock().push((path, body.clone()));
+                    let (status, resp_body) = handler(&body);
+                    let reason = match status {
+                        200 => "OK",
+                        201 => "Created",
+                        400 => "Bad Request",
+                        403 => "Forbidden",
+                        404 => "Not Found",
+                        429 => "Too Many Requests",
+                        500 => "Internal Server Error",
+                        _ => "Error",
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        status,
+                        reason,
+                        resp_body.len(),
+                        resp_body
+                    );
+                    let _ = std::io::Write::write_all(&mut stream, resp.as_bytes());
+                }
+            });
+            PostServer {
+                addr,
+                bodies: captured,
+            }
+        }
+    }
+
+    fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    /// Deliver params for a channel-level `message` (seq 0, so no thread root is
+    /// required): the shape the core sends for a normal delivery.
+    fn message_deliver_params(channel_id: &str, content: &str) -> DeliverParams {
+        serde_json::from_value(serde_json::json!({
+            "resource_identifier": channel_id,
+            "content": content,
+            "msg_type": "message",
+            "thread_sequence": 0,
+        }))
+        .expect("DeliverParams")
+    }
+
+    fn posted_message_len(body: &str) -> usize {
+        serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|j| j["message"].as_str().map(|m| m.chars().count()))
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn split_message_chunks_bounds_and_preserves_content() {
+        let text: String = (0..2000).map(|i| format!("line {}\n", i)).collect();
+        let chunks = split_message_chunks(&text, 500);
+        assert!(chunks.len() > 1);
+        for c in &chunks {
+            assert!(
+                c.chars().count() <= 500,
+                "chunk of {} chars",
+                c.chars().count()
+            );
+        }
+        assert_eq!(chunks.concat(), text, "splitting must not lose content");
+
+        // A single line longer than the limit is hard-split on char boundaries.
+        let long_line = "x".repeat(1000);
+        let chunks = split_message_chunks(&long_line, 300);
+        assert_eq!(chunks.len(), 4);
+        assert!(chunks.iter().all(|c| c.chars().count() <= 300));
+        assert_eq!(chunks.concat(), long_line);
+
+        // Multi-byte characters: a char count, never a byte count.
+        let uni = "\u{e9}".repeat(10);
+        let chunks = split_message_chunks(&uni, 3);
+        assert_eq!(chunks.len(), 4);
+        assert_eq!(chunks.concat(), uni);
+
+        // Under the limit: untouched, single chunk.
+        assert_eq!(
+            split_message_chunks("short", 500),
+            vec!["short".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn create_post_chunks_an_oversized_message_into_a_chain() {
+        let srv = PostServer::start(|_| (201, r#"{"id":"post-ok"}"#.to_string()));
+        let client = MattermostClient::new(&srv.addr, "test-token");
+
+        // 20000 chars > the 16383 Mattermost limit: the production 400 class
+        // that used to drop the whole tool/summary message.
+        let message = "a".repeat(20_000);
+        let id = client
+            .create_post("chan-1", &message, None)
+            .await
+            .expect("an oversized message must be delivered, not dropped");
+        assert_eq!(id, "post-ok");
+
+        let got = srv.bodies.lock().clone();
+        assert_eq!(got.len(), 2, "20000 chars must be split into 2 chunks");
+        for (idx, (path, body)) in got.iter().enumerate() {
+            assert_eq!(path, "/api/v4/posts");
+            let json: serde_json::Value = serde_json::from_str(body).expect("json body");
+            let msg = json["message"].as_str().expect("message");
+            assert!(
+                msg.chars().count() <= MATTERMOST_CHUNK_CHARS,
+                "chunk {} carries {} chars",
+                idx,
+                msg.chars().count()
+            );
+            assert_eq!(json["channel_id"], "chan-1");
+            if idx == 0 {
+                assert!(json.get("root_id").is_none());
+                assert!(msg.contains("_(part 1/2)_"));
+            } else {
+                assert_eq!(
+                    json["root_id"], "post-ok",
+                    "later chunks stay in the thread"
+                );
+                assert!(msg.contains("_(part 2/2)_"));
+            }
+        }
+        let total: usize = got
+            .iter()
+            .map(|(_, b)| {
+                let msg = serde_json::from_str::<serde_json::Value>(b).expect("json")["message"]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+                // Strip the " _(part i/n)_" marker before counting content
+                // chars (the marker itself contains an 'a').
+                let body = msg.split(" _(part ").next().unwrap_or("").to_string();
+                body.chars().filter(|c| *c == 'a').count()
+            })
+            .sum();
+        assert_eq!(total, 20_000, "no content may be lost");
+    }
+
+    #[tokio::test]
+    async fn create_post_adapts_to_a_lower_server_post_limit() {
+        // A server configured with MaxPostSize = 5000 (below the 16383 default
+        // our chunk size assumes) answers every longer post with the 400
+        // `message_length` error: the plugin must halve the chunk until it fits.
+        let srv = PostServer::start(|body| {
+            if posted_message_len(body) > 5_000 {
+                (400, MM_TOO_LONG_ERROR.to_string())
+            } else {
+                (201, r#"{"id":"post-small"}"#.to_string())
+            }
+        });
+        let client = MattermostClient::new(&srv.addr, "test-token");
+        let message = "b".repeat(20_000);
+        let id = client
+            .create_post("chan-1", &message, None)
+            .await
+            .expect("the adaptive split must deliver the message");
+        assert_eq!(id, "post-small");
+
+        let got = srv.bodies.lock().clone();
+        let fitting = got
+            .iter()
+            .filter(|(_, b)| posted_message_len(b) <= 5_000)
+            .count();
+        assert!(
+            fitting >= 3,
+            "expected re-split chunks that fit the server limit, got {} posts ({} fitting)",
+            got.len(),
+            fitting
+        );
+        assert!(
+            got.iter()
+                .all(|(_, b)| posted_message_len(b) <= MATTERMOST_CHUNK_CHARS + 64),
+            "no post may exceed the chunk target"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_post_retries_without_a_stale_root_id() {
+        // Production 400 class "Invalid RootId parameter." (49x/24h): the root
+        // post is not part of the target channel, so the reply is impossible.
+        // The message must still be delivered, channel-level.
+        let srv = PostServer::start(|body| {
+            if body.contains("stale-root") {
+                (400, MM_INVALID_ROOT_ERROR.to_string())
+            } else {
+                (201, r#"{"id":"post-no-root"}"#.to_string())
+            }
+        });
+        let client = MattermostClient::new(&srv.addr, "test-token");
+        let id = client
+            .create_post("chan-1", "hello", Some("stale-root"))
+            .await
+            .expect("the message must be delivered instead of dropped");
+        assert_eq!(id, "post-no-root");
+
+        let got = srv.bodies.lock().clone();
+        assert_eq!(got.len(), 2, "exactly one root_id retry is expected");
+        assert!(got[0].1.contains("stale-root"));
+        assert!(
+            !got[1].1.contains("root_id"),
+            "the retry must drop root_id: {}",
+            got[1].1
+        );
+    }
+
+    #[tokio::test]
+    async fn create_post_self_joins_the_channel_after_a_403() {
+        // 403 `api.context.permissions.app_error`: the bot is not a member of
+        // the channel. The plugin resolves its own user, adds itself to the
+        // (public) channel and retries the post instead of dropping it.
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let srv = PostServer::start(move |_body| {
+            let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match n {
+                0 => (403, MM_PERMISSION_ERROR.to_string()),
+                1 => (200, r#"{"id":"bot-1","username":"omnibot"}"#.to_string()),
+                2 => (
+                    201,
+                    r#"{"channel_id":"chan-1","user_id":"bot-1"}"#.to_string(),
+                ),
+                _ => (201, r#"{"id":"post-after-join"}"#.to_string()),
+            }
+        });
+        let client = MattermostClient::new(&srv.addr, "test-token");
+        let id = client
+            .create_post("chan-1", "hello", None)
+            .await
+            .expect("a 403 must trigger a self-join and a retry");
+        assert_eq!(id, "post-after-join");
+
+        let got = srv.bodies.lock().clone();
+        let paths: Vec<&str> = got.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "/api/v4/posts",
+                "/api/v4/users/me",
+                "/api/v4/channels/chan-1/members",
+                "/api/v4/posts",
+            ]
+        );
+        assert!(
+            got[2].1.contains("bot-1"),
+            "the bot adds itself to the channel"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_post_surfaces_the_full_mattermost_error_payload() {
+        // A permanent 400 that no remedy applies to must keep the Mattermost
+        // error id / message / detailed_error / request_id AND name the channel,
+        // otherwise a dropped message is indistinguishable from a delivered one.
+        let srv = PostServer::start(|_| {
+            (
+                400,
+                r#"{"id":"api.post.create_post.channel_id.app_error","message":"Invalid channel id","detailed_error":"the channel does not exist","request_id":"req-full","status_code":400}"#.to_string(),
+            )
+        });
+        let client = MattermostClient::new(&srv.addr, "test-token");
+        let err = client
+            .create_post("dead-chan", "hello", None)
+            .await
+            .expect_err("a permanent 400 must surface");
+        let text = err.describe("createPost", Some("dead-chan"));
+        assert!(
+            text.contains("Mattermost createPost error (400 Bad Request)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("api.post.create_post.channel_id.app_error"),
+            "{text}"
+        );
+        assert!(text.contains("Invalid channel id"), "{text}");
+        assert!(text.contains("the channel does not exist"), "{text}");
+        assert!(text.contains("req-full"), "{text}");
+        assert!(text.contains("[channel=dead-chan]"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn handle_deliver_routes_to_the_fallback_channel_on_a_permanent_403() {
+        // The configured channel id does not exist on the server (production
+        // 403 class): the self-join attempt fails too (no channel row), so the
+        // message is delivered to the configured fallback channel with a warning
+        // header naming the original channel instead of being dropped.
+        let srv = PostServer::start(|body| {
+            let json: serde_json::Value =
+                serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+            if json["user_id"].is_string() || json["channel_id"] == "dead-chan" {
+                (403, MM_PERMISSION_ERROR.to_string())
+            } else {
+                (201, r#"{"id":"post-fallback"}"#.to_string())
+            }
+        });
+        let client = MattermostClient::new(&srv.addr, "test-token");
+        let params = message_deliver_params("dead-chan", "tool output");
+
+        let fallback = FallbackTarget {
+            channel_id: Some("fallback-chan".to_string()),
+            team: String::new(),
+            channel: String::new(),
+        };
+        let resp = handle_deliver(7, &client, &params, false, &fallback).await;
+        let PluginResponse::Success { id, result } = resp else {
+            panic!("a fallback delivery must succeed");
+        };
+        assert_eq!(id, 7);
+        assert_eq!(result["delivered"], true);
+        assert_eq!(result["external_id"], "post-fallback");
+        assert_eq!(result["fallback_channel_id"], "fallback-chan");
+        assert_eq!(result["primary_channel_id"], "dead-chan");
+
+        let got = srv.bodies.lock().clone();
+        let last = got.last().expect("a fallback post").clone();
+        let json: serde_json::Value = serde_json::from_str(&last.1).expect("json");
+        assert_eq!(json["channel_id"], "fallback-chan");
+        let msg = json["message"].as_str().unwrap();
+        assert!(
+            msg.contains("dead-chan"),
+            "the header names the original channel: {msg}"
+        );
+        assert!(msg.contains("tool output"), "the content is kept: {msg}");
+    }
+
+    #[tokio::test]
+    async fn handle_deliver_surfaces_a_403_when_no_fallback_is_configured() {
+        // Without a fallback the failure must be a loud plugin error (the core
+        // logs it), never a silent drop.
+        let srv = PostServer::start(|_| (403, MM_PERMISSION_ERROR.to_string()));
+        let client = MattermostClient::new(&srv.addr, "test-token");
+        let params = message_deliver_params("dead-chan", "tool output");
+        let resp = handle_deliver(8, &client, &params, false, &FallbackTarget::default()).await;
+        let PluginResponse::Error { id, error } = resp else {
+            panic!("a 403 without a fallback must surface as an error");
+        };
+        assert_eq!(id, 8);
+        assert!(
+            error.message.contains("createPost error (403 Forbidden)"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("api.context.permissions.app_error"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("[channel=dead-chan]"),
+            "{}",
+            error.message
+        );
+    }
+    #[tokio::test]
+    async fn fallback_resolves_the_setup_channel_by_name_when_no_id_is_configured() {
+        // 403 root cause: the delivery target's channel id does not exist on
+        // the Mattermost server (Mattermost hides that behind
+        // `api.context.permissions.app_error`). With no explicit fallback id
+        // configured the adapter must still route the message to the agent's
+        // own setup channel, resolved BY NAME, so a message is never dropped.
+        let srv = PostServer::start(|_| (200, r#"{"id":"chan-resolved"}"#.to_string()));
+        let client = MattermostClient::new(&srv.addr, "test-token");
+        let target = FallbackTarget {
+            channel_id: None,
+            team: "myteam".to_string(),
+            channel: "omnidev".to_string(),
+        };
+
+        let resolved = target.resolve(&client).await;
+        assert_eq!(resolved.as_deref(), Some("chan-resolved"));
+
+        let got = srv.bodies.lock().clone();
+        let paths: Vec<&str> = got.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(paths[0], "/api/v4/teams/name/myteam");
+        assert_eq!(
+            paths[1], "/api/v4/teams/chan-resolved/channels/name/omnidev",
+            "the channel is resolved by NAME on the server, so a re-created \
+             channel with a new id is still reachable"
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_is_none_and_makes_no_request_when_nothing_is_configured() {
+        let srv = PostServer::start(|_| (200, "{}".to_string()));
+        let client = MattermostClient::new(&srv.addr, "test-token");
+
+        let resolved = FallbackTarget::default().resolve(&client).await;
+        assert!(resolved.is_none());
+        assert!(
+            srv.bodies.lock().is_empty(),
+            "no fallback configured and no setup channel: no HTTP probe"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_deliver_routes_a_403_to_the_setup_channel_resolved_by_name() {
+        // End-to-end variant of the 403 remedy with ZERO operator config: the
+        // target channel id is stale, the adapter resolves its own setup
+        // channel by name and delivers there, naming the original channel.
+        let srv = PostServer::start(|body| {
+            if body.is_empty() {
+                // The two name lookups (GET without a body).
+                return (200, r#"{"id":"chan-from-name"}"#.to_string());
+            }
+            let json: serde_json::Value =
+                serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+            if json["user_id"].is_string() || json["channel_id"] == "dead-chan" {
+                (403, MM_PERMISSION_ERROR.to_string())
+            } else {
+                (201, r#"{"id":"post-fallback"}"#.to_string())
+            }
+        });
+        let client = MattermostClient::new(&srv.addr, "test-token");
+        let params = message_deliver_params("dead-chan", "tool output");
+        let fallback = FallbackTarget {
+            channel_id: None,
+            team: "myteam".to_string(),
+            channel: "omnidev".to_string(),
+        };
+
+        let resp = handle_deliver(9, &client, &params, false, &fallback).await;
+        let PluginResponse::Success { result, .. } = resp else {
+            panic!("a 403 on a stale channel must be routed to the setup channel");
+        };
+        assert_eq!(result["delivered"], true);
+        assert_eq!(result["fallback_channel_id"], "chan-from-name");
+        assert_eq!(result["primary_channel_id"], "dead-chan");
+
+        let got = srv.bodies.lock().clone();
+        let last = got.last().expect("a fallback post").clone();
+        assert_eq!(last.0, "/api/v4/posts");
+        let json: serde_json::Value = serde_json::from_str(&last.1).expect("json");
+        assert_eq!(json["channel_id"], "chan-from-name");
+        let msg = json["message"].as_str().unwrap();
+        assert!(
+            msg.contains("dead-chan"),
+            "the header names the original: {msg}"
+        );
+        assert!(msg.contains("tool output"), "the content is kept: {msg}");
     }
 }
