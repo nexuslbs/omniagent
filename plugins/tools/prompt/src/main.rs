@@ -55,6 +55,11 @@ pub struct PluginConfig {
     /// entries are pruned when exceeded (death-spiral guard, see
     /// compact.rs::prune_summary_block).
     pub max_summary_chars: usize,
+    /// Extra token headroom subtracted from the hard budget once the provider
+    /// has billed MORE than it: absorbs tokenizer drift and the per-iteration
+    /// system injections (budget hint, notes) the compaction gate cannot
+    /// measure. See handle_compact_messages.
+    pub compact_headroom_tokens: usize,
     // Prompt builder
     pub memory_max_chars: usize,
     /// Task 9: when true, `prompt_generate` returns an ordered `sections`
@@ -87,6 +92,7 @@ impl PluginConfig {
             compact_max_passes: 3,
             compact_keep_step: 1,
             max_summary_chars: 50_000,
+            compact_headroom_tokens: 2_000,
             memory_max_chars: 5000,
             emit_sections: false,
         }
@@ -150,6 +156,9 @@ impl PluginConfig {
             }
             if let Some(v) = obj.get("max_summary_chars").and_then(&as_usize) {
                 cfg.max_summary_chars = v.max(1);
+            }
+            if let Some(v) = obj.get("compact_headroom_tokens").and_then(&as_usize) {
+                cfg.compact_headroom_tokens = v;
             }
             if let Some(v) = obj.get("condense_keep_turns").and_then(&as_usize) {
                 cfg.condense_keep_turns = v.max(1);
@@ -1697,6 +1706,190 @@ fn measure_size(items: &[crate::chat_message::ChatMessage], tokenizer_encoding: 
 }
 
 // ---------------------------------------------------------------------------
+// Deterministic shrink fallback (bounded last resort under the hard budget)
+// ---------------------------------------------------------------------------
+
+/// Minimum content size (chars) the truncation fallback leaves in a message:
+/// below this the truncation marker alone would dominate, so the message is
+/// skipped and the next-largest candidate is tried.
+const SHRINK_MIN_CHARS: usize = 1_000;
+
+/// Absolute bound on truncation rounds. Each round reduces the largest
+/// eligible message by at least the marker cost, so the loop always
+/// terminates; the cap only makes that bound explicit.
+const SHRINK_MAX_ROUNDS: usize = 24;
+
+/// Last-resort floor (chars) per message. When the per-message floors of the
+/// readable stage (SHRINK_MIN_CHARS) sum above the target - many eligible
+/// messages left - the fallback cuts each eligible message down to a stub
+/// instead of stopping over budget.
+const SHRINK_FLOOR_CHARS: usize = 200;
+
+/// Marker inserted where content was cut, so the model (and any reader of the
+/// durable dump) knows the text was truncated by the budget mechanism and
+/// not by the tool itself.
+fn truncation_marker(removed_chars: usize) -> String {
+    format!(
+        "\n[... {} chars truncated by the context compactor to fit the prompt token budget; the full text is in the thread context-*.json dump / auto-notes.md ...]\n",
+        removed_chars
+    )
+}
+
+/// Keep `keep_head` leading and `keep_tail` trailing chars, cut the middle.
+/// Returns the new content and the number of content chars dropped (0 = the
+/// message was too small to be worth truncating).
+fn truncate_middle(content: &str, keep_head: usize, keep_tail: usize) -> (String, usize) {
+    let total = content.chars().count();
+    if total <= keep_head + keep_tail + truncation_marker(0).chars().count() {
+        return (content.to_string(), 0);
+    }
+    let head: String = content.chars().take(keep_head).collect();
+    let tail: String = content
+        .chars()
+        .rev()
+        .take(keep_tail)
+        .collect::<Vec<char>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let removed = total - keep_head - keep_tail;
+    (
+        format!("{}{}{}", head, truncation_marker(removed), tail),
+        removed,
+    )
+}
+
+/// Size of a message as the compactor sees it (content + tool-call args).
+fn message_chars(m: &crate::chat_message::ChatMessage) -> usize {
+    let calls = m
+        .tool_calls
+        .as_ref()
+        .map(|calls| {
+            calls
+                .iter()
+                .map(|c| c.function.name.chars().count() + c.function.arguments.chars().count())
+                .sum::<usize>()
+        })
+        .unwrap_or(0);
+    m.content.chars().count() + calls
+}
+
+/// May this message's CONTENT be truncated by the budget fallback?
+///
+/// Tool results are the primary target: they are by far the largest content
+/// and their full text survives in the context-*.json dump / auto-notes.md.
+/// Assistant text is truncatable while its tool_calls payload is preserved
+/// verbatim (the provider still receives a structurally valid array). The
+/// frozen summary block and the per-iteration system injections ("=== ...")
+/// are truncatable because they are digests, not the task.
+///
+/// NEVER touched: the system prompt (first system message), the newest
+/// message, and the current (last) user turn - cutting those would remove the
+/// task itself.
+fn is_shrinkable(
+    m: &crate::chat_message::ChatMessage,
+    idx: usize,
+    newest_idx: usize,
+    last_user_idx: Option<usize>,
+    first_system_idx: Option<usize>,
+) -> bool {
+    if idx == newest_idx || Some(idx) == last_user_idx || Some(idx) == first_system_idx {
+        return false;
+    }
+    match m.role.as_str() {
+        "tool" => true,
+        "assistant" => m.tool_calls.is_some(),
+        "system" => {
+            m.content
+                .starts_with(crate::compact::COMPACTION_SUMMARY_MARKER)
+                || m.content.starts_with("=== ")
+        }
+        _ => false,
+    }
+}
+
+/// Deterministically shrink the message array until `measure_size` reports at
+/// most `target` tokens (or nothing is left to shrink). Returns the number of
+/// content chars dropped.
+///
+/// This is the bounded last resort behind the budget-gated progressive
+/// compaction: draining is bounded by `compact_max_passes` and always keeps
+/// the newest tool-call turn, so a single huge retained tool result, the
+/// frozen summary block, or the fixed preamble can leave the prompt over the
+/// target forever (the chronic "condensation did not reduce it" overshoot).
+/// Each round removes the estimated token deficit from the LARGEST eligible
+/// message, so the work is bounded by SHRINK_MAX_ROUNDS and always terminates.
+fn shrink_messages_to_target(
+    messages: &mut Vec<crate::chat_message::ChatMessage>,
+    target: usize,
+    tokenizer_encoding: &str,
+) -> usize {
+    let marker_cost = truncation_marker(0).chars().count();
+    let mut dropped_total = 0usize;
+    // Two stages: keep a readable digest first, and only when the array is
+    // STILL over the target (many eligible messages whose per-message floors
+    // sum above it) fall back to short stubs. Both stages are bounded by
+    // SHRINK_MAX_ROUNDS, so the reduction always terminates.
+    for floor in [SHRINK_MIN_CHARS, SHRINK_FLOOR_CHARS] {
+        for _ in 0..SHRINK_MAX_ROUNDS {
+            let size = measure_size(messages, tokenizer_encoding);
+            if size <= target {
+                break;
+            }
+            let newest_idx = messages.len().saturating_sub(1);
+            let first_system_idx = messages.iter().position(|m| m.role == "system");
+            let last_user_idx = messages.iter().rposition(|m| m.role == "user");
+            let mut best: Option<(usize, usize)> = None;
+            for (i, m) in messages.iter().enumerate() {
+                if !is_shrinkable(m, i, newest_idx, last_user_idx, first_system_idx) {
+                    continue;
+                }
+                let chars = m.content.chars().count();
+                // 3x margin: every round must make NET progress (the marker we
+                // insert has to cost less than what we remove). Without it a
+                // token deficit smaller than the marker reshapes the content
+                // while the array stays over the target - the exact stall that
+                // left the prompt 38 tokens over and re-logged the overshoot.
+                if chars.saturating_sub(floor) <= 3 * marker_cost {
+                    continue;
+                }
+                if best.map(|(c, _)| chars > c).unwrap_or(true) {
+                    best = Some((chars, i));
+                }
+            }
+            let Some((chars, idx)) = best else { break };
+            let removable = chars.saturating_sub(floor);
+            // Deficit in tokens -> chars via this array's own chars/token ratio.
+            let total_chars: usize = messages.iter().map(message_chars).sum();
+            let chars_per_token = if size > 0 {
+                (total_chars / size).max(1)
+            } else {
+                4
+            };
+            let deficit = size.saturating_sub(target);
+            let mut to_remove = deficit.saturating_mul(chars_per_token).max(3 * marker_cost);
+            if to_remove > removable {
+                to_remove = removable;
+            }
+            if to_remove <= marker_cost {
+                break;
+            }
+            let keep = chars.saturating_sub(to_remove);
+            let keep_head = keep * 2 / 3;
+            let keep_tail = keep - keep_head;
+            let (new_content, dropped) =
+                truncate_middle(&messages[idx].content, keep_head, keep_tail);
+            if dropped == 0 {
+                break;
+            }
+            messages[idx].content = new_content;
+            dropped_total += dropped;
+        }
+    }
+    dropped_total
+}
+
+// ---------------------------------------------------------------------------
 // Tool: prompt_compact_messages
 // ---------------------------------------------------------------------------
 
@@ -1798,17 +1991,72 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
     let mut entries = 0usize;
     let mut dump_file: Option<String> = None;
 
+    // ── Accounting alignment with the provider ──────────────────────────
+    // This plugin measures MESSAGES ONLY (measure_size). The provider bills
+    // more: the tool schemas sent alongside the messages, the chat template
+    // and its own tokenizer. `billed_prompt_tokens` is the provider's
+    // ground-truth prompt size for the array this tool last measured as
+    // `measured_tokens` (the core passes back the pair from the SAME
+    // request), so the difference is exactly the overhead the local measure
+    // cannot see. Compaction must therefore reduce the MEASURED size to
+    // hard_budget - overhead (- a small headroom), not merely to the soft
+    // budget: otherwise the provider keeps billing over the hard budget, the
+    // agent force-compacts on every iteration and the chronic
+    // "condensation did not reduce it" error is logged forever
+    // (279 error-level overshoots / 24h, 2026-09-20).
+    let billed_prompt_tokens = args["billed_prompt_tokens"].as_u64().unwrap_or(0) as usize;
+    let measured_tokens = args["measured_tokens"].as_u64().unwrap_or(0) as usize;
+    let over_billed = billed_prompt_tokens > hard_budget;
+    let overhead = if measured_tokens > 0 && billed_prompt_tokens > measured_tokens {
+        // Clamp: a provider number can be a cumulative/aggregate total, and
+        // tokenizers differ; never let the derived overhead drive the
+        // reduction target below half the hard budget (that would truncate
+        // every retained result on bogus input).
+        (billed_prompt_tokens - measured_tokens).min(hard_budget / 2)
+    } else {
+        0
+    };
+    let headroom = if over_billed {
+        cfg.compact_headroom_tokens
+    } else {
+        0
+    };
+    // Size our own measure must reach so the provider bills under the hard
+    // budget. Never above the hard budget; the soft budget stays the stricter
+    // reduction target whenever it already sits below it.
+    let hard_target = hard_budget
+        .saturating_sub(overhead)
+        .saturating_sub(headroom);
+    // The size the provider needs: while it bills OVER the hard budget the
+    // unmeasurable overhead has to come out of our own measure as well.
+    let must_fit_target = if over_billed {
+        hard_target
+    } else {
+        hard_budget
+    };
+    // Progressive-drain target: the soft budget (the historical reduction
+    // target), tightened to `hard_target` while the provider is overshooting.
+    let reduce_target = if over_billed {
+        soft_budget.min(hard_target)
+    } else {
+        soft_budget
+    };
+    // Truncation-fallback target: the drain target, but NEVER above what fits
+    // under the hard budget (a soft budget configured above the hard budget
+    // must not disable the reduction).
+    let effective_target = reduce_target.min(must_fit_target);
+
     if force_compact || current_size > hard_budget {
-        // Reduce to the soft budget: compact, and if still over soft, keep
+        // Reduce to the effective target: compact, and if still over, keep
         // compacting with a progressively smaller keep_recent. Compaction
         // stops when size <= soft or there is nothing more to compact
         // (keep_recent would hit 0 - compact_old_assistant_messages then
         // compacts every assistant tool-call message).
         //
-        // At most 3 passes: if the size is still over the soft budget after
-        // 3 progressively more aggressive compactions and there is material
-        // left to compact (keep_recent has not yet reached 0), raise an
-        // error instead of looping forever.
+        // At most `compact_max_passes` progressive passes; `keep` floors at 0
+        // (= no further draining). Whatever is still over the target
+        // afterwards is reduced by the deterministic truncation fallback below
+        // (bounded, always terminates).
         let mut keep = keep_recent;
         for pass in 0..cfg.compact_max_passes {
             let outcome = crate::compact::compact_old_assistant_messages(
@@ -1829,37 +2077,65 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
             }
             entries += outcome.dump_entries;
             let after_size = measure_size(&messages, &cfg.tokenizer_encoding);
-            if after_size <= soft_budget || keep == 0 {
+            if after_size <= reduce_target || keep == 0 {
                 break;
             }
             if pass + 1 == cfg.compact_max_passes {
-                // Maximum configured passes reached. Return the partial result;
-                // discarding it would make every later iteration repeat the same
+                // Maximum configured passes reached. Continue with the
+                // deterministic truncation fallback; discarding the partial
+                // result would make every later iteration repeat the same
                 // failed compaction forever.
                 break;
             }
             keep = keep.saturating_sub(cfg.compact_keep_step);
         }
     }
+
+    // ── Deterministic fallback: truncate the largest reducible content ──
+    // Progressive draining is bounded (compact_max_passes, keep floors at 1)
+    // and can still leave the prompt over the target: one retained tool result,
+    // the frozen summary block or the fixed preamble can dominate the array.
+    // Truncation is the last resort and is deterministic: largest eligible
+    // message first, head+tail kept with an explicit marker, repeated until the
+    // measured size is under the target or nothing is left to shrink. The
+    // system prompt, the current user turn, the newest message and the
+    // tool-call STRUCTURE (tool_calls / tool_call_id) are never modified.
+    let mut truncated_chars = 0usize;
+    if measure_size(&messages, &cfg.tokenizer_encoding) > effective_target {
+        truncated_chars =
+            shrink_messages_to_target(&mut messages, effective_target, &cfg.tokenizer_encoding);
+    }
+
     let after = messages.len();
+    let changed = before != after || truncated_chars > 0;
+    let after_size = measure_size(&messages, &cfg.tokenizer_encoding);
+    // `over_budget` tells the core whether the prompt STILL exceeds the size
+    // that fits under the hard budget; while it is true the core keeps forcing
+    // compaction (and stops logging the overshoot error as soon as it is
+    // false).
+    let still_over = after_size > must_fit_target;
 
     // Contract: return the compacted messages array when something changed,
     // or null when nothing was compacted. No boolean flags - the caller
     // applies the result iff it receives an array.
     let result = serde_json::json!({
-        "messages": if before != after {
+        "messages": if changed {
             serde_json::Value::Array(
                 messages.iter().map(|m| serde_json::to_value(m).unwrap_or(serde_json::Value::Null)).collect()
             )
         } else {
             serde_json::Value::Null
         },
-        "was_compacted": before != after,
+        "was_compacted": changed,
         "iteration": current_iteration,
         "dump_file": dump_file,
         "entries": entries,
         "before_count": before,
         "after_count": after,
+        "measured_tokens": after_size,
+        "effective_target": effective_target,
+        "over_budget": still_over,
+        "truncated_chars": truncated_chars,
     });
 
     Ok((
@@ -2857,6 +3133,93 @@ mod token_counting_tests {
         let (out, is_error) = handle_compact_messages(&args, cfg).await.unwrap();
         assert!(!is_error, "compact-messages must not error: {out}");
         serde_json::from_str(&out).unwrap()
+    }
+
+    // (c2) Chronic overshoot fix (279 ERROR-level compactions/24h, 2026-09-20):
+    // ONE compaction cycle must reduce the prompt to the size that makes the
+    // PROVIDER fit under the hard budget, even when the retained tool results
+    // alone exceed it, and must report over_budget=false so the core stops
+    // force-compacting (and stops logging the overshoot error). The billed
+    // tokens exceed the plugin's own measure (tool schemas the plugin never
+    // sees), so the target is hard_budget - overhead - headroom.
+    #[tokio::test]
+    async fn compaction_reaches_provider_hard_budget_with_truncation_fallback() {
+        let cfg = compact_cfg("");
+        let mut msgs = vec![ChatMessage {
+            role: "system".to_string(),
+            content: "SYSTEM PROMPT MUST SURVIVE".to_string(),
+            tool_call_id: None,
+            tool_calls: None,
+            name: None,
+        }];
+        // 5 tool-call turns x 200_000 chars of result (= 50_000 proxy tokens
+        // each): keep_recent=3 retains 3 of them, drains the 2 oldest.
+        for _ in 0..5 {
+            msgs.push(tool_call_msg("filesystem_read", "{}", "reading"));
+            msgs.push(tool_result("filesystem_read", &"X".repeat(200_000)));
+        }
+        msgs.push(user_msg("CURRENT USER TURN MUST SURVIVE"));
+        msgs.push(assistant_msg("working"));
+
+        let measured = measure_size(&msgs, "");
+        let hard = 20_000usize;
+        let soft = 10_000usize;
+        // The provider bills 5000 tokens more than the plugin can measure.
+        let billed = measured + 5_000;
+        assert!(
+            measured > hard,
+            "corpus must exceed the hard budget: {measured}"
+        );
+
+        let args = json!({
+            "messages": msgs
+                .iter()
+                .map(|m| serde_json::to_value(m).unwrap())
+                .collect::<Vec<_>>(),
+            "keep_recent": 3,
+            "soft_budget": soft,
+            "hard_budget": hard,
+            "force_compact": true,
+            "billed_prompt_tokens": billed,
+            "measured_tokens": measured,
+        });
+        let (out, is_error) = handle_compact_messages(&args, &cfg).await.unwrap();
+        assert!(!is_error, "compaction must not error: {out}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let target = v["effective_target"].as_u64().unwrap();
+        // hard - clamped overhead (5000) - headroom (2000), and never above the
+        // soft budget.
+        assert_eq!(target, 10_000, "effective target: {v}");
+        assert_eq!(v["over_budget"], false, "still over the target: {v}");
+        assert!(v["measured_tokens"].as_u64().unwrap() <= target, "{v}");
+        assert!(
+            v["truncated_chars"].as_u64().unwrap() > 0,
+            "deterministic fallback did not truncate: {v}"
+        );
+        let arr = v["messages"].as_array().expect("messages applied");
+        // The system prompt and the CURRENT user turn survive verbatim.
+        assert_eq!(arr[0]["content"], "SYSTEM PROMPT MUST SURVIVE");
+        assert_eq!(
+            arr[arr.len() - 2]["content"],
+            "CURRENT USER TURN MUST SURVIVE"
+        );
+        // The tool-call STRUCTURE is preserved; only content was truncated.
+        let with_calls = arr
+            .iter()
+            .find(|m| m["tool_calls"].is_array())
+            .expect("tool_calls preserved");
+        assert_eq!(
+            with_calls["tool_calls"][0]["function"]["name"],
+            "filesystem_read"
+        );
+        let tool_msg = arr
+            .iter()
+            .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("tool"))
+            .expect("tool result present");
+        assert!(
+            tool_msg["content"].as_str().unwrap().chars().count() < 200_000,
+            "retained tool result must be truncated"
+        );
     }
 
     // (a0) force_compact bypasses the threshold gate (core over-budget

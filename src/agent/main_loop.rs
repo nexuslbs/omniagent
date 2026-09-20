@@ -1170,6 +1170,19 @@ Previous plan:\n{}",
     // budget; the next condense call is then forced (force_compact=true) so the
     // plugin gate cannot silently under-trigger on a local chars/4 measure.
     let mut prev_over_budget = false;
+    // Provider-billed prompt tokens of the last LLM call, and the size the
+    // prompt plugin measured for THAT request (its `measured_tokens` result
+    // field). Their difference is the overhead the plugin's message-only
+    // measure cannot see (tool schemas, chat template, tokenizer drift); the
+    // plugin subtracts it from the hard budget so its reduction actually makes
+    // the PROVIDER fit under the hard budget (chronic "condensation did not
+    // reduce it" overshoots, 279/24h on 2026-09-20).
+    let mut last_billed_prompt_tokens: Option<u64> = None;
+    let mut last_measured_tokens: Option<u64> = None;
+    // One-shot WARN (never the looped ERROR) when the compactor reports it
+    // cannot shrink further: the fixed prefix alone does not fit the hard
+    // budget, so every iteration compacts - a state, not a per-span error.
+    let mut warned_unreducible = false;
     for _turn in 0..max_llm_calls {
         current_iter += 1; // increment before each LLM call
 
@@ -1416,6 +1429,13 @@ Previous plan:\n{}",
                     "hard_budget": eff_model_cfg.token_budget_hard,
                     "force_compact": prev_over_budget,
                     "read_only_tools": read_only_tools,
+                    // Accounting alignment: the provider's billed prompt tokens
+                    // for the request whose messages this tool measured as
+                    // `measured_tokens`. The plugin uses the difference
+                    // (non-message overhead) to compute the size it must reach
+                    // so the provider bills UNDER the hard budget.
+                    "billed_prompt_tokens": last_billed_prompt_tokens.unwrap_or(0),
+                    "measured_tokens": last_measured_tokens.unwrap_or(0),
                 }),
                 id: String::new(),
             };
@@ -1435,6 +1455,34 @@ Previous plan:\n{}",
                     } else if let Ok(result) =
                         serde_json::from_str::<serde_json::Value>(&res.content)
                     {
+                        // Plugin feedback (accounting alignment): the size the
+                        // plugin measured for the array it just handled, paired
+                        // with the provider-billed prompt tokens of the same
+                        // request this yields the overhead the plugin's
+                        // message-only measure cannot see.
+                        if let Some(m) = result.get("measured_tokens").and_then(|v| v.as_u64()) {
+                            last_measured_tokens = Some(m);
+                        }
+                        // `over_budget` = the prompt is STILL over what fits the
+                        // hard budget, so keep forcing compaction on the next
+                        // iteration (the plugin could not reduce further). Absent
+                        // (older plugin) = fall back to the previous behavior.
+                        let plugin_over_budget = result
+                            .get("over_budget")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        if plugin_over_budget && !warned_unreducible {
+                            warn!(
+                                "[context] Thread {}: prompt is still over the hard budget {} after compaction (measured {} tokens): the reducible content is exhausted, the fixed prefix alone does not fit. Compaction keeps firing without re-logging the overshoot error.",
+                                thread.id,
+                                eff_model_cfg.token_budget_hard,
+                                last_measured_tokens.unwrap_or(0),
+                            );
+                            warned_unreducible = true;
+                        } else if !plugin_over_budget {
+                            warned_unreducible = false;
+                        }
+                        prev_over_budget = plugin_over_budget;
                         // Contract: the tool returns the compacted messages array
                         // (apply it) OR null/absent (no change). The core is
                         // deliberately AGNOSTIC: it applies whatever the tool
@@ -1466,7 +1514,12 @@ Previous plan:\n{}",
                                 serde_json::from_value(serde_json::Value::Array(condensed.clone()))
                                     .unwrap_or(messages);
                             last_condense_iteration = current_iter;
-                            prev_over_budget = false; // compaction applied - re-evaluate from provider usage
+                            // prev_over_budget was set from the plugin's
+                            // `over_budget` above: it stays true while the prompt
+                            // is STILL over budget, so the next iteration keeps
+                            // forcing compaction instead of blindly trusting one
+                            // provider-usage sample (the chronic re-logged
+                            // overshoot error).
                             info!(
                                 "[context] Condensed messages via {}: {} → {} (iteration {})",
                                 condense_tool, before, after, current_iter,
@@ -1818,6 +1871,9 @@ Previous plan:\n{}",
             .as_ref()
             .map(|u| u.prompt_tokens as usize)
             .unwrap_or(0);
+        if billed_prompt > 0 {
+            last_billed_prompt_tokens = Some(billed_prompt as u64);
+        }
         if eff_model_cfg.token_budget_hard > 0 && billed_prompt > eff_model_cfg.token_budget_hard {
             if !prev_over_budget {
                 error!(
