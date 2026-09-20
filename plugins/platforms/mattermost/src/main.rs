@@ -5744,6 +5744,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_post_retries_a_transient_500_then_succeeds() {
+        // A transient Mattermost failure (429 / 5xx / transport) must be
+        // retried with a bounded backoff instead of dropping the message.
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let srv = PostServer::start(move |_body| {
+            let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                (
+                    500,
+                    r#"{"id":"api.context.internal_server_error.app_error","message":"boom","status_code":500}"#
+                        .to_string(),
+                )
+            } else {
+                (201, r#"{"id":"post-after-retry"}"#.to_string())
+            }
+        });
+        let client = MattermostClient::new(&srv.addr, "test-token");
+        let id = client
+            .create_post("chan-1", "hello", None)
+            .await
+            .expect("a transient 500 must be retried, not dropped");
+        assert_eq!(id, "post-after-retry");
+
+        let got = srv.bodies.lock().clone();
+        assert_eq!(got.len(), 2, "exactly one transient retry is expected");
+        assert!(
+            got.iter().all(|(p, _)| p == "/api/v4/posts"),
+            "the retry re-posts to /posts: {:?}",
+            got.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn create_post_gives_up_after_the_transient_budget_and_surfaces_it() {
+        // Exhausting the bounded retry budget must surface the failure (with the
+        // Mattermost payload) to the caller - a 5xx must never be swallowed.
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let srv = PostServer::start(move |_body| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (
+                503,
+                r#"{"id":"api.context.internal_server_error.app_error","message":"unavailable","status_code":503}"#
+                    .to_string(),
+            )
+        });
+        let client = MattermostClient::new(&srv.addr, "test-token");
+        let err = client
+            .create_post("chan-1", "hello", None)
+            .await
+            .expect_err("an exhausted retry budget must surface an error");
+        let described = err.describe("createPost", Some("chan-1"));
+        assert!(
+            described.contains("503"),
+            "the surfaced error keeps the HTTP status: {described}"
+        );
+        assert!(
+            described.contains("chan-1"),
+            "the surfaced error names the channel: {described}"
+        );
+        assert_eq!(
+            srv.bodies.lock().len(),
+            MATTERMOST_POST_ATTEMPTS,
+            "the retry budget is bounded"
+        );
+    }
+
+    #[tokio::test]
     async fn create_post_surfaces_the_full_mattermost_error_payload() {
         // A permanent 400 that no remedy applies to must keep the Mattermost
         // error id / message / detailed_error / request_id AND name the channel,
