@@ -1146,6 +1146,48 @@ impl Platform for ExternalPlatformClient {
                                                 }
                                             }
                                         }
+                                        "plugin_status" => {
+                                            // A platform plugin SELF-REPORTS a capability
+                                            // change, e.g. inbound DEGRADED because auth
+                                            // failed at boot and is being retried in the
+                                            // background, or `ok` when it recovered.
+                                            // Keep it in the log AND in GET /api/plugins
+                                            // (see set_platform_runtime_status).
+                                            let status = notif
+                                                .params
+                                                .as_ref()
+                                                .and_then(|p| p.get("status"))
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("unknown")
+                                                .to_string();
+                                            let message = notif
+                                                .params
+                                                .as_ref()
+                                                .and_then(|p| p.get("message"))
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("")
+                                                .to_string();
+                                            if status == "ok" {
+                                                tracing::info!(
+                                                    "Platform plugin '{}' reported status '{}': {}",
+                                                    plugin_name,
+                                                    status,
+                                                    message
+                                                );
+                                            } else {
+                                                tracing::warn!(
+                                                    "Platform plugin '{}' reported status '{}': {}",
+                                                    plugin_name,
+                                                    status,
+                                                    message
+                                                );
+                                            }
+                                            crate::platform::external::set_platform_runtime_status(
+                                                &plugin_name,
+                                                &status,
+                                                &message,
+                                            );
+                                        }
                                         "notify" => {
                                             // Just log notifications for now
                                             if let Some(params) = notif.params {

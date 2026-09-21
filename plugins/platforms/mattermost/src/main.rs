@@ -686,10 +686,10 @@ impl MattermostClient {
         Ok(channels)
     }
 
-    /// Get ALL channels of a team (public channels and private channels the
-    /// requesting user is a member of), paginated. Unlike get_user_channels,
-    /// this is NOT limited to channels the user has joined, so the plugin can
-    /// watch every channel of the team.
+    /// Get the PUBLIC channels of a team, paginated (`GET /teams/{t}/channels`
+    /// returns public channels only: a PRIVATE channel the bot is a member of
+    /// is NOT listed here, see `get_user_channels`). Used to auto-join public
+    /// team channels and to watch them.
     async fn get_team_channels(&self, team_id: &str) -> Result<Vec<MattermostChannel>> {
         let mut all: Vec<MattermostChannel> = Vec::new();
         let per_page: u32 = 200;
@@ -2296,133 +2296,41 @@ async fn main() -> Result<()> {
     let mut owned_access_token = access_token.unwrap_or_default();
     let mut client = MattermostClient::new(&server_url, &owned_access_token);
 
-    // Verify token by fetching bot user info.
-    // If the token is invalid/expired, attempt auto-recovery using admin credentials.
+    // Verify token by fetching bot user info, inside a BOUNDED
+    // exponential-backoff window: the `mattermost` container can still be
+    // starting when omniagent boots, and ONE `Connection refused` must not
+    // degrade the plugin permanently (incident 2026-09-21: every channel lost
+    // inbound until a manual plugin restart). Each attempt falls back to
+    // auto-recovery (fresh bot PAT via the admin credentials) when the token is
+    // invalid or expired.
     let bot_user: Option<MattermostUser> = if !owned_access_token.is_empty() {
-        match client.get_me().await {
-            Ok(u) => {
-                tracing::info!(
-                    "Authenticated as Mattermost user: {} ({})",
-                    u.username,
-                    u.id
-                );
-                Some(u)
+        let authenticated = authenticate_inbound_with_retry(
+            &server_url,
+            &config,
+            &secrets_http,
+            &api_base,
+            &secret_name,
+            &owned_access_token,
+            AUTH_STARTUP_MAX_ATTEMPTS,
+            AUTH_STARTUP_INITIAL_BACKOFF_MS,
+            AUTH_STARTUP_MAX_BACKOFF_MS,
+        )
+        .await;
+        match authenticated {
+            Some((new_client, new_token, bot)) => {
+                client = new_client;
+                owned_access_token = new_token;
+                report_inbound_status("ok", "startup auth ok: inbound enabled").await;
+                Some(bot)
             }
-            Err(e) => {
+            None => {
                 tracing::warn!(
-                    "Failed to authenticate with Mattermost: {:?}. Attempting auto-recovery...",
-                    e
+                    "Inbound auth failed after {} startup attempt(s): the background \
+                     self-heal loop keeps retrying every {}s",
+                    AUTH_STARTUP_MAX_ATTEMPTS,
+                    INBOUND_BG_RETRY_SECS
                 );
-                //  Auto-recovery: create a new PAT using admin credentials
-                let recovered: Option<(MattermostClient, String, MattermostUser)> = 'recover: {
-                    let admin_user = match config.admin_user {
-                        Some(ref u) if !u.is_empty() => u.clone(),
-                        _ => break 'recover None,
-                    };
-                    let admin_password = match config.admin_password {
-                        Some(ref p) if !p.is_empty() => p.clone(),
-                        _ => break 'recover None,
-                    };
-                    tracing::info!("Auto-recovery: logging in as admin '{}'", admin_user);
-                    let admin_client =
-                        match login_admin_client(&server_url, &admin_user, &admin_password).await {
-                            Some(c) => c,
-                            None => {
-                                tracing::warn!("Auto-recovery: admin login failed");
-                                break 'recover None;
-                            }
-                        };
-                    let bot_username = &config.bot_user;
-                    tracing::info!("Auto-recovery: finding bot user '{}'", bot_username);
-                    let (bot_user_id, _) = match admin_client
-                        .find_user_by_username(bot_username)
-                        .await
-                    {
-                        Ok(Some(result)) => result,
-                        Ok(None) => {
-                            tracing::warn!("Auto-recovery: bot user '{}' not found", bot_username);
-                            break 'recover None;
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Auto-recovery: failed to find bot user '{}': {:?}",
-                                bot_username,
-                                e
-                            );
-                            break 'recover None;
-                        }
-                    };
-                    tracing::info!(
-                        "Auto-recovery: found bot user '{}' (id: {})",
-                        bot_username,
-                        bot_user_id
-                    );
-                    let new_token = match admin_client
-                        .create_user_token(
-                            &bot_user_id,
-                            "OmniAgent bot access token (auto-recovered)",
-                        )
-                        .await
-                    {
-                        Ok(t) => t,
-                        Err(e) => {
-                            tracing::warn!("Auto-recovery: failed to create new token: {:?}", e);
-                            break 'recover None;
-                        }
-                    };
-                    tracing::info!(
-                        "Auto-recovery: created new access token for '{}'",
-                        bot_username
-                    );
-                    // Persist the new token to the omniagent secret store
-                    if !secret_name.is_empty() {
-                        match set_agent_secret(&secrets_http, &api_base, &secret_name, &new_token)
-                            .await
-                        {
-                            Ok(_) => tracing::info!(
-                                "Auto-recovery: updated secret '{}' with new access token",
-                                secret_name
-                            ),
-                            Err(we) => tracing::warn!(
-                                "Auto-recovery: failed to update secret '{}': {:?}",
-                                secret_name,
-                                we
-                            ),
-                        }
-                    }
-                    // Create a new client with the recovered token and verify it
-                    let new_client = MattermostClient::new(&server_url, &new_token);
-                    match new_client.get_me().await {
-                        Ok(bot) => {
-                            tracing::info!(
-                                "Auto-recovery successful: authenticated as {} ({})",
-                                bot.username,
-                                bot.id
-                            );
-                            Some((new_client, new_token, bot))
-                        }
-                        Err(e2) => {
-                            tracing::warn!(
-                                "Auto-recovery: new token also failed authentication: {:?}",
-                                e2
-                            );
-                            None
-                        }
-                    }
-                };
-                match recovered {
-                    Some((new_client, new_token, bot)) => {
-                        client = new_client;
-                        owned_access_token = new_token;
-                        Some(bot)
-                    }
-                    None => {
-                        tracing::warn!(
-                            "Auto-recovery failed. Plugin will run without inbound capability."
-                        );
-                        None
-                    }
-                }
+                None
             }
         }
     } else {
@@ -2447,103 +2355,44 @@ async fn main() -> Result<()> {
     //  Inbound (polling or WebSocket)
     let use_websocket = connection_mode == "websocket";
     let inbound_handle: Option<tokio::task::JoinHandle<()>> = match bot_user.as_ref() {
-        Some(bot) if use_websocket => {
-            let bot_id = bot.id.clone();
-            Some(tokio::spawn(async move {
-                ws_event_loop(
-                    server_url,
-                    owned_access_token.clone(),
-                    vec![],
-                    bot_id,
-                    max_download_bytes,
-                )
-                .await;
-            }))
-        }
-        Some(bot) if polling_enabled => {
-            let poll_client = MattermostClient::new(&server_url, &owned_access_token);
-            let bot_id = bot.id.clone();
-            let server_url_poll = server_url.clone();
-
-            Some(tokio::spawn(async move {
-                let mut current_ids: Vec<String> = channel_ids;
-                let mut last_discovery: Vec<String> = current_ids.clone();
-                let mut last_create_at: HashMap<String, i64> = HashMap::new();
-                let mut bot_cache: HashMap<String, bool> = HashMap::new();
-                bot_cache.insert(bot_id.clone(), true);
-                let mut processed_posts: HashMap<String, HashSet<String>> = HashMap::new();
-
-                for ch_id in &current_ids {
-                    init_channel_cursor(&poll_client, ch_id, &bot_id, &mut last_create_at).await;
-                }
-
-                let mut refresh_counter: u64 = 0;
-                let refresh_interval: u64 = 4;
-
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(polling_interval_secs)).await;
-
-                    refresh_counter += 1;
-                    if refresh_counter >= refresh_interval {
-                        refresh_counter = 0;
-
-                        let discovered = discover_channels(&poll_client, &bot_id).await;
-                        let merged = discovered.clone();
-
-                        for ch_id in &merged {
-                            if !last_discovery.contains(ch_id) {
-                                tracing::info!(
-                                    "Discovered new channel {}, initializing cursor",
-                                    ch_id
-                                );
-                                if !last_create_at.contains_key(ch_id.as_str()) {
-                                    init_channel_cursor(
-                                        &poll_client,
-                                        ch_id,
-                                        &bot_id,
-                                        &mut last_create_at,
-                                    )
-                                    .await;
-                                }
-                            }
-                        }
-
-                        for ch_id in &last_discovery {
-                            if !merged.contains(ch_id) {
-                                tracing::info!("Channel {} no longer accessible, removing", ch_id);
-                                last_create_at.remove(ch_id.as_str());
-                            }
-                        }
-
-                        current_ids = merged;
-                        last_discovery = current_ids.clone();
-                    }
-
-                    for ch_id in &current_ids {
-                        let count = poll_channel(
-                            &poll_client,
-                            ch_id,
-                            &bot_id,
-                            &mut last_create_at,
-                            &mut bot_cache,
-                            &mut processed_posts,
-                            &server_url_poll,
-                            max_download_bytes,
-                        )
-                        .await;
-                        if count > 0 {
-                            tracing::debug!(
-                                "Polling: processed {} new post(s) in channel {}",
-                                count,
-                                ch_id
-                            );
-                        }
-                    }
-                }
-            }))
-        }
-        _ => None,
+        Some(bot) => spawn_inbound(
+            use_websocket,
+            polling_enabled,
+            &server_url,
+            &owned_access_token,
+            channel_ids,
+            &bot.id,
+            polling_interval_secs,
+            max_download_bytes,
+        ),
+        None => None,
     };
+
+    // DEGRADED inbound: the bounded startup window was exhausted (the platform
+    // was unreachable at boot). Keep retrying in the background and start
+    // inbound as soon as auth succeeds, so the plugin self-heals WITHOUT a
+    // manual restart.
+    if bot_user.is_none() && !owned_access_token.is_empty() {
+        let heal_server_url = server_url.clone();
+        let heal_config = config.clone();
+        let heal_secrets_http = secrets_http.clone();
+        let heal_api_base = api_base.clone();
+        let heal_secret_name = secret_name.clone();
+        let heal_token = owned_access_token.clone();
+        tokio::spawn(async move {
+            inbound_self_heal_loop(
+                heal_server_url,
+                heal_config,
+                heal_secrets_http,
+                heal_api_base,
+                heal_secret_name,
+                heal_token,
+                polling_interval_secs,
+                max_download_bytes,
+            )
+            .await;
+        });
+    }
 
     //  Main request-response loop
     // Cache bot_user_id for the react handler. Mutable + lazily refreshed so
@@ -4098,6 +3947,421 @@ async fn init_channel_cursor(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Inbound auth: bounded startup retry + background self-heal
+// ---------------------------------------------------------------------------
+
+/// Attempts inside the bounded startup inbound-auth window.
+const AUTH_STARTUP_MAX_ATTEMPTS: u32 = 8;
+/// First backoff delay of the startup window (doubles after every attempt).
+const AUTH_STARTUP_INITIAL_BACKOFF_MS: u64 = 500;
+/// Ceiling of the startup backoff delay.
+const AUTH_STARTUP_MAX_BACKOFF_MS: u64 = 20_000;
+/// Interval of the background self-heal retry once the startup window is done.
+const INBOUND_BG_RETRY_SECS: u64 = 30;
+
+/// Report this plugin's inbound status to the core (`plugin_status`
+/// notification), so a degraded inbound capability is visible in the core log
+/// and in `GET /api/plugins`.
+///
+/// The line is written with ONE `write_all` on `tokio::io::stdout()`: stdout is
+/// a pipe to the core and every status line stays far below `PIPE_BUF`, so the
+/// write is atomic and can never interleave with the main stdio loop's writer.
+async fn report_inbound_status(status: &str, message: &str) {
+    let line = serde_json::json!({
+        "method": "plugin_status",
+        "params": { "status": status, "message": message },
+    })
+    .to_string();
+    let mut out = tokio::io::stdout();
+    if let Err(e) = out.write_all(line.as_bytes()).await {
+        tracing::warn!("Failed to report inbound status '{}': {:?}", status, e);
+        return;
+    }
+    if let Err(e) = out.write_all(b"\n").await {
+        tracing::warn!("Failed to report inbound status '{}': {:?}", status, e);
+        return;
+    }
+    if let Err(e) = out.flush().await {
+        tracing::warn!("Failed to flush inbound status '{}': {:?}", status, e);
+    }
+}
+
+/// One inbound-auth attempt: verify the access token, otherwise auto-recover it
+/// with the configured admin credentials.
+async fn authenticate_inbound(
+    server_url: &str,
+    config: &PluginConfig,
+    secrets_http: &reqwest::Client,
+    api_base: &str,
+    secret_name: &str,
+    access_token: &str,
+) -> Option<(MattermostClient, String, MattermostUser)> {
+    let client = MattermostClient::new(server_url, access_token);
+    match client.get_me().await {
+        Ok(u) => {
+            tracing::info!(
+                "Authenticated as Mattermost user: {} ({})",
+                u.username,
+                u.id
+            );
+            return Some((client, access_token.to_string(), u));
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to authenticate with Mattermost: {:?}. Attempting auto-recovery...",
+                e
+            );
+        }
+    }
+    try_auto_recover(server_url, config, secrets_http, api_base, secret_name).await
+}
+
+/// Auto-recovery: create a new bot PAT with the admin credentials, persist it to
+/// the omniagent secret store and verify it.
+async fn try_auto_recover(
+    server_url: &str,
+    config: &PluginConfig,
+    secrets_http: &reqwest::Client,
+    api_base: &str,
+    secret_name: &str,
+) -> Option<(MattermostClient, String, MattermostUser)> {
+    let admin_user = match config.admin_user {
+        Some(ref u) if !u.is_empty() => u.clone(),
+        _ => return None,
+    };
+    let admin_password = match config.admin_password {
+        Some(ref p) if !p.is_empty() => p.clone(),
+        _ => return None,
+    };
+    tracing::info!("Auto-recovery: logging in as admin '{}'", admin_user);
+    let admin_client = match login_admin_client(server_url, &admin_user, &admin_password).await {
+        Some(c) => c,
+        None => {
+            tracing::warn!("Auto-recovery: admin login failed");
+            return None;
+        }
+    };
+    let bot_username = &config.bot_user;
+    tracing::info!("Auto-recovery: finding bot user '{}'", bot_username);
+    let (bot_user_id, _) = match admin_client.find_user_by_username(bot_username).await {
+        Ok(Some(result)) => result,
+        Ok(None) => {
+            tracing::warn!("Auto-recovery: bot user '{}' not found", bot_username);
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Auto-recovery: failed to find bot user '{}': {:?}",
+                bot_username,
+                e
+            );
+            return None;
+        }
+    };
+    tracing::info!(
+        "Auto-recovery: found bot user '{}' (id: {})",
+        bot_username,
+        bot_user_id
+    );
+    let new_token = match admin_client
+        .create_user_token(&bot_user_id, "OmniAgent bot access token (auto-recovered)")
+        .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("Auto-recovery: failed to create new token: {:?}", e);
+            return None;
+        }
+    };
+    tracing::info!(
+        "Auto-recovery: created new access token for '{}'",
+        bot_username
+    );
+    // Persist the new token to the omniagent secret store
+    if !secret_name.is_empty() {
+        match set_agent_secret(secrets_http, api_base, secret_name, &new_token).await {
+            Ok(_) => tracing::info!(
+                "Auto-recovery: updated secret '{}' with new access token",
+                secret_name
+            ),
+            Err(we) => tracing::warn!(
+                "Auto-recovery: failed to update secret '{}': {:?}",
+                secret_name,
+                we
+            ),
+        }
+    }
+    // Create a new client with the recovered token and verify it
+    let new_client = MattermostClient::new(server_url, &new_token);
+    match new_client.get_me().await {
+        Ok(bot) => {
+            tracing::info!(
+                "Auto-recovery successful: authenticated as {} ({})",
+                bot.username,
+                bot.id
+            );
+            Some((new_client, new_token, bot))
+        }
+        Err(e2) => {
+            tracing::warn!(
+                "Auto-recovery: new token also failed authentication: {:?}",
+                e2
+            );
+            None
+        }
+    }
+}
+
+/// Bounded exponential-backoff startup auth window.
+///
+/// ONE transient failure at boot (the `mattermost` container still starting, so
+/// `Connection refused`) used to degrade the plugin permanently: no inbound for
+/// ANY channel until a manual plugin restart (incident 2026-09-21). This window
+/// retries with exponential backoff instead; the caller starts the background
+/// self-heal loop when it returns `None`.
+// Same convention as the other request helpers of this plugin: the argument
+// list mirrors the Mattermost request context and grouping it into a struct
+// would only add indirection.
+#[allow(clippy::too_many_arguments)]
+async fn authenticate_inbound_with_retry(
+    server_url: &str,
+    config: &PluginConfig,
+    secrets_http: &reqwest::Client,
+    api_base: &str,
+    secret_name: &str,
+    access_token: &str,
+    max_attempts: u32,
+    initial_backoff_ms: u64,
+    max_backoff_ms: u64,
+) -> Option<(MattermostClient, String, MattermostUser)> {
+    let attempts = max_attempts.max(1);
+    let mut backoff_ms = initial_backoff_ms;
+    for attempt in 1..=attempts {
+        match authenticate_inbound(
+            server_url,
+            config,
+            secrets_http,
+            api_base,
+            secret_name,
+            access_token,
+        )
+        .await
+        {
+            Some(ok) => {
+                if attempt > 1 {
+                    tracing::info!(
+                        "Inbound auth succeeded on startup attempt {}/{}",
+                        attempt,
+                        attempts
+                    );
+                }
+                return Some(ok);
+            }
+            None => {
+                if attempt >= attempts {
+                    return None;
+                }
+                tracing::warn!(
+                    "Inbound auth attempt {}/{} failed; retrying in {}ms",
+                    attempt,
+                    attempts,
+                    backoff_ms
+                );
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(max_backoff_ms);
+            }
+        }
+    }
+    None
+}
+
+/// Start the inbound task for the negotiated connection mode.
+///
+/// `websocket` runs the long-lived websocket event loop, which watches ALL
+/// channels (hence the empty watch list: the event stream is team-scoped and the
+/// watch filter must not drop a channel); `polling` runs the catch-up poller over
+/// the discovered channel ids (public AND private channels the bot is a member
+/// of). With neither mode active no task is spawned.
+#[allow(clippy::too_many_arguments)]
+fn spawn_inbound(
+    use_websocket: bool,
+    polling_enabled: bool,
+    server_url: &str,
+    access_token: &str,
+    channel_ids: Vec<String>,
+    bot_id: &str,
+    polling_interval_secs: u64,
+    max_download_bytes: u64,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if use_websocket {
+        let server_url = server_url.to_string();
+        let access_token = access_token.to_string();
+        let bot_id = bot_id.to_string();
+        return Some(tokio::spawn(async move {
+            ws_event_loop(server_url, access_token, vec![], bot_id, max_download_bytes).await;
+        }));
+    }
+    if !polling_enabled {
+        return None;
+    }
+    let poll_client = MattermostClient::new(server_url, access_token);
+    let bot_id = bot_id.to_string();
+    let server_url_poll = server_url.to_string();
+
+    Some(tokio::spawn(async move {
+        let mut current_ids: Vec<String> = channel_ids;
+        let mut last_discovery: Vec<String> = current_ids.clone();
+        let mut last_create_at: HashMap<String, i64> = HashMap::new();
+        let mut bot_cache: HashMap<String, bool> = HashMap::new();
+        bot_cache.insert(bot_id.clone(), true);
+        let mut processed_posts: HashMap<String, HashSet<String>> = HashMap::new();
+
+        for ch_id in &current_ids {
+            init_channel_cursor(&poll_client, ch_id, &bot_id, &mut last_create_at).await;
+        }
+
+        let mut refresh_counter: u64 = 0;
+        let refresh_interval: u64 = 4;
+
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(polling_interval_secs)).await;
+
+            refresh_counter += 1;
+            if refresh_counter >= refresh_interval {
+                refresh_counter = 0;
+
+                let discovered = discover_channels(&poll_client, &bot_id).await;
+                let merged = discovered.clone();
+
+                for ch_id in &merged {
+                    if !last_discovery.contains(ch_id) {
+                        tracing::info!("Discovered new channel {}, initializing cursor", ch_id);
+                        if !last_create_at.contains_key(ch_id.as_str()) {
+                            init_channel_cursor(&poll_client, ch_id, &bot_id, &mut last_create_at)
+                                .await;
+                        }
+                    }
+                }
+
+                for ch_id in &last_discovery {
+                    if !merged.contains(ch_id) {
+                        tracing::info!("Channel {} no longer accessible, removing", ch_id);
+                        last_create_at.remove(ch_id.as_str());
+                    }
+                }
+
+                current_ids = merged;
+                last_discovery = current_ids.clone();
+            }
+
+            for ch_id in &current_ids {
+                let count = poll_channel(
+                    &poll_client,
+                    ch_id,
+                    &bot_id,
+                    &mut last_create_at,
+                    &mut bot_cache,
+                    &mut processed_posts,
+                    &server_url_poll,
+                    max_download_bytes,
+                )
+                .await;
+                if count > 0 {
+                    tracing::debug!(
+                        "Polling: processed {} new post(s) in channel {}",
+                        count,
+                        ch_id
+                    );
+                }
+            }
+        }
+    }))
+}
+
+/// Background self-heal: retry inbound auth every `INBOUND_BG_RETRY_SECS` until
+/// it succeeds, then START inbound (websocket or polling) with the recovered
+/// credentials. This is what lets a platform that was down at boot come back
+/// WITHOUT a manual plugin restart.
+#[allow(clippy::too_many_arguments)]
+async fn inbound_self_heal_loop(
+    server_url: String,
+    config: PluginConfig,
+    secrets_http: reqwest::Client,
+    api_base: String,
+    secret_name: String,
+    initial_token: String,
+    polling_interval_secs: u64,
+    max_download_bytes: u64,
+) {
+    let mode = config.connection_mode.to_lowercase();
+    let use_websocket = mode == "websocket";
+    let polling_enabled = mode == "polling" && config.polling_enabled;
+    let mut token = initial_token;
+
+    tracing::warn!(
+        "Inbound DEGRADED: no inbound capability yet; retrying inbound auth every {}s in the \
+         background (no manual restart needed)",
+        INBOUND_BG_RETRY_SECS
+    );
+    report_inbound_status(
+        "degraded",
+        "startup auth failed; retrying inbound auth in the background",
+    )
+    .await;
+
+    let mut attempt: u64 = 0;
+    loop {
+        tokio::time::sleep(Duration::from_secs(INBOUND_BG_RETRY_SECS)).await;
+        attempt += 1;
+        match authenticate_inbound(
+            &server_url,
+            &config,
+            &secrets_http,
+            &api_base,
+            &secret_name,
+            &token,
+        )
+        .await
+        {
+            Some((client, new_token, bot)) => {
+                token = new_token;
+                let channel_ids = discover_channels(&client, &bot.id).await;
+                if !channel_ids.is_empty() {
+                    tracing::info!(
+                        "Watching {} channel(s): {}",
+                        channel_ids.len(),
+                        channel_ids.join(", ")
+                    );
+                }
+                tracing::info!(
+                    "Inbound self-heal succeeded after {} background attempt(s); starting inbound",
+                    attempt
+                );
+                report_inbound_status("ok", "inbound enabled after background auth retry").await;
+                let _ = spawn_inbound(
+                    use_websocket,
+                    polling_enabled,
+                    &server_url,
+                    &token,
+                    channel_ids,
+                    &bot.id,
+                    polling_interval_secs,
+                    max_download_bytes,
+                );
+                return;
+            }
+            None => {
+                tracing::warn!(
+                    "Inbound self-heal attempt {} failed; retrying in {}s",
+                    attempt,
+                    INBOUND_BG_RETRY_SECS
+                );
+            }
+        }
+    }
+}
+
 /// Auto-discover ALL channels in every team the bot belongs to and ensure the
 /// bot is a member of each (auto-join). This makes the plugin watch every
 /// channel of the team, including channels created after startup, so a post
@@ -4115,22 +4379,33 @@ async fn discover_channels(client: &MattermostClient, bot_id: &str) -> Vec<Strin
     };
 
     for team in &teams {
-        // Current memberships of the bot in this team: channels already joined
-        // are skipped (add_channel_member is idempotent, but skipping avoids an
-        // API call per channel on every discovery cycle).
+        // Memberships of the bot in this team: `GET /users/{u}/teams/{t}/channels`
+        // returns BOTH public and PRIVATE channels the bot has joined. They are
+        // exactly what the plugin must WATCH, and they let the auto-join below
+        // skip channels already joined (add_channel_member is idempotent, but
+        // skipping avoids an API call per channel on every discovery cycle).
+        let own_channels = match client.get_user_channels(bot_id, &team.id).await {
+            Ok(channels) => channels,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to get memberships for team {} ({}): {:?}",
+                    team.display_name,
+                    team.id,
+                    e
+                );
+                continue;
+            }
+        };
         let member_ids: std::collections::HashSet<String> =
-            match client.get_user_channels(bot_id, &team.id).await {
-                Ok(channels) => channels.iter().map(|c| c.id.clone()).collect(),
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to get memberships for team {} ({}): {:?}",
-                        team.display_name,
-                        team.id,
-                        e
-                    );
-                    continue;
-                }
-            };
+            own_channels.iter().map(|c| c.id.clone()).collect();
+        // Watch every channel the bot is a MEMBER of, PRIVATE CHANNELS INCLUDED.
+        // `get_team_channels` below only returns the team's PUBLIC channels, so a
+        // private channel the bot belongs to (e.g. the omniagent `main` channel)
+        // used to be absent from the watch list and its posts were dropped by the
+        // inbound filter (incident 2026-09-21).
+        for ch in &own_channels {
+            channel_ids.push(ch.id.clone());
+        }
 
         match client.get_team_channels(&team.id).await {
             Ok(channels) => {
@@ -6002,5 +6277,149 @@ mod tests {
             "the header names the original: {msg}"
         );
         assert!(msg.contains("tool output"), "the content is kept: {msg}");
+    }
+    // -- inbound auth retry + watch list (incident 2026-09-21) ---------------
+
+    /// A free localhost port: bound once to learn it, then released so the
+    /// next connection to it is REFUSED (exactly like a mattermost container
+    /// that is not listening yet).
+    fn free_local_addr() -> std::net::SocketAddr {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve port");
+        let addr = l.local_addr().expect("local addr");
+        drop(l);
+        addr
+    }
+
+    /// Serve `responses` (status, body) on `addr`, but only BIND the socket
+    /// after `delay`: every attempt before that gets ECONNREFUSED.
+    fn start_late_capture_server(
+        addr: std::net::SocketAddr,
+        delay: Duration,
+        responses: Vec<(u16, String)>,
+    ) -> CapturedRequests {
+        let captured: CapturedRequests = Arc::new(Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            let listener = std::net::TcpListener::bind(addr).expect("bind late server");
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut buf = vec![0u8; 8192];
+                let n = std::io::Read::read(&mut stream, &mut buf).unwrap_or(0);
+                let raw = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = raw
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or_default()
+                    .to_string();
+                sink.lock().push((path, String::new()));
+                let reason = if status == 200 { "OK" } else { "Error" };
+                let resp = format!(
+                    "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status,
+                    reason,
+                    body.len(),
+                    body
+                );
+                std::io::Write::write_all(&mut stream, resp.as_bytes()).expect("write resp");
+            }
+        });
+        captured
+    }
+
+    /// Regression (prod incident 2026-09-21): ONE `Connection refused` at boot
+    /// must NOT leave the plugin without inbound capability until a manual
+    /// restart. With the server unreachable for the first ~1.2 s, the bounded
+    /// exponential-backoff retry window has to reach it and authenticate.
+    #[tokio::test]
+    async fn startup_auth_retries_until_mattermost_is_up() {
+        let addr = free_local_addr();
+        let server_url = format!("http://{}", addr);
+        let captured = start_late_capture_server(
+            addr,
+            Duration::from_millis(1200),
+            vec![(
+                200,
+                serde_json::json!({"id":"bot-1","username":"omnibot","is_bot":true}).to_string(),
+            )],
+        );
+        // No admin credentials in the config: auto-recovery returns
+        // immediately, so surviving the outage is entirely the retry window's
+        // job.
+        let cfg: PluginConfig =
+            serde_json::from_str(&format!(r#"{{"server_url":"{}"}}"#, server_url)).expect("config");
+        let out = authenticate_inbound_with_retry(
+            &server_url,
+            &cfg,
+            &reqwest::Client::new(),
+            "http://localhost:8080",
+            "MATTERMOST_ACCESS_TOKEN",
+            "",
+            8,
+            250,
+            1_000,
+        )
+        .await;
+        let (_client, token, bot) = out.expect("auth must recover WITHOUT a manual restart");
+        assert_eq!(bot.id, "bot-1");
+        assert_eq!(token, "", "an unchanged token is returned as-is");
+        let reqs = captured.lock().clone();
+        assert_eq!(reqs.len(), 1, "exactly one successful /users/me request");
+        assert_eq!(reqs[0].0, "/api/v4/users/me");
+    }
+
+    /// Regression (prod incident 2026-09-21): a PRIVATE channel the bot is a
+    /// member of (mattermost `main`, type "P") must reach the watch list, or
+    /// the inbound filter drops every post in it. `GET /teams/{t}/channels`
+    /// alone only returns PUBLIC channels.
+    #[tokio::test]
+    async fn discover_channels_watches_private_channels_the_bot_is_in() {
+        let (addr, captured) = start_capture_server_with_bodies(vec![
+            (
+                200,
+                serde_json::json!([{"id":"team-1","name":"omni","display_name":"Omni"}])
+                    .to_string(),
+            ),
+            (
+                200,
+                serde_json::json!([
+                    {"id":"priv-main","name":"main","display_name":"Main","type":"P"},
+                    {"id":"pub-1","name":"dev-channel","display_name":"Dev","type":"O"}
+                ])
+                .to_string(),
+            ),
+            (
+                200,
+                serde_json::json!([
+                    {"id":"pub-1","name":"dev-channel","display_name":"Dev","type":"O"},
+                    {"id":"pub-2","name":"town-square","display_name":"Town","type":"O"}
+                ])
+                .to_string(),
+            ),
+            (200, "{}".to_string()),
+        ]);
+        let client = MattermostClient::new(&addr, "test-token");
+        let ids = discover_channels(&client, "bot-1").await;
+        assert_eq!(
+            ids,
+            vec![
+                "priv-main".to_string(),
+                "pub-1".to_string(),
+                "pub-2".to_string()
+            ],
+            "the bot's PRIVATE channel must be in the watch list"
+        );
+        let reqs = captured.lock().clone();
+        assert_eq!(reqs[0].0, "/api/v4/users/bot-1/teams");
+        assert_eq!(reqs[1].0, "/api/v4/users/bot-1/teams/team-1/channels");
+        assert_eq!(
+            reqs[2].0,
+            "/api/v4/teams/team-1/channels?page=0&per_page=200"
+        );
+        assert_eq!(
+            reqs[3].0, "/api/v4/channels/pub-2/members",
+            "only the PUBLIC channel the bot is not in is auto-joined"
+        );
     }
 }

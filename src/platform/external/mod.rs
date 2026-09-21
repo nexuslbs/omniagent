@@ -772,6 +772,40 @@ pub fn register_platform_client(name: &str, client: client::ExternalPlatformClie
     registry.insert(name.to_string(), client);
 }
 
+// ---------------------------------------------------------------------------
+// Self-reported runtime status (plugin_status notification)
+// ---------------------------------------------------------------------------
+
+/// Latest runtime status SELF-REPORTED by an external platform plugin, keyed by
+/// platform name (the key of `config/plugins.yml`).
+///
+/// The plugin writes a `plugin_status` notification on its stdout, e.g.
+/// `{"method":"plugin_status","params":{"status":"degraded","message":"..."}}`,
+/// when a capability is degraded (inbound auth failed at boot and is being
+/// retried in the background) or when it recovers (`status: "ok"`). The listing
+/// endpoint surfaces it so a DEGRADED plugin is visible in `GET /api/plugins`
+/// instead of only in the core log.
+pub static PLATFORM_RUNTIME_STATUS: Lazy<Mutex<HashMap<String, serde_json::Value>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Record a status self-reported by an external platform plugin.
+pub fn set_platform_runtime_status(name: &str, status: &str, message: &str) {
+    let mut map = PLATFORM_RUNTIME_STATUS.lock();
+    map.insert(
+        name.to_string(),
+        serde_json::json!({
+            "status": status,
+            "message": message,
+            "updated_at": chrono::Utc::now().to_rfc3339(),
+        }),
+    );
+}
+
+/// Latest status self-reported by an external platform plugin, if any.
+pub fn platform_runtime_status(name: &str) -> Option<serde_json::Value> {
+    PLATFORM_RUNTIME_STATUS.lock().get(name).cloned()
+}
+
 /// Decode a base64-encoded string to raw bytes.
 pub fn decode_base64(encoded: &str) -> Result<Vec<u8>, anyhow::Error> {
     use base64::engine::general_purpose;

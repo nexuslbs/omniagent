@@ -414,6 +414,34 @@ pub(crate) async fn apply_tool_runtime_status_all(
             );
         }
     }
+
+    // Platform plugins SELF-REPORT their runtime status (the `plugin_status`
+    // notification): e.g. inbound DEGRADED after a failed startup auth while the
+    // background self-heal keeps retrying, or `ok` once inbound is enabled.
+    // Surface it so `GET /api/plugins` tells the truth about a degraded
+    // capability instead of showing a plain "enabled".
+    for detail in details.iter_mut() {
+        if detail.plugin_type != "platform" || detail.status != "enabled" {
+            continue;
+        }
+        let Some(runtime) = crate::platform::external::platform_runtime_status(&detail.name) else {
+            continue;
+        };
+        let status = runtime.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        if status.is_empty() || status == "ok" {
+            continue;
+        }
+        let message = runtime
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let updated_at = runtime
+            .get("updated_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        detail.status = "error".to_string();
+        detail.status_message = format!("{} (reported '{}' at {})", message, status, updated_at);
+    }
 }
 
 /// Single-plugin form of [`apply_tool_runtime_status_all`].
