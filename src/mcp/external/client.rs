@@ -216,17 +216,22 @@ pub trait McpServerClient: Send + Sync {
                     let sn = sn.clone();
                     let tn = tn.clone();
                     Box::pin(async move {
-                        // Build _meta context from AppContext (channel_id always, optional thread/profile/platform)
+                        // Build _meta context from AppContext (channel_id always, profile_name ALWAYS non-empty)
                         let mut meta_map = serde_json::Map::new();
-                        if let Some(cid) = ctx.current_channel_id {
+                        if let Some(ref cid) = ctx.current_channel_id {
                             meta_map.insert("channel_id".to_string(), serde_json::json!(cid));
                         }
                         if let Some(tid) = ctx.current_thread_id {
                             meta_map.insert("thread_id".to_string(), serde_json::json!(tid));
                         }
-                        if let Some(ref pn) = ctx.current_profile_name {
-                            meta_map.insert("profile_name".to_string(), serde_json::json!(pn));
-                        }
+                        // NEVER omit: an absent _meta.profile_name made the
+                        // remote memory plugin invent `profiles/default`
+                        // (telegram thread 2719). Fall back to the resolved
+                        // default profile, which is a DECLARED profile.
+                        meta_map.insert(
+                            "profile_name".to_string(),
+                            serde_json::json!(crate::mcp::meta_profile_name(&ctx)),
+                        );
                         if let Some(ref plat) = ctx.current_platform {
                             meta_map.insert("platform".to_string(), serde_json::json!(plat));
                         }

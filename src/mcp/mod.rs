@@ -315,10 +315,29 @@ impl AppContext {
             current_allowed_tools: None,
             current_channel_name: None,
             current_platform: None,
-            current_profile_name: None,
+            // NEVER None: every clone of the app context is handed to tool
+            // dispatches, and an absent/empty profile let a remote plugin
+            // invent `<OMNI_DIR>/profiles/default` (telegram thread 2719).
+            // The agent loop overrides this with the thread's real profile.
+            current_profile_name: Some(crate::profile::default_profile_name()),
             tool_catalog: Vec::new(),
             external_clients,
         }
+    }
+}
+
+/// The NON-EMPTY profile name every external tool dispatch must carry in
+/// `_meta.profile_name`.
+///
+/// `_meta.profile_name` must never be absent: a plugin that receives no
+/// profile used to invent `profiles/default`, a directory no profile declares
+/// and no prompt ever reads (recurring incident, telegram threads 2260/2719).
+/// When an AppContext carries no (or an empty) profile, fall back to the
+/// configured default profile - always a DECLARED profile name.
+pub fn meta_profile_name(ctx: &AppContext) -> String {
+    match ctx.current_profile_name.as_deref() {
+        Some(p) if !p.trim().is_empty() => p.trim().to_string(),
+        _ => crate::profile::default_profile_name(),
     }
 }
 
@@ -1915,6 +1934,42 @@ fn fail_thread_tool() -> McpTool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // ─── profile_name dispatch guard (telegram thread 2719) ───
+
+    /// Every AppContext (hence every clone handed to a tool dispatch) must
+    /// carry a NON-EMPTY profile name, and the `_meta` builder must never
+    /// drop it. Before this guard an absent profile reached the remote memory
+    /// plugin, which invented `<OMNI_DIR>/profiles/default`.
+    #[tokio::test]
+    async fn test_every_tool_dispatch_carries_non_empty_profile_name() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://user:pass@127.0.0.1:1/none")
+            .expect("lazy pool");
+        let ctx = AppContext::new(
+            pool.clone(),
+            pool,
+            "/tmp",
+            std::collections::HashMap::new(),
+            std::sync::Arc::new(crate::mcp::external::client::ExternalMcpClients::new()),
+        );
+        // 1. The default AppContext (base of every dispatch site) is non-empty.
+        let expected = crate::profile::default_profile_name();
+        assert_eq!(ctx.current_profile_name.as_deref(), Some(expected.as_str()));
+        assert!(!meta_profile_name(&ctx).trim().is_empty());
+        // 2. Even when a caller clears the field, the meta builder resolves a
+        //    declared default instead of dropping the key.
+        let mut cleared = ctx.clone();
+        cleared.current_profile_name = None;
+        assert!(!meta_profile_name(&cleared).trim().is_empty());
+        let mut emptied = ctx.clone();
+        emptied.current_profile_name = Some("   ".to_string());
+        assert!(!meta_profile_name(&emptied).trim().is_empty());
+        // 3. An explicit profile always wins.
+        let mut explicit = ctx.clone();
+        explicit.current_profile_name = Some("omni".to_string());
+        assert_eq!(meta_profile_name(&explicit), "omni");
+    }
 
     // ─── core_api_base_url tests (audit V-8) ───
 
