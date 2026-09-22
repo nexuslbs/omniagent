@@ -228,6 +228,41 @@ fn effective_iteration_budget(cfg: &AgentConfig, base: i32, iter_limit: i32,
     }
 }
 ''',
+    # Thread 2837 rework: these carry NO numeric literal anywhere, so they trip
+    # ONLY if the taint of a local binding / alias / parameter is tracked. The
+    # literal-based fixtures above trip on the literal alone and therefore could
+    # not fail CI if local-binding tracking regressed.
+    'tainted_local_binding_no_literal': '''
+fn f(cfg: &AgentConfig, base: i32) -> i32 {
+    let c = cfg.interactive_max_iterations;
+    base.min(c as i32)
+}
+''',
+    'tainted_local_binding_no_cast': '''
+fn f(cfg: &AgentConfig, base: i32) -> i32 {
+    let c = cfg.interactive_max_iterations;
+    base.min(c)
+}
+''',
+    'tainted_alias_named_like_the_setting': '''
+fn f(cfg: &AgentConfig, base: i32) -> i32 {
+    let max_iterations_plan = cfg.max_iterations_plan;
+    base.min(max_iterations_plan as i32)
+}
+''',
+    'tainted_alias_two_hops': '''
+fn f(cfg: &AgentConfig, base: i32) -> i32 {
+    let cap = cfg.max_iterations_plan;
+    let read_cap = cap;
+    base.min(read_cap as i32)
+}
+''',
+    'tainted_alias_free_min_no_literal': '''
+fn f(cfg: &AgentConfig, base: i32) -> i32 {
+    let cap = cfg.max_iterations_plan;
+    std::cmp::min(base, cap as i32)
+}
+''',
 }
 
 # Shapes that must STAY clean: they do not narrow an operator setting.
@@ -263,6 +298,25 @@ fn f(cfg: &AgentConfig) -> u32 {
     let must_fit_target = cfg.token_budget_hard;
     reduce_target.min(must_fit_target)
 }
+''',
+    # Polarity guards (thread 2837): a floor RAISE widens a value, it never
+    # narrows an operator setting, so `max` must not be reported at all.
+    'max_floor_raise_on_setting': '''
+fn f(cfg: &AgentConfig) -> u32 { cfg.max_iterations_plan.max(3) }
+''',
+    'max_floor_raise_free': '''
+fn f(cfg: &AgentConfig) -> u32 { std::cmp::max(cfg.max_iterations_plan, 3) }
+''',
+    'max_floor_raise_on_alias': '''
+fn f(cfg: &AgentConfig) -> u32 {
+    let base = cfg.max_iterations_plan;
+    base.max(3)
+}
+''',
+    # The stricter of two operator settings, both read as given at the call
+    # site: documented as clean, and it must stay clean.
+    'stricter_of_two_settings_at_call_site': '''
+fn f(cfg: &AgentConfig) -> u32 { cfg.max_iterations_no_plan.min(cfg.max_iterations_plan) }
 ''',
 }
 

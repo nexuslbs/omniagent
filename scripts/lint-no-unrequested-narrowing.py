@@ -310,6 +310,30 @@ def balanced_args(code: str, pos: int) -> str:
     return code[start:i]
 
 
+def call_raw(unit_raw: str, pos: int, name: str, args: str) -> str:
+    """The RAW text of the whole call starting at `pos` (`.`/name ... `)`).
+
+    `pos + len(args) + 1` truncates the call before the closing paren whenever
+    the name is longer than one character, which hides a `cfg.<key>` argument
+    (`base.min(cfg.max_iterations_plan)`), so the anchor is resolved by
+    balancing parentheses in the raw text instead.
+    """
+    p = unit_raw.find('(', pos)
+    if p < 0:
+        return unit_raw[pos:pos + len(args) + 1]
+    depth = 0
+    i = p
+    while i < len(unit_raw):
+        if unit_raw[i] == '(':
+            depth += 1
+        elif unit_raw[i] == ')':
+            depth -= 1
+            if depth == 0:
+                return unit_raw[pos:i + 1]
+        i += 1
+    return unit_raw[pos:]
+
+
 def find_method_calls(code: str) -> list[tuple[int, str, str, str]]:
     """[(pos, receiver, name, args)] for `.min(..)`/`.max(..)`/`.clamp(..)`."""
     out = []
@@ -530,15 +554,17 @@ def scan_unit(unit: str, unit_raw: str, tainted: set[str],
     hits: list[tuple[int, str]] = []
     for pos, recv, name, args in find_method_calls(unit):
         lits = numeric_literals(args, consts)
-        # `.max(0)` is a non-negative floor on a difference, not a narrowing.
-        if name == 'max' and lits and all(n == 0 for n in lits):
+        # `max(a, b)` can only RAISE a value: a floor raise (`.max(3)`, or the
+        # `.max(0)` non-negative floor on a difference) is never a narrowing of
+        # an operator setting and must not be reported.
+        if name == 'max':
             continue
         recv_raw = unit_raw[max(0, pos - len(recv)):pos]
         if is_settings_file and definition_chain_ok(unit_raw, pos, keys):
             continue
         if not setting_bound(recv, recv_raw, tainted, keys, computed):
             continue
-        args_raw = unit_raw[pos:pos + len(args) + 1]
+        args_raw = call_raw(unit_raw, pos, name, args)
         # An argument counts as a narrowing operand when it is a literal (or a
         # literal-bound identifier) or when the argument ITSELF reads a setting
         # (`cfg.interactive_max_iterations`, `get("..","12")`, a resolver call).
@@ -546,19 +572,33 @@ def scan_unit(unit: str, unit_raw: str, tainted: set[str],
         # must_fit_target)`, e.g. the stricter of two operator budgets) is not a
         # narrowing of either setting and must not be reported.
         explicit_setting_arg = has_setting_access(args_raw, keys)
+        recv_explicit = (bool(ident_set(recv) & tainted)
+                         or has_setting_access(recv_raw, keys))
+        if explicit_setting_arg and recv_explicit and not lits:
+            # stricter of two operator-configured settings, both read as given
+            continue
         if lits or explicit_setting_arg:
             what = 'literal ' + str(lits) if lits else 'another setting'
             hits.append((pos, f'{name}() narrows a setting-bound value with {what}'))
     for pos, name, args in find_free_calls(unit):
-        args_raw = unit_raw[pos:pos + len(args) + 1]
+        if name == 'max':
+            continue  # a floor raise can only widen a value, never narrow it
+        args_raw = call_raw(unit_raw, pos, name, args)
         if not setting_bound(args, args_raw, tainted, keys, computed):
             continue
         lits = numeric_literals(args, consts)
-        if name == 'max' and lits and all(n == 0 for n in lits):
-            continue
         if lits:
             hits.append((
                 pos, f'{name}() clamps a setting-bound argument with literal {lits}'))
+        else:
+            ids = ident_set(args) & tainted
+            if ids and (any(nameish(i) for i in ids) or weak_nameish(args)):
+                hits.append((
+                    pos,
+                    f'{name}() combines a setting-bound value with operand '
+                    f'{sorted(ids)} (no literal, no `cfg.`/`get()` at the call '
+                    f'site): if this cap is not operator-requested it is '
+                    f'defect class A5'))
     # ── arg-side narrowing: the cap arrives as a bare local / alias / param ──
     # Added in the defect-class-A5 rework (thread 2835). The two branches above
     # only fire when the narrowing operand carries a numeric literal or names a
@@ -578,11 +618,17 @@ def scan_unit(unit: str, unit_raw: str, tainted: set[str],
         recv_raw = unit_raw[max(0, pos - len(recv)):pos]
         if not setting_bound(recv, recv_raw, tainted, keys, computed):
             continue
-        args_raw = unit_raw[pos:pos + len(args) + 1]
+        args_raw = call_raw(unit_raw, pos, name, args)
         if not args.strip():
             continue
         arg_ids = ident_set(args)
-        if not (any(nameish(a) for a in arg_ids) or weak_nameish(args)):
+        # An operand narrows when it is budget-NAMED, when it is a WEAK budget
+        # word, or when it is TAINTED - a local/alias/param whose value derives
+        # from an operator setting, whatever its name (`let c = cfg.<key>;`
+        # `base.min(c as i32)`). Tracking the value, not the name, is what
+        # closes the local-binding / alias re-introduction of defect class A5.
+        if not (any(nameish(a) for a in arg_ids) or weak_nameish(args)
+                or bool(arg_ids & tainted)):
             continue
         lits = numeric_literals(args, consts)
         if lits or has_setting_access(args_raw, keys):
