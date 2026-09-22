@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Removed - the hidden 12-round iteration cap on interactive operator threads
+
+- The hidden interactive-thread iteration knob (code default 12, introduced by
+  the slowness-fix task as a `min(base, cap)` on interactive threads) is
+  **removed**. It silently truncated ordinary operator threads at 12 LLM rounds
+  and forced a synthesized no-tools answer at the cap, so a genuine operator
+  question was cut mid-investigation and had to be re-asked from scratch - a
+  code default nobody requested that saved nothing and only added friction.
+  The knob's setting key and its helpers are gone from the source entirely.
+- Deleted with it: the interactive-thread predicate and iteration-limit helper,
+  the cap-hit handling enum plus its finalize-due/run-tools-then-synthesize
+  helpers, the forced cap-hit epilogue and the once-per-thread half-budget
+  auto-answer nudge.
+- Every thread - ordinary operator chat (`cause=user`, no delegated
+  kanban/schedule task), kanban/dev task, schedule/hook run - is now budgeted
+  solely from the plugin setting `max_iterations_no_plan` /
+  `max_iterations_plan` via `queries::max_iterations_for_plan`. No hidden MIN and
+  no silent `unwrap_or(12)` fallback: an absent/unknown setting can never narrow
+  an operator thread.
+- Regression guard:
+  `iteration_budget_tests::interactive_operator_thread_keeps_full_plan_budget`
+  fails if any of the cap machinery is reintroduced.
 
 ### Changed - Core tool namespace renamed `builtin` -> `core` (HARD CUTOVER, no alias)
 
