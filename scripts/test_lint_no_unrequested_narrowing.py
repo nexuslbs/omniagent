@@ -99,6 +99,106 @@ fn derived(cfg: &AgentConfig) -> i32 {
 '''
 
 
+# ── alias / local-binding shapes (thread 2832 rework) ───────────────────────
+# Every shape below was measured (thread 2830 tester report) as NOT detected by
+# the first version of this lint: the setting expression and the literal sat in
+# different statements. They MUST all trip now.
+ALIAS_SHAPES = {
+    'let_alias_min': '''
+fn f(cfg: &AgentConfig) -> u32 {
+    let base = cfg.max_iterations_plan;
+    base.min(12)
+}
+''',
+    'let_alias_on_continuation_line': '''
+fn f(cfg: &AgentConfig) -> u32 {
+    let base = cfg.max_iterations_plan;
+    base
+        .min(12)
+}
+''',
+    'let_alias_unwrap_or': '''
+fn f(cfg: &AgentConfig) -> u32 {
+    let base = cfg.max_iterations_plan;
+    base.unwrap_or(12)
+}
+''',
+    'let_alias_std_cmp_min': '''
+fn f(cfg: &AgentConfig) -> u32 {
+    let base = cfg.max_iterations_plan;
+    std::cmp::min(base, 12)
+}
+''',
+    'bare_param_min': '''
+fn f(base: u32) -> u32 { base.min(12) }
+''',
+    'bound_literal_on_setting': '''
+fn f(cfg: &AgentConfig) -> u32 {
+    let cap = 12;
+    cfg.max_iterations_plan.min(cap)
+}
+''',
+    'bound_literal_on_alias': '''
+fn f(cfg: &AgentConfig) -> u32 {
+    let base = cfg.max_iterations_plan;
+    let cap = 12;
+    base.min(cap)
+}
+''',
+    'alias_via_snapshot_field': '''
+fn f(cfg: &AgentConfig) -> u32 {
+    let base = cfg.config_snapshot().max_iterations_no_plan;
+    base.min(12)
+}
+''',
+    'alias_via_resolver': '''
+fn f(cfg: &AgentConfig) -> u32 {
+    let base = max_iterations_for_plan(&cfg.config_snapshot(), false);
+    base.min(12)
+}
+''',
+    'two_knob_loophole': '''
+fn f(cfg: &AgentConfig) -> u32 {
+    let base = max_iterations_for_plan(&cfg.config_snapshot(), false);
+    if interactive { base.min(12) } else { base }
+}
+''',
+    'setting_lookup_bound_to_unrelated_name': '''
+fn sneaky() -> u32 {
+    let base = get("max_iterations_plan", "12").parse().unwrap_or(12);
+    base
+}
+''',
+    'clamp_range_on_setting': '''
+fn f(cfg: &AgentConfig) -> u32 { cfg.max_iterations_plan.clamp(1, 12) }
+''',
+}
+
+# Shapes that must STAY clean: they do not narrow an operator setting.
+CLEAN_SHAPES = {
+    'used_as_given': '''
+fn f(cfg: &AgentConfig) -> u32 { cfg.max_iterations_plan }
+''',
+    'derived_arithmetic_on_alias': '''
+fn f(cfg: &AgentConfig) -> u32 {
+    let base = cfg.max_iterations_plan;
+    let half = base / 2;
+    half.max(3)
+}
+''',
+    'request_param_not_a_setting': '''
+fn f(params: &Params) -> u32 { params.limit.unwrap_or(10).clamp(1, 100) }
+''',
+    'stricter_of_two_resolved_budgets': '''
+fn f(cfg: &AgentConfig) -> u32 {
+    let reduce_target = if over_billed { cfg.token_budget_soft } else { cfg.token_budget_hard };
+    let must_fit_target = cfg.token_budget_hard;
+    reduce_target.min(must_fit_target)
+}
+''',
+}
+
+
 class LintNarrowingTest(unittest.TestCase):
     def _run(self, source: str, baseline: dict | None = None) -> tuple[int, str]:
         tmp = tempfile.mkdtemp(prefix='narrowing-lint-')
@@ -160,6 +260,23 @@ class LintNarrowingTest(unittest.TestCase):
              'operator_request': 'telegram msg #1234'},
         ]})
         self.assertEqual(code, 0, f'expected OK, got {code}: {err}')
+
+
+    def test_local_binding_shapes_all_trip(self):
+        """Alias / local-binding / param shapes measured as MISSED in thread 2830.
+
+        These are the exact shapes the tester's FAIL report named; the lint must
+        reject every one of them now.
+        """
+        for name, body in ALIAS_SHAPES.items():
+            code, err = self._run(CONFIG_STUB + body)
+            self.assertEqual(code, 1, f'{name} must be rejected, got rc={code}: {err}')
+
+    def test_clean_shapes_stay_clean(self):
+        """Shapes that do NOT narrow an operator setting must not be flagged."""
+        for name, body in CLEAN_SHAPES.items():
+            code, err = self._run(CONFIG_STUB + body)
+            self.assertEqual(code, 0, f'{name} must stay clean, got rc={code}: {err}')
 
 
 if __name__ == '__main__':
