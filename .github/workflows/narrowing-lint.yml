@@ -1,0 +1,22 @@
+name: no-unrequested-narrowing
+
+# Defect class A5 gate: agent-authored code must not invent a default, cap,
+# limit or fallback that narrows/overrides an OPERATOR-configured setting.
+# Root cause of the hidden `interactive_max_iterations` cap, which truncated
+# ordinary operator chats without being requested and without being observable.
+on:
+  push:
+    branches: [stable, main]
+  pull_request:
+    branches: [stable, main]
+
+jobs:
+  narrowing-lint:
+    name: No unrequested narrowing default (defect class A5)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run no-unrequested-narrowing lint
+        run: python3 scripts/lint-no-unrequested-narrowing.py
+      - name: Narrowing lint self-test (planted min(base,12)/unwrap_or(12) fixtures must trip, fixed code must stay clean)
+        run: python3 scripts/test_lint_no_unrequested_narrowing.py

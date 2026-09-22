@@ -223,6 +223,48 @@ pub struct AgentConfig {
     pub messages_vectorization_interval_secs: u64,
 }
 
+// ── Setting provenance (defect class A5: caps must be observable) ───────────
+//
+// Which settings.yml / settings-DB keys the OPERATOR actually configured, as
+// opposed to values that fell back to a code default. This is what lets a
+// cap/limit termination name the knob, its value AND where the value came from
+// instead of stopping a thread silently. Never narrow an operator setting in
+// code; see the no-unrequested-narrowing lint (scripts/lint-no-unrequested-narrowing.py).
+static OPERATOR_CONFIGURED_KEYS: std::sync::OnceLock<
+    std::sync::RwLock<std::collections::HashSet<String>>,
+> = std::sync::OnceLock::new();
+
+/// Record the setting keys that were actually present in the operator's
+/// configuration (settings.yml and/or the settings DB). Called by both config
+/// loaders; the union is kept so neither loader can hide a configured key.
+fn record_configured_keys(settings: &std::collections::HashMap<String, String>) {
+    let lock = OPERATOR_CONFIGURED_KEYS
+        .get_or_init(|| std::sync::RwLock::new(std::collections::HashSet::new()));
+    if let Ok(mut set) = lock.write() {
+        set.extend(settings.keys().cloned());
+    }
+}
+
+/// True when the operator explicitly configured `key` (settings.yml or settings DB).
+pub fn setting_is_operator_configured(key: &str) -> bool {
+    match OPERATOR_CONFIGURED_KEYS.get() {
+        Some(lock) => lock.read().map(|set| set.contains(key)).unwrap_or(false),
+        None => false,
+    }
+}
+
+/// Human-readable provenance of a setting value, for logs and thread messages:
+/// names whether the value is the operator's or a code default.
+pub fn setting_source_label(key: &str) -> &'static str {
+    if OPERATOR_CONFIGURED_KEYS.get().is_none() {
+        return "unknown (agent config not loaded yet)";
+    }
+    if setting_is_operator_configured(key) {
+        "settings.yml/db (operator-configured)"
+    } else {
+        "code default (NOT configured by the operator)"
+    }
+}
 /// Shared context bundle used by channel_handler and process_thread.
 /// Combines the infrastructure dependencies that are passed to both functions.
 #[derive(Clone)]
@@ -254,6 +296,7 @@ impl AgentConfig {
         // Bootstrap: read OMNI_DIR from env to find settings.yml
         let data_dir = std::env::var("OMNI_DIR").unwrap_or_else(|_| "/opt/omni".to_string());
         let settings = crate::server::settings::load_settings_file(&data_dir);
+        record_configured_keys(&settings);
 
         // Helper: get a resolved value or default (sync : no $secret: resolution at startup)
         let get = |key: &str, default: &str| -> String {
@@ -377,6 +420,7 @@ impl AgentConfig {
     pub async fn from_settings_yaml(data_dir: &str, pool: &PgPool) -> AppResult<Self> {
         let mut settings = crate::server::settings::load_settings_file(data_dir);
         crate::server::settings::resolve_setting_values(&mut settings, pool).await;
+        record_configured_keys(&settings);
 
         // Helper: get a resolved value or default
         let get = |key: &str, default: &str| -> String {
@@ -634,6 +678,23 @@ mod tests {
     // AppContext, and PluginManager - all infrastructure-heavy. We skip that
     // test here since it would require real DB connections.
 
+    #[test]
+    fn test_setting_source_label_distinguishes_operator_config_from_code_default() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("max_iterations_no_plan".to_string(), "30".to_string());
+        record_configured_keys(&map);
+
+        assert!(setting_is_operator_configured("max_iterations_no_plan"));
+        assert!(!setting_is_operator_configured("interactive_max_iterations"));
+        assert_eq!(
+            setting_source_label("max_iterations_no_plan"),
+            "settings.yml/db (operator-configured)"
+        );
+        assert_eq!(
+            setting_source_label("interactive_max_iterations"),
+            "code default (NOT configured by the operator)"
+        );
+    }
     // ── from_env helper closure ─────────────────────────────────────────────
     // The 'get' closure used inside from_env() is testable in isolation.
 

@@ -126,3 +126,7 @@ id_ed25519
 __pycache__/
 *.pyc
 !scripts/test_lint_core_platform_boundary.py
+# Defect class A5 gate: no-unrequested-narrowing lint + baseline + self-test
+!scripts/lint-no-unrequested-narrowing.py
+!scripts/narrowing-defaults-baseline.json
+!scripts/test_lint_no_unrequested_narrowing.py

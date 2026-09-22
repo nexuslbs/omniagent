@@ -572,6 +572,22 @@ fn plan_iterations_consumed(plan_content: &Option<String>) -> i32 {
     }
 }
 
+/// Defect class A5: whenever an internal cap/limit actually terminates or
+/// shortens a thread, the run must RECORD it - which knob, which value, and
+/// where the value came from (operator config vs code default). An operator
+/// must never have to ask "why did it stop?".
+pub(crate) fn cap_termination_notice(
+    knob: &str,
+    value: i32,
+    source: &str,
+    pending_tool_calls: &[String],
+) -> String {
+    format!(
+        "Iteration limit ({value}) reached. knob: {knob} (source: {source}). Last tool calls issued: {}. The task was interrupted before completion.",
+        pending_tool_calls.join(", "),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_main_loop(
     cfg: &AgentContext,
@@ -977,6 +993,8 @@ Previous plan:\n{}",
     // max_iterations_no_plan). There is no interactive-specific cap.
 
     let iter_limit = queries::max_iterations_for_plan(&cfg.config_snapshot(), prompt_parts.plan) as i32;
+    // The knob this budget came from, so a cap termination can name it.
+    let iter_knob = queries::max_iterations_knob(prompt_parts.plan);
     // The plan phase consumed an iteration slot ONLY when a plan was actually
     // generated (plan_content.is_some()). A failed or skipped plan consumes
     // nothing: the first main-loop prompt then stays at iteration 1 instead
@@ -2108,6 +2126,16 @@ Previous plan:\n{}",
         // If iterations will equal the max after this call, flag interruption
         if current_iter >= iter_limit {
             limit_reached = true;
+            // Defect class A5: a cap that ends or shortens a thread must be
+            // observable. Name the knob, the effective value, and where the
+            // value came from (operator config vs code default).
+            warn!(
+                thread_id = thread.id,
+                knob = iter_knob,
+                value = iter_limit,
+                source = crate::agent::config::setting_source_label(iter_knob),
+                "thread hit the iteration cap: terminating the loop with provenance"
+            );
             // Produce content from the last tool calls so final_content is
             // non-empty: prevents a false "empty response" detection when
             // the iteration budget runs out while the LLM was making tools.
@@ -2119,9 +2147,11 @@ Previous plan:\n{}",
                     .iter()
                     .map(|tc| tc.function.name.clone())
                     .collect();
-                final_content = format!(
-                    "Iteration limit ({iter_limit}) reached. Last tool calls issued: {}. The task was interrupted before completion.",
-                    tool_names.join(", "),
+                final_content = cap_termination_notice(
+                    iter_knob,
+                    iter_limit,
+                    crate::agent::config::setting_source_label(iter_knob),
+                    &tool_names,
                 );
                 final_tool_call = false;
                 break;
@@ -3547,6 +3577,44 @@ fn is_core_task_tool(name: &str) -> bool {
             | "core__read_attached_file"
             | "core__wait_for_status"
     )
+}
+
+#[cfg(test)]
+mod cap_observability_tests {
+    use super::cap_termination_notice;
+
+    /// A capped run MUST be diagnosable: knob, value AND provenance.
+    /// This exercises the very function the real cap branch calls, so the
+    /// wording cannot silently rot (requirement 3: caps are observable).
+    #[test]
+    fn cap_notice_names_knob_value_and_source() {
+        let msg = cap_termination_notice(
+            "interactive_max_iterations",
+            12,
+            "code_default",
+            &["core__read_task_logs".to_string(), "search__messages".to_string()],
+        );
+        assert!(msg.contains("Iteration limit (12) reached"), "value: {msg}");
+        assert!(
+            msg.contains("knob: interactive_max_iterations"),
+            "knob: {msg}"
+        );
+        assert!(msg.contains("source: code_default"), "source: {msg}");
+        assert!(
+            msg.contains("core__read_task_logs, search__messages"),
+            "pending tool calls: {msg}"
+        );
+        assert!(msg.contains("interrupted before completion"), "{msg}");
+    }
+
+    /// An operator-configured value is labelled `config`, never `code_default`.
+    #[test]
+    fn cap_notice_distinguishes_operator_config() {
+        let msg = cap_termination_notice("max_iterations_no_plan", 40, "config", &[]);
+        assert!(msg.contains("Iteration limit (40) reached"), "{msg}");
+        assert!(msg.contains("knob: max_iterations_no_plan"), "{msg}");
+        assert!(msg.contains("source: config"), "{msg}");
+    }
 }
 
 #[cfg(test)]

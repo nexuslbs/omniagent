@@ -1,0 +1,5 @@
+{
+  "_comment": "Dated exemptions for lint-no-unrequested-narrowing.py (defect class A5). Every entry MUST carry a justification and an operator_request reference; an entry without either makes the lint FAIL. Adding an entry here is the ESCALATION path: the narrowing must have been requested by the operator, not invented by the agent.",
+  "updated": "2026-09-22",
+  "entries": []
+}

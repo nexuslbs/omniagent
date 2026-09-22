@@ -190,7 +190,19 @@ pub fn resolve_thread_plan(
     None
 }
 
+/// The settings.yml/DB key that [`max_iterations_for_plan`] reads for this plan
+/// mode. Used to name the knob in cap-termination logs and thread messages
+/// (defect class A5: a cap must never end a thread unobservably).
+pub fn max_iterations_knob(plan: bool) -> &'static str {
+    if plan {
+        "max_iterations_plan"
+    } else {
+        "max_iterations_no_plan"
+    }
+}
+
 /// Resolve the max tool-call iterations based on the thread's plan setting.
+
 pub fn max_iterations_for_plan(config: &AgentConfig, plan: bool) -> u32 {
     if plan {
         config.max_iterations_plan
@@ -4214,5 +4226,18 @@ mod sub_prompt_appendable_tests {
         );
 
         cleanup_threads(&pool, &[running_id, other_id]).await;
+    }
+}
+
+#[cfg(test)]
+mod max_iterations_knob_tests {
+    use super::max_iterations_knob;
+
+    /// Defect class A5: a cap termination must be able to NAME the knob it came
+    /// from, per plan mode.
+    #[test]
+    fn knob_names_follow_the_plan_mode() {
+        assert_eq!(max_iterations_knob(true), "max_iterations_plan");
+        assert_eq!(max_iterations_knob(false), "max_iterations_no_plan");
     }
 }
