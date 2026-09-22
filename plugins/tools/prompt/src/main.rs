@@ -2101,9 +2101,16 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
     // system prompt, the current user turn, the newest message and the
     // tool-call STRUCTURE (tool_calls / tool_call_id) are never modified.
     let mut truncated_chars = 0usize;
-    if measure_size(&messages, &cfg.tokenizer_encoding) > effective_target {
+    // The fallback exists to FIT THE HARD BUDGET (the provider's limit), never
+    // to reach the soft budget: the soft budget is the compaction DRAIN target,
+    // and truncating tool results down to it while the hard budget is 4x larger
+    // destroys results the agent still needs - the v0.3.2 "dumb and slow"
+    // regression (thread 2812: 68 live prompts carried the truncation marker;
+    // v0.3.1 carried none). It therefore fires only while the array measures
+    // over `must_fit_target` and reduces to exactly that target.
+    if measure_size(&messages, &cfg.tokenizer_encoding) > must_fit_target {
         truncated_chars =
-            shrink_messages_to_target(&mut messages, effective_target, &cfg.tokenizer_encoding);
+            shrink_messages_to_target(&mut messages, must_fit_target, &cfg.tokenizer_encoding);
     }
 
     let after = messages.len();
@@ -2134,6 +2141,7 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
         "after_count": after,
         "measured_tokens": after_size,
         "effective_target": effective_target,
+        "truncate_target": must_fit_target,
         "over_budget": still_over,
         "truncated_chars": truncated_chars,
     });
@@ -3189,9 +3197,16 @@ mod token_counting_tests {
         let target = v["effective_target"].as_u64().unwrap();
         // hard - clamped overhead (5000) - headroom (2000), and never above the
         // soft budget.
-        assert_eq!(target, 10_000, "effective target: {v}");
+        assert_eq!(target, 10_000, "effective (drain) target: {v}");
+        // The FALLBACK only has to fit under the HARD budget: the drain target
+        // is the compaction aim, the truncate target is the provider limit.
+        let truncate_target = v["truncate_target"].as_u64().unwrap();
+        assert_eq!(truncate_target, 13_000, "truncate target: {v}");
         assert_eq!(v["over_budget"], false, "still over the target: {v}");
-        assert!(v["measured_tokens"].as_u64().unwrap() <= target, "{v}");
+        assert!(
+            v["measured_tokens"].as_u64().unwrap() <= truncate_target,
+            "{v}"
+        );
         assert!(
             v["truncated_chars"].as_u64().unwrap() > 0,
             "deterministic fallback did not truncate: {v}"
@@ -3219,6 +3234,61 @@ mod token_counting_tests {
         assert!(
             tool_msg["content"].as_str().unwrap().chars().count() < 200_000,
             "retained tool result must be truncated"
+        );
+    }
+
+    // Regression (operator thread 2812, v0.3.2 -> v0.3.3): the deterministic
+    // truncation fallback must NOT gut retained tool results while the prompt is
+    // still UNDER the hard budget. In v0.3.2 it truncated down to the SOFT
+    // budget (25k here, 4x smaller than the hard budget), so the agent lost the
+    // results of the tools it had just executed: every live prompt of thread
+    // 2812 carried the truncation marker (68 prompts / 4033 markers; v0.3.1
+    // carried none) and the operator saw a "dumb and slow" agent. This test
+    // fails on v0.3.2 (the tool result comes back truncated) and passes once the
+    // fallback only fires while the array measures over the hard-budget target.
+    #[tokio::test]
+    async fn compaction_keeps_tool_results_verbatim_under_hard_budget() {
+        let cfg = compact_cfg("");
+        // ~60k proxy tokens of retained tool result: far above the soft budget
+        // (25k) but below the hard budget (100k).
+        let big = "x".repeat(240_000);
+        let msgs = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: "SYSTEM PROMPT".to_string(),
+                tool_call_id: None,
+                tool_calls: None,
+                name: None,
+            },
+            tool_call_msg("filesystem_read", "{}", "reading a big file"),
+            ChatMessage {
+                role: "tool".to_string(),
+                content: big,
+                tool_call_id: Some("call_1".to_string()),
+                tool_calls: None,
+                name: Some("filesystem_read".to_string()),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "CURRENT USER TURN".to_string(),
+                tool_call_id: None,
+                tool_calls: None,
+                name: None,
+            },
+        ];
+        let out = run_compact(&msgs, &cfg, 3, None, 100_000, 25_000).await;
+        assert_eq!(
+            out["truncated_chars"], 0,
+            "tool results must survive verbatim under the hard budget: {out}"
+        );
+        assert_eq!(
+            out["was_compacted"], false,
+            "no rewrite under the hard budget: {out}"
+        );
+        assert_eq!(
+            out["messages"],
+            serde_json::Value::Null,
+            "null-contract under the hard budget: {out}"
         );
     }
 

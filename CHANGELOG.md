@@ -29,6 +29,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `iteration_budget_tests::interactive_operator_thread_keeps_full_plan_budget`
   fails if any of the cap machinery is reintroduced.
 
+### Fixed - the deterministic truncation fallback must never shrink the prompt below the HARD budget (the v0.3.2 "dumb and slow" regression)
+
+- v0.3.2 (`f4d40ca`) added a deterministic truncation fallback whose gate and
+  target were the *soft* budget (`effective_target` = `reduce_target.min(must_fit_target)`, i.e. the soft budget whenever the provider had not billed
+  over the hard budget). So on an ordinary operator thread with soft=25k and
+  hard=100k, compaction ran and then the fallback head+tail-truncated retained
+  **tool results** (and the per-iteration digest injections) down to 25k - 4x
+  below the hard budget - so the agent lost the middle of the very results it
+  had just produced: it re-derived them in new probes (slow) or answered from a
+  gutted context (dumb). Live proof: thread 2812 carried the truncation marker
+  in 68 prompt messages (4033 markers) / 2815 in 7 / 2816 in 3, while v0.3.1
+  carried none (the marker did not exist).
+- The fallback now fires only while the array measures over `must_fit_target`
+  (the HARD-budget target, after the measured/unmeasurable overhead and the
+  configured headroom) and reduces to exactly that target. The soft budget
+  remains only what it was designed to be: the compaction *drain* target. Tool
+  results under the hard budget are kept verbatim.
+- Observability: the compaction result now reports `truncate_target` next to
+  `effective_target` (the drain aim) and `truncated_chars`, so the two budgets
+  and any truncation are always visible instead of being folded into one
+  ambiguous number. No new setting/knob was introduced: the fallback is driven
+  by the existing `soft_budget`/`hard_budget` arguments, so the iteration
+  budget contract (150 without a plan, 300 with one) is untouched.
+- Regression guard:
+  `token_counting_tests::compaction_keeps_tool_results_verbatim_under_hard_budget`
+  (a ~60k-token retained tool result with hard=100k/soft=25k must come back
+  untruncated with no rewrite and the null-contract) fails on the v0.3.2
+  behaviour and passes after the fix; the hard-budget-overflow case stays
+  covered by
+  `token_counting_tests::compaction_reaches_provider_hard_budget_with_truncation_fallback`
+  (now asserting `truncate_target` too).
+
 ### Changed - Core tool namespace renamed `builtin` -> `core` (HARD CUTOVER, no alias)
 
 - Core built-in tools are now exposed as `core__*` (`core__poll_task`,
