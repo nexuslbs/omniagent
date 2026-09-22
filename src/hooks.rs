@@ -172,6 +172,10 @@ pub fn fire_thread_terminated(thread_id: i64, status: &str) {
 /// MUST call this exactly once per inserted message - post-commit for
 /// transactional sites, so the hook handler observes the committed row.
 pub fn fire_new_message(thread_id: i64, message_id: i64) {
+    // Published-event bus: an inbound operator/platform message is the
+    // authoritative "the human acted" signal for a pending interaction.
+    // No-op (cheap) when the bus has nothing pending.
+    crate::events::note_new_message(thread_id, message_id);
     dispatch(move |engine| async move {
         engine
             .handle_event_with_message(EVENT_NEW_MESSAGE, thread_id, message_id)

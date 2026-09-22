@@ -13,6 +13,7 @@
 pub(crate) mod actions;
 pub(crate) mod channels;
 pub(crate) mod db_query;
+pub(crate) mod events;
 pub(crate) mod hooks;
 pub(crate) mod kanban;
 pub(crate) mod kanban_ids;
@@ -325,6 +326,8 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
         // ── Schedule API routes (replaces dashboard schedule.ts) ──
         .merge(schedule::schedule_router())
         .merge(hooks::hooks_router())
+        // ── Published-event bus routes (publish / wait / describe) ──
+        .merge(events::events_router())
         // ── Actions CRUD routes (backed by actions.yml) ──
         .route("/actions", get(actions::list_actions_handler))
         .route("/actions", post(actions::create_action_handler))

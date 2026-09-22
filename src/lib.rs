@@ -12,6 +12,7 @@ pub mod commands;
 pub mod config_path;
 pub mod db;
 pub mod error;
+pub mod events;
 pub mod hooks;
 pub mod kanban_action;
 pub mod kanban_dispatch;

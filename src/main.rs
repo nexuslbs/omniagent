@@ -275,6 +275,18 @@ async fn run_server() -> AppResult<()> {
         ctx.clone(),
     ));
 
+    // Initialize the generic PUBLISHED-EVENT bus (channel agnostic): producers
+    // publish named events with a correlation id, listeners are `mode: action`
+    // hooks in tasks.yml bound to that event name (fan-out, isolated failures).
+    omniagent::events::init(omniagent::events::EventsEngine::new(
+        data_dir.clone(),
+        Arc::new(omniagent::events::PluginListenerExec::new(
+            plugin_manager.clone(),
+            ctx.clone(),
+        )),
+        Some(pool.clone()),
+    ));
+
     // Register platform clients for the read_attached_file MCP tool
     // Each platform plugin implements read_file internally, so the core
     // never needs to know plugin-specific config fields like access_token.
