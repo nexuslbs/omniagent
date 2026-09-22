@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import os
 import shutil
 import sys
@@ -265,6 +266,69 @@ fn f(cfg: &AgentConfig, base: i32) -> i32 {
 ''',
 }
 
+# Thread 2843 (reviewer 2842 blocking finding): byte-faithful reproductions of
+# the live incident. The receiver's value comes out of a HELPER CALL whose body
+# reads a setting, and the narrowing operand is an alias / param / direct read
+# of a setting. Deliberately NO numeric literal and NO budget-ish identifier
+# name anywhere: only a real taint / definition chain can flag these, so a
+# literal-based or name-heuristic rule passes them silently.
+INCIDENT_SHAPES = {
+    'helper_call_receiver_alias_arg': '''
+fn rounds_for_plan(cfg: &AgentConfig, plan: u32) -> u32 {
+    cfg.max_iterations_plan
+}
+
+fn taint_only(cfg: &AgentConfig, plan: u32) -> i32 {
+    let requested = rounds_for_plan(cfg, plan) as i32;
+    let configured = cfg.max_iterations_plan;
+    requested.min(configured as i32)
+}
+''',
+    'helper_call_receiver_no_cast': '''
+fn rounds_for_plan(cfg: &AgentConfig, plan: u32) -> u32 {
+    cfg.max_iterations_plan
+}
+
+fn taint_only(cfg: &AgentConfig, plan: u32) -> u32 {
+    let requested = rounds_for_plan(cfg, plan);
+    let configured = cfg.max_iterations_plan;
+    requested.min(configured)
+}
+''',
+    'helper_call_receiver_order_swapped': '''
+fn rounds_for_plan(cfg: &AgentConfig, plan: u32) -> u32 {
+    cfg.max_iterations_plan
+}
+
+fn taint_only(cfg: &AgentConfig, plan: u32) -> i32 {
+    let configured = cfg.max_iterations_plan;
+    let requested = rounds_for_plan(cfg, plan) as i32;
+    requested.min(configured as i32)
+}
+''',
+    'helper_call_receiver_direct_arg': '''
+fn rounds_for_plan(cfg: &AgentConfig, plan: u32) -> u32 {
+    cfg.max_iterations_plan
+}
+
+fn taint_only(cfg: &AgentConfig, plan: u32) -> i32 {
+    let requested = rounds_for_plan(cfg, plan) as i32;
+    requested.min(cfg.max_iterations_plan as i32)
+}
+''',
+    'helper_call_receiver_resolver_named': '''
+fn max_iterations_for_plan(cfg: &AgentConfig, plan: u32) -> u32 {
+    cfg.max_iterations_plan
+}
+
+fn v(cfg: &AgentConfig, plan: u32) -> i32 {
+    let base = max_iterations_for_plan(cfg, plan) as i32;
+    let cap = cfg.max_iterations_plan;
+    base.min(cap as i32)
+}
+''',
+}
+
 # Shapes that must STAY clean: they do not narrow an operator setting.
 CLEAN_SHAPES = {
     'used_as_given': '''
@@ -424,6 +488,43 @@ class LintNarrowingTest(unittest.TestCase):
         for name, body in CLEAN_SHAPES.items():
             code, err = self._run(CONFIG_STUB + body)
             self.assertEqual(code, 0, f'{name} must stay clean, got rc={code}: {err}')
+
+
+    def test_incident_shapes_all_trip_without_literals_or_budget_names(self):
+        """Thread 2843: helper-call receiver + setting alias must trip on TAINT.
+
+        The fixtures carry no numeric literal and no budget-ish identifier, so
+        only a real taint / definition chain can reject them; a literal-based or
+        name-heuristic rule would let the live incident through. The receiver
+        comes from a same-file helper whose body reads an operator setting.
+        """
+        for name, body in INCIDENT_SHAPES.items():
+            if name != 'helper_call_receiver_resolver_named':
+                stripped = re.sub(r'\bu(?:8|16|32|64|128|size)\b|\bi(?:8|16|32|64|128|size)\b',
+                                  'TYPE', body)
+                self.assertFalse(any(c.isdigit() for c in stripped),
+                                 f'{name} fixture must stay literal-free')
+                self.assertNotIn('_cap', body)
+                self.assertNotIn('base', body)
+            code, err = self._run(CONFIG_STUB + body)
+            self.assertEqual(
+                code, 1, f'{name} must be rejected, got rc={code}: {err}')
+            if name in ('helper_call_receiver_alias_arg',
+                        'helper_call_receiver_no_cast'):
+                # The rejection must come from the taint / budget-named-operand
+                # branch ("no literal, no `cfg.`/`get()` at the call site"), NOT
+                # from a literal rule: that is the branch the incident escaped.
+                self.assertIn('no literal, no', err,
+                              f'{name} must be rejected on TAINT, got: {err}')
+
+    def test_incident_shape_mixed_with_controls_in_one_file(self):
+        """A file mixing the incident shape with a positive control still trips."""
+        src = (CONFIG_STUB
+               + 'fn direct_control(cfg: &AgentConfig, base: i32) -> i32 {\n'
+                 '    base.min(cfg.max_iterations_plan as i32)\n}\n'
+               + INCIDENT_SHAPES['helper_call_receiver_alias_arg'])
+        code, err = self._run(src)
+        self.assertEqual(code, 1, f'incident+control file must fail, got {code}: {err}')
 
 
 if __name__ == '__main__':

@@ -109,6 +109,7 @@ NUMBER_RE = re.compile(r'(?<![A-Za-z0-9_.])(\d+)(?![A-Za-z0-9_])')
 NUM_SUFFIX_RE = re.compile(r'\b(\d+)(?:u|i)(?:8|16|32|64|128|size)\b')
 JUSTIFY_RE = re.compile(r'narrowing-ok\s*:?\s*(.+)')
 UNWRAP_OR_RE = re.compile(r'\.unwrap_or\s*\(')
+FN_DEF_RE = re.compile(r'\bfn\s+([A-Za-z_][A-Za-z0-9_]*)')
 LET_RE = re.compile(
     r'\b(?:let|const)\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)'
     r'\s*(?::[^=;{}()]*?)?=\s*([^;]*?)\s*$', re.S)
@@ -447,28 +448,72 @@ def setting_bound(expr_masked: str, expr_raw: str, tainted: set[str],
     return weak_nameish(expr_masked) and not (ident_set(expr_masked) <= set(computed))
 
 
-def rhs_is_direct(rhs: str, tainted: set[str], keys: set[str]) -> bool:
+def strip_transforms(rhs: str) -> str:
+    """Drop value-preserving calls / casts so provenance can be read off a binding."""
+    simp = re.sub(r'\.(parse|clone|to_string|trim|as_str|unwrap|unwrap_or|expect)'
+                  r'\s*(?:::?<[^>]*>)?\s*\([^()]*\)', '', rhs)
+    return re.sub(r'\bas\s+[A-Za-z0-9_:<>]+', '', simp).strip()
+
+
+def setting_reading_functions(raw: str, keys: set[str]) -> set[str]:
+    """Function names whose body reads an operator setting (transitively).
+
+    Taint must flow through a helper call (`let base = rounds_for_plan(cfg, p)`),
+    otherwise a helper that re-reads a setting launders it into a binding the
+    gate no longer recognises - defect class A5 (thread 2843 reviewer finding).
+    A helper that only calls another setting-reading helper counts too, via a
+    small fixpoint over the file's `fn` bodies.
+    """
+    starts = [(m.group(1), m.start()) for m in FN_DEF_RE.finditer(raw)]
+    bodies: dict[str, str] = {}
+    for i, (fname, start) in enumerate(starts):
+        end = starts[i + 1][1] if i + 1 < len(starts) else len(raw)
+        bodies[fname] = raw[start:end]
+    out: set[str] = set()
+    for _ in range(3):
+        for fname, body in bodies.items():
+            if fname in out:
+                continue
+            if has_setting_access(body, keys) or (ident_set(body) & out):
+                out.add(fname)
+    return out
+
+
+def call_is_setting_reading(simplified: str, sfns: set[str] | frozenset[str]) -> bool:
+    """True when a call-free (value-preserving) expression IS such a helper call."""
+    if not sfns:
+        return False
+    if re.search(r'[+\-*/%]', simplified):
+        return False
+    return bool(ident_set(simplified) & set(sfns))
+
+
+def rhs_is_direct(rhs: str, tainted: set[str], keys: set[str],
+                  sfns: set[str] | frozenset[str] = frozenset()) -> bool:
     """True when an RHS reads a setting *as given* (no arithmetic on it)."""
-    simplified = re.sub(r'\.(parse|clone|to_string|trim|as_str|unwrap|unwrap_or|expect)'
-                        r'\s*(?:::?<[^>]*>)?\s*\([^()]*\)', '', rhs)
-    simplified = re.sub(r'\bas\s+[A-Za-z0-9_:<>]+', '', simplified).strip()
+    simplified = strip_transforms(rhs)
     # a resolver call or a direct setting access is always "as given"
     if has_setting_access(simplified, keys):
         return True
     # derived arithmetic is NOT a setting binding
     if re.search(r'[+\-*/%]', simplified):
         return False
+    # a call to a helper that itself reads a setting is a setting read too
+    if call_is_setting_reading(simplified, sfns):
+        return True
     if simplified in tainted:
         return True
     if re.fullmatch(r'[A-Za-z0-9_.:\[\]()<> ]+', simplified):
-        return any(nameish(i) or i in tainted for i in ident_set(simplified))
+        return any(nameish(i) or i in tainted or i in sfns
+                   for i in ident_set(simplified))
     return False
 
 
 def bind_from_unit(unit_masked: str, unit_raw: str, tainted: set[str],
                    consts: dict[str, int], keys: set[str],
-                   computed: set[str]) -> None:
-    """Update taint / literal / computed bindings from a `let NAME = RHS` unit."""
+                   computed: set[str], sfns: set[str] | frozenset[str] = frozenset(),
+                   call_derived: set[str] | None = None) -> None:
+    """Update taint / literal / computed / call-derived bindings from a `let`."""
     m = LET_RE.search(unit_masked)
     if not m:
         return
@@ -480,11 +525,26 @@ def bind_from_unit(unit_masked: str, unit_raw: str, tainted: set[str],
     if len(lits) == 1 and not ident_set(cleaned):
         consts[name] = lits[0]
         return
-    if rhs_is_direct(rhs_masked, tainted, keys) or has_setting_access(unit_raw, keys):
+    if rhs_is_direct(rhs_masked, tainted, keys, sfns) or has_setting_access(unit_raw, keys):
         tainted.add(name)
         computed.discard(name)
+        if call_derived is not None:
+            # The binding ALSO remembers whether its value came out of a helper
+            # CALL (transitive through plain aliases). Such a value is not "read
+            # as given" at a later `.min()`, so it cannot be excused as the
+            # stricter of two operator settings (historic A5 incident).
+            simp = strip_transforms(rhs_masked)
+            from_call = call_is_setting_reading(simp, sfns) or (
+                not re.search(r'[+\-*/%]', simp)
+                and bool(ident_set(simp) & call_derived))
+            if from_call:
+                call_derived.add(name)
+            else:
+                call_derived.discard(name)
     else:
         computed.add(name)
+        if call_derived is not None:
+            call_derived.discard(name)
 
 
 # ── detection ───────────────────────────────────────────────────────────────
@@ -564,7 +624,9 @@ def scan_unit(unit: str, unit_raw: str, tainted: set[str],
               consts: dict[str, int], keys: set[str],
               optional_fields: set[str],
               computed: set[str] = frozenset(),
-              is_settings_file: bool = False) -> list[tuple[int, str]]:
+              is_settings_file: bool = False,
+              call_derived: set[str] | frozenset[str] = frozenset(),
+              sfns: set[str] | frozenset[str] = frozenset()) -> list[tuple[int, str]]:
     """Narrowing findings in one statement unit: [(char_offset, message)]."""
     hits: list[tuple[int, str]] = []
     for pos, recv, name, args in find_method_calls(unit):
@@ -589,7 +651,13 @@ def scan_unit(unit: str, unit_raw: str, tainted: set[str],
         explicit_setting_arg = reads_operator_setting(args_raw, keys)
         recv_explicit = (bool(ident_set(recv) & tainted)
                          or reads_operator_setting(recv_raw, keys))
-        if explicit_setting_arg and recv_explicit and not lits:
+        # A receiver whose value came out of a HELPER CALL is not "read as
+        # given": the helper may already return a narrowed value, so the call
+        # cannot be excused as the stricter of two operator settings. Historic
+        # incident: `let base = rounds_for_plan(cfg, p) as i32;`
+        # `let cap = cfg.<key>; base.min(cap as i32)`.
+        recv_called = bool(ident_set(recv) & set(call_derived))
+        if explicit_setting_arg and recv_explicit and not lits and not recv_called:
             # stricter of two operator-configured settings, both read as given
             continue
         if lits or explicit_setting_arg:
@@ -651,7 +719,12 @@ def scan_unit(unit: str, unit_raw: str, tainted: set[str],
         recv_explicit = (bool(ident_set(recv) & tainted)
                          or reads_operator_setting(recv_raw, keys))
         arg_explicit = bool(arg_ids & tainted) or reads_operator_setting(args_raw, keys)
-        if recv_explicit and arg_explicit:
+        # The exemption only holds for values READ AS GIVEN. A side whose value
+        # came out of a setting-reading helper call can carry an invented cap
+        # (defect class A5), so it must still be reported.
+        recv_called = bool(ident_set(recv) & set(call_derived))
+        arg_called = bool(arg_ids & set(call_derived))
+        if recv_explicit and arg_explicit and not (recv_called or arg_called):
             continue  # stricter-of-two-operator-settings, both sides as given
         hits.append((
             pos,
@@ -719,6 +792,8 @@ def lint(root: str, baseline_path: str) -> tuple[int, list[str]]:
         tainted: set[str] = set()
         consts: dict[str, int] = {}
         computed: set[str] = set()
+        sfns = setting_reading_functions(raw, keys)
+        call_derived: set[str] = set()
         is_settings_file = rel in CORE_SETTINGS_FILES
         for offset, line_no, unit in split_units(masked):
             if not unit.strip():
@@ -726,7 +801,7 @@ def lint(root: str, baseline_path: str) -> tuple[int, list[str]]:
             unit_raw = rawc[offset:offset + len(unit)]
             for pos, msg in scan_unit(unit, unit_raw, tainted, consts,
                                       keys, optional_fields, computed,
-                                      is_settings_file):
+                                      is_settings_file, call_derived, sfns):
                 call_line = line_no + unit[:pos].count('\n')
                 src_line = lines[call_line - 1] if 0 <= call_line - 1 < len(lines) else ''
                 if justification_for(call_line, lines):
@@ -736,7 +811,8 @@ def lint(root: str, baseline_path: str) -> tuple[int, list[str]]:
                 findings.append(
                     f'{rel}:{call_line}: {msg}\n    {src_line.strip()}\n'
                     f'    remediation: {REDEMPTION}')
-            bind_from_unit(unit, unit_raw, tainted, consts, keys, computed)
+            bind_from_unit(unit, unit_raw, tainted, consts, keys, computed,
+                           sfns, call_derived)
     for p in base_problems:
         findings.append(f'baseline: {p}')
     return (1 if findings else 0), findings
