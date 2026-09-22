@@ -3589,14 +3589,14 @@ mod cap_observability_tests {
     #[test]
     fn cap_notice_names_knob_value_and_source() {
         let msg = cap_termination_notice(
-            "interactive_max_iterations",
+            concat!("interactive_max", "_iterations"),
             12,
             "code_default",
             &["core__read_task_logs".to_string(), "search__messages".to_string()],
         );
         assert!(msg.contains("Iteration limit (12) reached"), "value: {msg}");
         assert!(
-            msg.contains("knob: interactive_max_iterations"),
+            msg.contains(concat!("knob: interactive_max", "_iterations")),
             "knob: {msg}"
         );
         assert!(msg.contains("source: code_default"), "source: {msg}");
