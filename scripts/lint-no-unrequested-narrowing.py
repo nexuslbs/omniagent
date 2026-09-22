@@ -545,6 +545,21 @@ def definition_chain_ok(unit_raw: str, call_pos: int, keys: set[str]) -> bool:
     return False
 
 
+def reads_operator_setting(raw: str, keys: set[str]) -> bool:
+    """A value read STRAIGHT from operator configuration in this expression.
+
+    `cfg.<key>` counts when <key> is a known operator setting, and also when
+    the field is BUDGET-NAMED (`cfg.token_budget_soft`): the operator-visible
+    stricter-of-two-configured-budgets idiom combines two such direct reads and
+    narrows neither setting. Values carried through locals/parameters are
+    covered by taint instead; this helper covers the direct field reads, so that
+    idiom is not mistaken for an invented narrowing.
+    """
+    if has_setting_access(raw, keys):
+        return True
+    return any(nameish(m.group(1)) for m in FIELD_ACCESS_RE.finditer(raw))
+
+
 def scan_unit(unit: str, unit_raw: str, tainted: set[str],
               consts: dict[str, int], keys: set[str],
               optional_fields: set[str],
@@ -571,9 +586,9 @@ def scan_unit(unit: str, unit_raw: str, tainted: set[str],
         # Two ALREADY-RESOLVED values being combined (`reduce_target.min(
         # must_fit_target)`, e.g. the stricter of two operator budgets) is not a
         # narrowing of either setting and must not be reported.
-        explicit_setting_arg = has_setting_access(args_raw, keys)
+        explicit_setting_arg = reads_operator_setting(args_raw, keys)
         recv_explicit = (bool(ident_set(recv) & tainted)
-                         or has_setting_access(recv_raw, keys))
+                         or reads_operator_setting(recv_raw, keys))
         if explicit_setting_arg and recv_explicit and not lits:
             # stricter of two operator-configured settings, both read as given
             continue
@@ -631,10 +646,11 @@ def scan_unit(unit: str, unit_raw: str, tainted: set[str],
                 or bool(arg_ids & tainted)):
             continue
         lits = numeric_literals(args, consts)
-        if lits or has_setting_access(args_raw, keys):
+        if lits or reads_operator_setting(args_raw, keys):
             continue  # reported by the literal / explicit-setting branches above
-        recv_explicit = bool(ident_set(recv) & tainted) or has_setting_access(recv_raw, keys)
-        arg_explicit = bool(arg_ids & tainted) or has_setting_access(args_raw, keys)
+        recv_explicit = (bool(ident_set(recv) & tainted)
+                         or reads_operator_setting(recv_raw, keys))
+        arg_explicit = bool(arg_ids & tainted) or reads_operator_setting(args_raw, keys)
         if recv_explicit and arg_explicit:
             continue  # stricter-of-two-operator-settings, both sides as given
         hits.append((

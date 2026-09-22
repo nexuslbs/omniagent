@@ -318,6 +318,31 @@ fn f(cfg: &AgentConfig) -> u32 {
     'stricter_of_two_settings_at_call_site': '''
 fn f(cfg: &AgentConfig) -> u32 { cfg.max_iterations_no_plan.min(cfg.max_iterations_plan) }
 ''',
+    # Tester-measured false positive (thread 2836, V4): BOTH operands are direct
+    # operator-configuration reads on ONE line with no literal anywhere - the
+    # operator-visible stricter-of-two budgets, which must stay clean. These two
+    # live in CLEAN_SHAPES (they were wrongly listed among the TRIP shapes in an
+    # earlier revision, which is what made the suite red).
+    'stricter_of_two_direct_reads_at_call_site': '''
+fn f(cfg: &AgentConfig) -> u32 { cfg.token_budget_soft.min(cfg.token_budget_hard) }
+''',
+    'stricter_of_two_direct_reads_known_keys': '''
+fn f(cfg: &AgentConfig) -> u32 { cfg.max_iterations_plan.min(cfg.max_iterations_no_plan) }
+''',
+    # Tester-measured false positive (thread 2836): a FLOOR RAISE widens a value,
+    # it never narrows an operator setting, so `max()` must never be reported.
+    'max_floor_raise_direct': '''
+fn f(cfg: &AgentConfig) -> u32 { cfg.max_iterations_plan.max(3) }
+''',
+    'max_floor_raise_free_fn': '''
+fn f(cfg: &AgentConfig) -> u32 { std::cmp::max(cfg.max_iterations_plan, 3) }
+''',
+    'max_floor_raise_on_setting_bound_local': '''
+fn f(cfg: &AgentConfig) -> u32 {
+    let base = cfg.max_iterations_plan;
+    base.max(3)
+}
+''',
 }
 
 
