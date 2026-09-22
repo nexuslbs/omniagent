@@ -46,9 +46,22 @@ Detection (mechanical, taint based, STATEMENT level):
        plugin, not operator settings).
     4. FLAGGED: `.min/.max/.clamp(...)` on a setting-bound receiver where an
        argument is a literal or another setting-bound value; bare
+       (rework, thread 2835) ALSO: `.min/.max/.clamp(...)` on a setting-bound
+       receiver whose argument is a BUDGET-NAMED value with no literal and no
+       `cfg.`/`get()` at the call site - `let cap = cfg.<key>; base.min(cap as
+       i32)`, `let read_cap = cap; base.min(read_cap as i32)`, and
+       `fn f(base: i32, interactive_cap: u32) { base.min(interactive_cap as
+       i32) }` (the historic helper verbatim). The reviewer proved the previous
+       version missed every one of these (RC=0). EXEMPT: both operands read an
+       operator setting at the call site (`reduce_target.min(must_fit_target)`,
+       the operator-visible stricter-of-two configured budgets).
        `min(...)`/`max(...)`/`std::cmp::min(...)` with a setting-bound argument
        and a literal; `.unwrap_or(<non-zero>)` on a setting-bound receiver.
-    5. NOT flagged: arithmetic on an already-resolved budget
+    5. LIMITATION (documented, not hidden): a narrowing operand that carries
+       NEITHER a literal NOR a budget-shaped name (`base.min(req_len)`) cannot
+       be told apart from an ordinary request-parameter clamp without type or
+       dataflow analysis, so it is NOT flagged; review must justify it.
+    6. NOT flagged: arithmetic on an already-resolved budget
        (`let half = iter_limit / 2; half.max(3)`), `.max(0)` floors, and
        request-parameter handling in HTTP handlers / plugins.
 
@@ -546,6 +559,44 @@ def scan_unit(unit: str, unit_raw: str, tainted: set[str],
         if lits:
             hits.append((
                 pos, f'{name}() clamps a setting-bound argument with literal {lits}'))
+    # ── arg-side narrowing: the cap arrives as a bare local / alias / param ──
+    # Added in the defect-class-A5 rework (thread 2835). The two branches above
+    # only fire when the narrowing operand carries a numeric literal or names a
+    # setting through `cfg.`/`get(...)`. The historical self-invented cap passed
+    # its value in differently:
+    #     let cap = cfg.interactive_max_iterations; base.min(cap as i32)
+    #     fn f(base: i32, interactive_cap: u32) -> i32 { base.min(interactive_cap as i32) }
+    # Neither operand carries a literal, so the exact root-cause shape used to
+    # sail through. Rule: `min`/`max`/`clamp` on a budget-ish receiver with a
+    # budget-ish operand is a narrowing - UNLESS the call combines two values
+    # that BOTH read an operator setting right here (`reduce_target.min(
+    # must_fit_target)`, the operator-visible "stricter of the two configured
+    # budgets"), which stays clean.
+    for pos, recv, name, args in find_method_calls(unit):
+        if name not in CALL_NAMES:
+            continue
+        recv_raw = unit_raw[max(0, pos - len(recv)):pos]
+        if not setting_bound(recv, recv_raw, tainted, keys, computed):
+            continue
+        args_raw = unit_raw[pos:pos + len(args) + 1]
+        if not args.strip():
+            continue
+        arg_ids = ident_set(args)
+        if not (any(nameish(a) for a in arg_ids) or weak_nameish(args)):
+            continue
+        lits = numeric_literals(args, consts)
+        if lits or has_setting_access(args_raw, keys):
+            continue  # reported by the literal / explicit-setting branches above
+        recv_explicit = bool(ident_set(recv) & tainted) or has_setting_access(recv_raw, keys)
+        arg_explicit = bool(arg_ids & tainted) or has_setting_access(args_raw, keys)
+        if recv_explicit and arg_explicit:
+            continue  # stricter-of-two-operator-settings, both sides as given
+        hits.append((
+            pos,
+            f'{name}() narrows a setting-bound value with budget-named operand '
+            f'{sorted(arg_ids) or args.strip()!r} (no literal, no `cfg.`/`get()` '
+            f'at the call site): if this cap is not operator-requested it is '
+            f'defect class A5'))
     for m in UNWRAP_OR_RE.finditer(unit):
         args = args_raw = None
         args = unit[m.end():]

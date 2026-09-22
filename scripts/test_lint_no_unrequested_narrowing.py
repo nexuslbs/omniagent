@@ -172,12 +172,80 @@ fn sneaky() -> u32 {
     'clamp_range_on_setting': '''
 fn f(cfg: &AgentConfig) -> u32 { cfg.max_iterations_plan.clamp(1, 12) }
 ''',
+    # ── setting tracked through a local binding / alias / function parameter ──
+    # Rework (thread 2835): these are the exact shapes the reviewer planted and
+    # the ORIGINAL gate MISSED (RC=0). They must all trip now. None of them was
+    # written to fit the implementation - each one carries the self-invented cap
+    # in the operand, with no numeric literal at the call site.
+    'setting_tracked_through_alias_min': '''
+fn f(cfg: &AgentConfig, base: i32) -> i32 {
+    let cap = cfg.interactive_max_iterations;
+    base.min(cap as i32)
+}
+''',
+    'setting_tracked_through_alias_named_like_the_setting': '''
+fn f(cfg: &AgentConfig, base: i32) -> i32 {
+    let interactive_max_iterations = cfg.interactive_max_iterations;
+    base.min(interactive_max_iterations as i32)
+}
+''',
+    'setting_named_function_parameter': '''
+fn f(base: i32, interactive_max_iterations: u32) -> i32 {
+    base.min(interactive_max_iterations as i32)
+}
+''',
+    'historic_cap_parameter_name': '''
+fn f(base: i32, interactive_cap: u32) -> i32 {
+    base.min(interactive_cap as i32)
+}
+''',
+    'setting_tracked_through_alias_clamp': '''
+fn f(cfg: &AgentConfig, base: i32) -> i32 {
+    let cap = cfg.interactive_max_iterations;
+    base.clamp(1, cap as i32)
+}
+''',
+    'setting_spilled_into_second_binding_min': '''
+fn f(cfg: &AgentConfig, base: i32) -> i32 {
+    let cap = cfg.interactive_max_iterations;
+    let read_cap = cap;
+    base.min(read_cap as i32)
+}
+''',
+    # The historical helper VERBATIM in shape: omitted from the diff because it
+    # was declared in the same function, so the pre-fix worktree lint (which saw
+    # only the call-site line as a unit) never reported it.
+    'historic_self_invented_cap_helper_verbatim': '''
+/// Effective total iteration budget for a thread. The hard interactive cap
+/// (`interactive_max_iterations`) applies ONLY to NON-PLAN interactive threads.
+fn effective_iteration_budget(cfg: &AgentConfig, base: i32, iter_limit: i32,
+                              interactive: bool) -> i32 {
+    let interactive_cap = if interactive { cfg.interactive_max_iterations } else { iter_limit as u32 };
+    if interactive {
+        base.min(interactive_cap as i32)
+    } else {
+        base
+    }
+}
+''',
 }
 
 # Shapes that must STAY clean: they do not narrow an operator setting.
 CLEAN_SHAPES = {
     'used_as_given': '''
 fn f(cfg: &AgentConfig) -> u32 { cfg.max_iterations_plan }
+''',    # Negative controls for the reworked operand branch (thread 2835): the
+    # receiver IS setting-bound, but the operand is not budget-named, so the gate
+    # must not fire (documented limitation: a cap passed under a non-budget name
+    # is not distinguishable from an ordinary request parameter).
+    'min_of_two_plain_params_not_budget_named': '''
+fn f(a: usize, b: usize) -> usize { a.min(b) }
+''',
+    'min_param_not_budget_named': '''
+fn f(cfg: &AgentConfig, req_len: usize) -> usize {
+    let base = cfg.max_iterations_plan;
+    base.min(req_len)
+}
 ''',
     'derived_arithmetic_on_alias': '''
 fn f(cfg: &AgentConfig) -> u32 {
