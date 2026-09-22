@@ -3605,6 +3605,9 @@ mod cap_observability_tests {
             "pending tool calls: {msg}"
         );
         assert!(msg.contains("interrupted before completion"), "{msg}");
+        // Literal output, so the capped-run message can be shown verbatim
+        // (run with `cargo test --lib cap_notice -- --nocapture`).
+        println!("[cap-notice/code_default] {msg}");
     }
 
     /// An operator-configured value is labelled `config`, never `code_default`.
@@ -3614,6 +3617,7 @@ mod cap_observability_tests {
         assert!(msg.contains("Iteration limit (40) reached"), "{msg}");
         assert!(msg.contains("knob: max_iterations_no_plan"), "{msg}");
         assert!(msg.contains("source: config"), "{msg}");
+        println!("[cap-notice/config] {msg}");
     }
 }
 
