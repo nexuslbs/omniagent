@@ -162,14 +162,13 @@ pub struct WaitOutcome {
 
 // ── Listener execution backend (abstracted: unit-testable) ──────────────────
 
+/// Future returned by a listener action. The tuple is `(output, is_error)`.
+pub type ListenerFuture<'a> = Pin<Box<dyn Future<Output = AppResult<(String, bool)>> + Send + 'a>>;
+
 /// Executes ONE listener action. The real implementation runs the action's
 /// tool through the plugin registry; tests inject a fake.
 pub trait ListenerExec: Send + Sync + 'static {
-    fn execute<'a>(
-        &'a self,
-        tool_name: String,
-        args: Value,
-    ) -> Pin<Box<dyn Future<Output = AppResult<(String, bool)>> + Send + 'a>>;
+    fn execute<'a>(&'a self, tool_name: String, args: Value) -> ListenerFuture<'a>;
 }
 
 /// Real backend: resolve the action's tool through the plugin registry and
@@ -527,7 +526,7 @@ impl EventsEngine {
     /// All known interactions, newest first (status/debug).
     pub fn list(&self) -> Vec<Interaction> {
         let mut all: Vec<Interaction> = self.interactions.read().values().cloned().collect();
-        all.sort_by(|a, b| b.published_ms.cmp(&a.published_ms));
+        all.sort_by_key(|b| std::cmp::Reverse(b.published_ms));
         all
     }
 

@@ -841,6 +841,23 @@ impl McpRegistry {
         names
     }
 
+    /// May executing this tool have changed the world? Asked by the invocation
+    /// ledger after a call SUCCEEDED: a tool whose own descriptor declares (or
+    /// implies) a state change invalidates the thread's recorded invocations,
+    /// so the next identical invocation is a genuine repeat and executes.
+    ///
+    /// The answer comes from the tool's registered descriptor
+    /// ([`ToolBehavior::may_change_state`]) - never from a name list and never
+    /// from inspecting the invocation. A tool the registry has never seen is
+    /// assumed state-changing: the safe default is EXECUTE, so an unknown
+    /// invocation can never be suppressed.
+    pub fn tool_may_change_state(&self, tool_name: &str) -> bool {
+        self.tools
+            .get(tool_name)
+            .map(|t| t.behavior.may_change_state())
+            .unwrap_or(true)
+    }
+
     /// Tools that can change the stack the agent itself runs in: the
     /// self-restart guard must run before any of them executes.
     pub fn own_stack_tools(&self) -> std::collections::HashSet<String> {
@@ -2431,6 +2448,23 @@ mod tests {
 
         // The set handed to the prompt plugin follows descriptors too.
         assert_eq!(reg.read_only_tools(), vec!["zorp_inspect".to_string()]);
+
+        // The ledger's state-change signal follows the SAME descriptors:
+        // a declared read-only tool cannot have changed the world, a tool that
+        // declares nothing (or is not registered at all) is assumed to have.
+        assert!(!reg.tool_may_change_state("zorp_inspect"));
+        assert!(reg.tool_may_change_state("zorp_mutate"));
+        assert!(reg.tool_may_change_state("zorp__never_seen"));
+
+        // A positive declaration wins over the implicit rule.
+        let mut writer = make_tool("zorp_write", None, None);
+        writer.behavior = ToolBehavior {
+            changes_state: Some(true),
+            read_only: true,
+            ..Default::default()
+        };
+        reg.register(writer);
+        assert!(reg.tool_may_change_state("zorp_write"));
     }
 
     #[test]

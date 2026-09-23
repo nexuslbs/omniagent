@@ -202,7 +202,6 @@ pub fn max_iterations_knob(plan: bool) -> &'static str {
 }
 
 /// Resolve the max tool-call iterations based on the thread's plan setting.
-
 pub fn max_iterations_for_plan(config: &AgentConfig, plan: bool) -> u32 {
     if plan {
         config.max_iterations_plan

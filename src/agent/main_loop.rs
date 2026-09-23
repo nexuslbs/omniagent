@@ -2402,11 +2402,10 @@ Previous plan:\n{}",
                         duration_ms: 0,
                         token_usage: serde_json::json!({}),
                     };
-                    match helpers::persist_or_abort(&cfg.pool, &dup_msg, thread.id).await {
-                        helpers::CreateMessageResult::OtherError(e) => {
-                            error!("Failed to persist the duplicate-call stub: {:?}", e)
-                        }
-                        _ => {}
+                    if let helpers::CreateMessageResult::OtherError(e) =
+                        helpers::persist_or_abort(&cfg.pool, &dup_msg, thread.id).await
+                    {
+                        error!("Failed to persist the duplicate-call stub: {:?}", e)
                     }
                     tool_results[idx] = Some((tc_id.clone(), tool_name.clone(), stub));
                     continue;
@@ -2785,17 +2784,33 @@ Previous plan:\n{}",
         //   the metrics surface.
         for (idx, _tc) in response.tool_calls.iter().enumerate() {
             let is_error = tool_errors.get(idx).copied().unwrap_or(true);
+            // A call that may have changed the world makes every invocation
+            // this thread recorded stale: the next identical call is a GENUINE
+            // repeat and must execute. The signal is STRUCTURED and GENERIC -
+            // the executed tool's own registered descriptor
+            // (`tool_may_change_state`), never a tool-name list and never an
+            // inspection of the invocation; a tool the registry has never seen
+            // is assumed state-changing (safe default: execute). A result that
+            // explicitly flags a state change counts as well.
+            let mut state_changed = false;
             if let Some((tool_name, canonical_args)) = pending_calls.remove(&idx) {
                 if is_error {
                     eff_ledger.drop_record(&tool_name, &canonical_args);
+                } else {
+                    state_changed = behavior_snapshot.tool_may_change_state(&tool_name);
                 }
             }
             if let Some(Some((_, _, output))) = tool_results.get(idx) {
                 if eff::result_reports_state_change(output) {
-                    let dropped = eff_ledger.note_state_change();
+                    state_changed = true;
+                }
+            }
+            if state_changed {
+                let dropped = eff_ledger.note_state_change();
+                if dropped > 0 {
                     info!(
-                        "[efficiency] a tool result declared a state change (thread {}); {} invocation record(s) invalidated",
-                        thread.id, dropped
+                        "[efficiency] a state-changing call invalidated {} recorded invocation(s) (thread {})",
+                        dropped, thread.id
                     );
                 }
             }

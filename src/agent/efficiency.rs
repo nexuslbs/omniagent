@@ -18,6 +18,12 @@
 //! exactly the same terms, and an unknown invocation always EXECUTES.
 //!
 //! A record is invalidated (the invocation executes normally again) by:
+//! - a SUCCESSFUL invocation whose tool's own registered descriptor says it
+//!   may have changed the world (a write, a commit, a deploy). This is the
+//!   generic, structured producer: the executor asks the tool's descriptor and
+//!   passes the plain boolean to [`CallLedger::note_state_change`], so this
+//!   module never matches a name, never inspects an invocation and never
+//!   classifies it;
 //! - a result that flags a state change (`{"state_changed": true}`), the
 //!   structured "the tool reports it changed something" signal;
 //! - an ERROR result - a failed invocation is always retryable;
@@ -317,6 +323,33 @@ mod tests {
         assert_eq!(led.note_state_change(), 2);
         assert_eq!(led.observe(UNSEEN_TOOL, "{\"a\":1}"), CallVerdict::Execute);
         assert_eq!(led.observe("zorp__other", "{}"), CallVerdict::Execute);
+    }
+
+    /// GATE A2 regression (reviewer, thread 2953): a read replayed AFTER a
+    /// state change must EXECUTE - the invalidation is observable. The
+    /// executor derives the signal from the executed tool's own descriptor
+    /// (see `McpRegistry::tool_may_change_state`) and passes it here as a
+    /// plain boolean; the sequence below is that exact shape.
+    #[test]
+    fn re_read_after_a_state_change_executes_again() {
+        let read_args = "{\"path\":\"/opt/workspace/x/docker-compose.yml\"}";
+        let mut led = CallLedger::new();
+
+        // 1. the read executes and its result is in the context.
+        led.record_executed(UNSEEN_TOOL, read_args, 3);
+        assert_eq!(
+            led.observe(UNSEEN_TOOL, read_args),
+            CallVerdict::Duplicate { first_iter: 3 }
+        );
+
+        // 2. a state-changing invocation executes (the executor asked the
+        //    tool's descriptor, which answered "may change state").
+        led.note_state_change();
+
+        // 3. the SAME read is now a genuine repeat: it must execute.
+        assert_eq!(led.observe(UNSEEN_TOOL, read_args), CallVerdict::Execute);
+        assert_eq!(led.tracked(), 0);
+        assert_eq!(led.metrics_json(1)["invalidations"], 1);
     }
 
     #[test]

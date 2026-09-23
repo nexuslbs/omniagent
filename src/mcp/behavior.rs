@@ -28,10 +28,14 @@
 //! from the registry - never from a name allowlist.
 //!
 //! NOTE (efficiency contract, incident 2874): the core does NOT classify an
-//! INVOCATION as read-only and does not guard repeats of one. A repeated
+//! INVOCATION (no subcommand/argv inspection, no name matching). A repeated
 //! invocation is handled generically by the invocation ledger in
 //! `crate::agent::efficiency`, which is keyed on the opaque tool id plus the
-//! canonical arguments and never consults a read-only declaration.
+//! canonical arguments. The ledger asks each tool's OWN descriptor whether
+//! executing it may have changed the world
+//! ([`ToolBehavior::may_change_state`]): after such a call the thread's
+//! recorded invocations are invalidated, so a later identical call is a
+//! genuine repeat and executes.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -54,12 +58,34 @@ pub struct ToolBehavior {
     /// images, networks): the self-restart guard must run before it executes.
     #[serde(default)]
     pub affects_own_stack: bool,
+    /// Structured declaration that executing this tool may CHANGE the world
+    /// (write a file, mutate a repo, deploy something). The invocation ledger
+    /// uses it to decide whether a thread's recorded invocations are still
+    /// valid: after such a call the next identical invocation is a GENUINE
+    /// repeat and must execute. Declared positively; when absent the tool's
+    /// own `read_only` declaration is inverted, and a tool that declares
+    /// neither is assumed state-changing (safe default: execute).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes_state: Option<bool>,
 }
 
 impl ToolBehavior {
     /// True when the entry declares no flag at all (declared but neutral).
     pub fn is_empty(&self) -> bool {
-        !self.read_only && self.family.is_none() && !self.affects_own_stack
+        !self.read_only
+            && self.family.is_none()
+            && !self.affects_own_stack
+            && self.changes_state.is_none()
+    }
+
+    /// May executing this tool have changed the world?
+    ///
+    /// The positive declaration wins; otherwise the tool's own `read_only`
+    /// declaration is inverted; a tool that declares nothing is assumed
+    /// state-changing. The safe default is therefore EXECUTE: an unknown or
+    /// undeclared tool invalidates the ledger instead of suppressing a call.
+    pub fn may_change_state(&self) -> bool {
+        self.changes_state.unwrap_or(!self.read_only)
     }
 }
 
@@ -81,6 +107,8 @@ pub struct ToolManifestEntry {
     pub read_only: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub affects_own_stack: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes_state: Option<bool>,
 }
 
 impl ToolManifestEntry {
@@ -95,6 +123,9 @@ impl ToolManifestEntry {
         }
         if let Some(v) = self.affects_own_stack {
             behavior.affects_own_stack = v;
+        }
+        if let Some(v) = self.changes_state {
+            behavior.changes_state = Some(v);
         }
         behavior
     }
@@ -188,5 +219,46 @@ mod tests {
         assert!(for_tool(&map, "zorp", "zorp_inspect-widget").read_only);
         // Unknown tool: fail closed (no declared behaviour).
         assert!(!for_tool(&map, "zorp", "mutate_widget").read_only);
+    }
+
+    /// The ledger's state-change signal comes from the tool's OWN descriptor:
+    /// declared positively, else inverted from the read-only declaration, else
+    /// the safe default (state-changing -> the next identical call executes).
+    #[test]
+    fn state_change_signal_defaults_to_safe_execute() {
+        // A positive declaration wins, even next to a read-only flag.
+        let declared = ToolBehavior {
+            changes_state: Some(true),
+            read_only: true,
+            ..Default::default()
+        };
+        assert!(declared.may_change_state());
+        // A tool that declares a stable result never invalidates the ledger.
+        let stable = ToolBehavior {
+            changes_state: Some(false),
+            ..Default::default()
+        };
+        assert!(!stable.may_change_state());
+        // Fallback: the tool's own read-only declaration, inverted.
+        let read = ToolBehavior {
+            read_only: true,
+            ..Default::default()
+        };
+        assert!(!read.may_change_state());
+        // Nothing declared (unknown tool): state-changing, never suppressed.
+        assert!(ToolBehavior::default().may_change_state());
+        assert!(ToolBehavior::default().is_empty());
+
+        // The flat manifest form parses and carries the declaration.
+        let json = serde_json::json!([
+            { "name": "zorp_write", "changes_state": true },
+            { "name": "zorp_inspect", "read_only": true }
+        ]);
+        let entries: Vec<ToolManifestEntry> =
+            serde_json::from_value(json).expect("tools array parses");
+        let map = behavior_map(&entries);
+        assert!(map.get("zorp_write").expect("entry").may_change_state());
+        assert!(!map.get("zorp_inspect").expect("entry").may_change_state());
+        assert!(!map.get("zorp_write").expect("entry").is_empty());
     }
 }
