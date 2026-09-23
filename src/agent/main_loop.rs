@@ -992,7 +992,8 @@ Previous plan:\n{}",
     // plugin plan/no-plan iteration budget (max_iterations_plan /
     // max_iterations_no_plan). There is no interactive-specific cap.
 
-    let iter_limit = queries::max_iterations_for_plan(&cfg.config_snapshot(), prompt_parts.plan) as i32;
+    let iter_limit =
+        queries::max_iterations_for_plan(&cfg.config_snapshot(), prompt_parts.plan) as i32;
     // The knob this budget came from, so a cap termination can name it.
     let iter_knob = queries::max_iterations_knob(prompt_parts.plan);
     // The plan phase consumed an iteration slot ONLY when a plan was actually
@@ -1071,20 +1072,21 @@ Previous plan:\n{}",
     // directive is injected before the next LLM call.
     let mut sub_prompt_merges_seen: usize = 0;
 
-    // EFF-1: per-thread efficiency ledger (duplicate reads, read-only streak,
-    // state changes). Drives the escalating behavioural steering below and the
-    // duplicate-read stubs in the tool dispatch loop.
+    // EFF: the generic duplicate-invocation ledger (incident 2874). It is keyed
+    // on the opaque tool id handed to the executor plus the canonical argument
+    // JSON, and answers a replay with a compact stub: the executor never runs
+    // (and never re-injects) an invocation whose result this thread already
+    // has, even after compaction erased the model's memory of the earlier call.
     use crate::agent::efficiency as eff;
-    let mut eff_ledger = eff::EfficiencyLedger::new();
-    // WS-4b: engine-level read guard - (tool, args-hash) -> (iteration, len)
-    // for read-only tools. Cleared whenever a state-changing tool runs.
-    let mut read_guard: std::collections::HashMap<(String, u64), (u32, usize)> =
+    let mut eff_ledger = eff::CallLedger::new();
+    // Invocations dispatched in the current tool round: index -> (tool id,
+    // canonical arguments), so the completion path can settle the ledger (a
+    // failed invocation is dropped, i.e. always retryable).
+    let mut pending_calls: std::collections::HashMap<usize, (String, String)> =
         std::collections::HashMap::new();
-    // No-progress loop guard (thread 1139: ~181 git read calls / 40 min, one
-    // commit attempt): counts engine-blocked duplicate reads and escalates to a
-    // STOP nudge so a verification cycle cannot burn iterations forever.
-    let mut read_dup_blocks: u32 = 0;
-    let mut stop_nudge_sent = false;
+    // Duplicate count at which the last progress signal was emitted, so the
+    // signal escalates instead of firing on every round.
+    let mut dup_signal_at: u32 = 0;
     // Compaction over-budget escalation (0-compaction incident, threads 1139/1140):
     // set when the provider's billed prompt tokens exceed the effective hard
     // budget; the next condense call is then forced (force_compact=true) so the
@@ -1453,16 +1455,18 @@ Previous plan:\n{}",
                     newly
                 ),
             );
-            // A new instruction is a new unit of work: reset the read-only
-            // streak so the fresh task is not judged by the old loop.
+            // A new instruction is a new unit of work: invalidate the ledger so
+            // an invocation the earlier task already made executes normally
+            // again under the new instruction.
             eff_ledger.note_state_change();
-            eff_ledger.mark_state_change_at(current_iter as u32);
         }
 
-        // EFF-1: escalating, behavioural progress steering (no hard cap, no
-        // truncation). Fires when the thread keeps reading without a state
-        // change, so the agent can comply within the same iteration.
-        if let Some(signal) = eff_ledger.steering(current_iter.max(0) as u32) {
+        // EFF: behavioural progress signal, derived ONLY from the duplicate
+        // invocation counter. It is a signal, never a cap: the thread keeps
+        // running and the model is told to act on what it already has - or to
+        // report its blocker - in the next reply.
+        if let Some(signal) = eff::progress_signal(eff_ledger.duplicates(), dup_signal_at) {
+            dup_signal_at = eff_ledger.duplicates();
             warn!(
                 "[efficiency] {} | {}",
                 signal,
@@ -1753,11 +1757,12 @@ Previous plan:\n{}",
                     }
                 }
                 llm_error_retries += 1;
-                // EFF-1: fatal provider errors (402 / insufficient balance / auth)
-                // fail the thread immediately with the real reason. Retrying them
-                // can never succeed and only burns the remaining provider balance
-                // (incident 2874 ended on "402 Payment Required").
-                if let Some(reason) = eff::classify_fatal_provider_error(&format!("{:?}", e)) {
+                // EFF: fatal provider errors (HTTP 401/402/403) fail the thread
+                // immediately with the real reason. Retrying them can never
+                // succeed and only burns the remaining provider balance
+                // (incident 2874 ended on "402 Payment Required"). The decision is
+                // made on the STRUCTURED transport status, never on message text.
+                if let Some(reason) = eff::classify_provider_error(&e) {
                     error!(
                         "[efficiency] fatal provider error for thread {}: {} (no retry attempted)",
                         thread.id, reason
@@ -2335,11 +2340,9 @@ Previous plan:\n{}",
         // ── Tool behaviour sets (audit V-2) ──
         // Derived from the tool DESCRIPTORS declared in the plugin manifests
         // (via the registry) instead of hardcoded tool-name allowlists: a
-        // read-only tool registered under another id keeps the exact-repeat
-        // guard, a renamed container tool keeps the self-restart guard, and a
-        // renamed subtask tool keeps resetting the progress reminder.
+        // renamed container tool keeps the self-restart guard and a renamed
+        // subtask tool keeps resetting the progress reminder.
         let behavior_snapshot = cfg.plugin_manager.snapshot_registry().await;
-        let guarded_read_tools = behavior_snapshot.guarded_read_only_tools();
         let own_stack_tools = behavior_snapshot.own_stack_tools();
         let subtask_family_tools = behavior_snapshot.family_tools("subtasks");
 
@@ -2354,43 +2357,41 @@ Previous plan:\n{}",
             let tool_args = tc.function.arguments.clone();
             let tc_id = tc.id.clone();
 
-            // EFF-1: effective-scope duplicate detection. Unlike the exact
-            // args-hash guard below, this compares the READ SCOPE (file + paging
-            // window, search pattern, git argv), so re-reading the same file with
-            // a different offset/limit - the exact thread-2874 pattern (20x
-            // docker-compose.yml at offset 262) - is blocked with a compact stub.
-            match eff_ledger.observe(&tool_name, &tool_args, current_iter as u32) {
-                eff::ReadVerdict::Duplicate { first_iter, overlap } => {
-                    eff_ledger.record_block();
-                    let stub = match eff::parse_read_scope(&tool_name, &tool_args) {
-                        Some(scope) => {
-                            eff::duplicate_stub(&tool_name, &scope, first_iter, overlap)
-                        }
-                        None => format!(
-                            "[duplicate read - {} was already executed at iteration {}; the result is already in your context, no payload re-injected. Use your notes.]",
-                            tool_name, first_iter
-                        ),
-                    };
+            // EFF: generic duplicate-invocation guard (incident 2874). The
+            // identity is the opaque tool id handed to the executor plus the
+            // canonical argument JSON, and the ledger lives for the whole thread
+            // run, so the guard is independent of the model's memory: a replay
+            // caused by compaction cannot restart the loop. A duplicate is
+            // answered with a compact stub - nothing is executed, no payload is
+            // re-injected. An unknown invocation, an invalidated record and an
+            // explicit force_repeat all execute (safe default).
+            let canonical_args = eff::canonical_args(&tool_args);
+            let force_repeat = eff::force_requested(&tool_args);
+            let tool_args = eff::strip_reserved(&tool_args);
+            if !force_repeat {
+                if let eff::CallVerdict::Duplicate { first_iter } =
+                    eff_ledger.observe(&tool_name, &canonical_args)
+                {
+                    eff_ledger.record_blocked();
+                    let stub = eff::duplicate_stub(&tool_name, first_iter);
                     warn!(
-                        "[efficiency] duplicate read blocked (thread {}): {} - {}",
-                        thread.id, tool_name, stub
+                        "[efficiency] duplicate invocation blocked (thread {}): {}",
+                        thread.id, stub
                     );
-                    // EFF-1b: persist the stub as a real tool-result row. The
-                    // `continue` below skips the spawn that normally writes the
-                    // result message, so without this the duplicate block would
-                    // be invisible in the thread history (and in the gates /
-                    // counters that verify it).
-                    let db_max =
-                        crate::db::threads::get_max_thread_sequence(&cfg.pool, thread.id)
-                            .await
-                            .unwrap_or(0);
+                    // Persist the stub as a real tool-result row: the `continue`
+                    // below skips the spawn that normally writes the result
+                    // message, so without this the block would be invisible in
+                    // the thread history (and in the counters that verify it).
+                    let db_max = crate::db::threads::get_max_thread_sequence(&cfg.pool, thread.id)
+                        .await
+                        .unwrap_or(0);
                     let dup_msg = MessageNew {
                         thread_id: thread.id,
                         role: "agent".to_string(),
                         content: stub.clone(),
                         thread_sequence: effective_result_seq(db_max, result_seqs[idx]),
                         external_id: None,
-                        metadata: serde_json::json!({"eff": "duplicate-read"}),
+                        metadata: serde_json::json!({"eff": "duplicate-call"}),
                         embedding: None,
                         summary_text: None,
                         is_summary: false,
@@ -2403,37 +2404,16 @@ Previous plan:\n{}",
                     };
                     match helpers::persist_or_abort(&cfg.pool, &dup_msg, thread.id).await {
                         helpers::CreateMessageResult::OtherError(e) => {
-                            error!("Failed to persist duplicate-read stub: {:?}", e)
+                            error!("Failed to persist the duplicate-call stub: {:?}", e)
                         }
                         _ => {}
                     }
                     tool_results[idx] = Some((tc_id.clone(), tool_name.clone(), stub));
                     continue;
                 }
-                _ => {}
             }
-            // WS-4b: exact-repeat read guard for read-only tools.
-            let args_hash = helpers::hash_tool_args(&tool_args);
-            let guard_key = (tool_name.clone(), args_hash);
-            if helpers::is_guarded_read_only(&guarded_read_tools, &tool_name) {
-                if let Some((guard_iter, _len)) = read_guard.get(&guard_key) {
-                    read_dup_blocks += 1;
-                    let mut note = format!(
-                        "[duplicate of {tool_name} at iteration {guard_iter} - see your notes; re-reading the same input is forbidden by rule 11]"
-                    );
-                    if read_dup_blocks >= 3 && !stop_nudge_sent {
-                        stop_nudge_sent = true;
-                        note.push_str(" NO-PROGRESS STOP: you are repeating read-only verification calls with no state change. If the state you are checking is already confirmed, produce your final report now (what is done, what remains). If you expect the state to have changed, say what changed and issue ONE fresh call.");
-                    }
-                    tool_results[idx] = Some((tc_id.clone(), tool_name.clone(), note));
-                    continue;
-                }
-                read_guard.insert(guard_key, (current_iter as u32, 0));
-            } else {
-                read_guard.clear();
-                read_dup_blocks = 0;
-                stop_nudge_sent = false;
-            }
+            eff_ledger.record_executed(&tool_name, &canonical_args, current_iter as u32);
+            pending_calls.insert(idx, (tool_name.clone(), canonical_args));
             let qualified_name = tool_name.clone(); // qualified_name is identity, no registry needed
 
             let mcp_call = McpToolCall {
@@ -2761,9 +2741,14 @@ Previous plan:\n{}",
         // result. Handle the panic at the omniagent boundary rather than
         // requiring every plugin to catch its own panics.
         let mut tool_results: Vec<Option<(String, String, String)>> = vec![None; tool_count];
+        // Structured per-invocation outcome (from the MCP result, never parsed
+        // out of text): default `true` = treat a missing result as a failure, so
+        // its record is dropped and the invocation stays retryable.
+        let mut tool_errors: Vec<bool> = vec![true; tool_count];
         while let Some(join_result) = join_set.join_next().await {
             match join_result {
-                Ok((idx, tc_id, tool_name, output, _is_error)) => {
+                Ok((idx, tc_id, tool_name, output, is_error)) => {
+                    tool_errors[idx] = is_error;
                     tool_results[idx] = Some((tc_id, tool_name, output));
                 }
                 Err(e) => {
@@ -2791,20 +2776,31 @@ Previous plan:\n{}",
             }
         }
 
-        // WS-4b: record output length for executed read-only tools.
-        for (idx, tc) in response.tool_calls.iter().enumerate() {
-            if helpers::is_guarded_read_only(&guarded_read_tools, &tc.function.name) {
-                if let Some(Some((_, _, output))) = tool_results.get(idx) {
-                    read_guard.insert(
-                        (
-                            tc.function.name.clone(),
-                            helpers::hash_tool_args(&tc.function.arguments),
-                        ),
-                        (current_iter as u32, output.len()),
+        // EFF: settle the duplicate-invocation ledger for this round.
+        // - an invocation whose result is an ERROR is dropped from the ledger
+        //   (a failed call must always stay retryable);
+        // - a result that declares a state change invalidates every record, so a
+        //   genuine repeat later in the run executes normally;
+        // - the per-thread counters are emitted once per round for the logs and
+        //   the metrics surface.
+        for (idx, _tc) in response.tool_calls.iter().enumerate() {
+            let is_error = tool_errors.get(idx).copied().unwrap_or(true);
+            if let Some((tool_name, canonical_args)) = pending_calls.remove(&idx) {
+                if is_error {
+                    eff_ledger.drop_record(&tool_name, &canonical_args);
+                }
+            }
+            if let Some(Some((_, _, output))) = tool_results.get(idx) {
+                if eff::result_reports_state_change(output) {
+                    let dropped = eff_ledger.note_state_change();
+                    info!(
+                        "[efficiency] a tool result declared a state change (thread {}); {} invocation record(s) invalidated",
+                        thread.id, dropped
                     );
                 }
             }
         }
+        info!("[efficiency] {}", eff_ledger.metrics_summary(thread.id));
 
         // ── Terminal-thread check (fail-thread lifecycle fix) ──
         // A tool may have ended this thread while executing: builtin_fail-thread
@@ -3719,7 +3715,10 @@ mod cap_observability_tests {
             concat!("interactive_max", "_iterations"),
             12,
             "code_default",
-            &["core__read_task_logs".to_string(), "search__messages".to_string()],
+            &[
+                "core__read_task_logs".to_string(),
+                "search__messages".to_string(),
+            ],
         );
         assert!(msg.contains("Iteration limit (12) reached"), "value: {msg}");
         assert!(

@@ -1,24 +1,24 @@
-//! Audit V-2 acceptance tests: core agent behaviour (exact-repeat read guard,
-//! self-restart guard, proactive subtask reminder) is resolved from tool
+//! Audit V-2 acceptance tests: core agent behaviour (self-restart guard,
+//! proactive subtask reminder, read-only excerpt set) is resolved from tool
 //! BEHAVIOUR DESCRIPTORS declared in the plugin manifests, never from a
 //! hardcoded tool-name allowlist.
 //!
 //! This is an integration target on purpose: the descriptor-derived sets are
 //! part of the crate's public contract, and the shipped manifests are parsed
 //! through the same public types the plugin scanner uses.
+//!
+//! NOTE (efficiency contract, incident 2874): the core does NOT classify an
+//! INVOCATION as read-only and does not guard repeats of one; a repeated
+//! invocation is handled generically by the invocation ledger in
+//! `omniagent::agent::efficiency`. The read-only DESCRIPTOR below only drives
+//! the excerpt policy of the prompt/compaction plugin.
 
-use std::collections::BTreeSet;
-use std::path::Path;
 use std::sync::Arc;
 
-use omniagent::agent::helpers::is_guarded_read_only;
-use omniagent::mcp::behavior::{
-    behavior_map, for_tool, looks_like_read_tool, ToolBehavior, ToolManifestEntry,
-};
+use omniagent::mcp::behavior::ToolBehavior;
 use omniagent::mcp::{
     tool_qualify, AppContext, McpRegistry, McpTool, McpToolHandler, McpToolResult,
 };
-use omniagent::plugin::PluginManifest;
 use serde_json::{json, Value};
 
 fn stub_handler() -> McpToolHandler {
@@ -48,9 +48,9 @@ fn mcp_tool(server: &str, raw_name: &str) -> McpTool {
 }
 
 /// (a) A read-only tool registered under an id nobody ever hardcoded IS
-/// guarded; a tool that declares nothing is NOT (fail closed).
+/// recognised as read-only; a tool that declares nothing is NOT (fail closed).
 #[test]
-fn read_only_tool_under_a_new_id_is_guarded() {
+fn read_only_tool_under_a_new_id_is_recognised() {
     let mut registry = McpRegistry::new();
 
     let mut new_read = mcp_tool("zorp", "inspect_widget");
@@ -58,22 +58,15 @@ fn read_only_tool_under_a_new_id_is_guarded() {
     registry.register(new_read);
     registry.register(mcp_tool("zorp", "mutate_widget"));
 
-    let guarded = registry.guarded_read_only_tools();
+    let reads = registry.read_only_tools();
     assert!(
-        guarded.contains("zorp__inspect_widget"),
-        "a declared read-only tool must be guarded whatever its id: {guarded:?}"
+        reads.contains(&"zorp__inspect_widget".to_string()),
+        "a declared read-only tool must be recognised whatever its id: {reads:?}"
     );
-    assert!(is_guarded_read_only(&guarded, "zorp__inspect_widget"));
     assert!(
-        !is_guarded_read_only(&guarded, "zorp__mutate_widget"),
+        !reads.contains(&"zorp__mutate_widget".to_string()),
         "an undeclared tool must not be treated as read-only"
     );
-    assert!(registry
-        .read_only_tools()
-        .contains(&"zorp__inspect_widget".to_string()));
-    assert!(!registry
-        .read_only_tools()
-        .contains(&"zorp__mutate_widget".to_string()));
 }
 
 /// (b) The self-restart guard follows the descriptor: a container tool renamed
@@ -128,126 +121,4 @@ fn subtask_family_tools_are_recognised_under_any_id() {
         "a renamed subtask tool must still reset the reminder counter: {family:?}"
     );
     assert!(registry.family_tools("kanban").is_empty());
-}
-
-/// (d) The descriptors shipped in `plugins/tools/*` must derive EXACTLY the
-/// guarded-read set of the removed name allowlist PLUS the read tools of the
-/// unified `tasks` plugin.
-///
-/// Why the `tasks` reads are in the set: the deleted `kanban` / `cron` tool
-/// plugins shipped no `tools` array at all, so every read operation they
-/// exposed was UNGUARDED. The unified `tasks` plugin (the 1:1 migration of
-/// those same operations plus hooks) declares its behaviour descriptors on
-/// every tool, `read_only` + `repeat_guard` included - that is the task
-/// mandate ("preserve the per-tool behaviour descriptors on every `tasks__*`
-/// tool"), and it is what the registry resolves at runtime. The guarded set
-/// therefore legitimately grows by those five migrated/new read operations;
-/// the OPERATIONS themselves are unchanged. The same expectation is pinned
-/// next to the registry in `src/mcp/behavior.rs`.
-///
-/// The builtin Rust memory plugin was removed (remote Python plugin only), so
-/// `memory__list_memories` is no longer declared by any manifest shipped in
-/// this repository and is intentionally absent from the expected set.
-#[test]
-fn shipped_manifests_guard_the_legacy_reads_and_the_tasks_reads() {
-    let expected: BTreeSet<&str> = [
-        // The legacy name allowlist (unchanged).
-        "filesystem__read",
-        "filesystem__info",
-        "filesystem__list",
-        "filesystem__search",
-        "git__status",
-        "git__run_command",
-        "git__sync",
-        "notes__note_read",
-        "search__messages",
-        "search__wiki",
-        "search__database",
-        "search__thread_messages",
-        "search__channel_prompts",
-        "skills__list_skills",
-        "skills__view_skill",
-        // Plus the read operations of the unified `tasks` plugin: the migrated
-        // kanban/cron lists plus the three hook reads.
-        "tasks__get_hook",
-        "tasks__list_cron_jobs",
-        "tasks__list_hook_threads",
-        "tasks__list_hooks",
-        "tasks__list_kanban_tasks",
-    ]
-    .into_iter()
-    .collect();
-
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugins/tools");
-    let mut guarded: BTreeSet<String> = BTreeSet::new();
-    let mut declaring_plugins = 0usize;
-    let mut declared_tools = 0usize;
-
-    for dir in std::fs::read_dir(&root).expect("plugins/tools is readable") {
-        let dir = dir.expect("dir entry").path();
-        let manifest_path = dir.join("plugin.json");
-        if !manifest_path.is_file() {
-            continue;
-        }
-        let text = std::fs::read_to_string(&manifest_path)
-            .unwrap_or_else(|e| panic!("{}: {e}", manifest_path.display()));
-        let manifest: PluginManifest = serde_json::from_str(&text)
-            .unwrap_or_else(|e| panic!("{}: {e}", manifest_path.display()));
-        if manifest.tools.is_empty() {
-            continue;
-        }
-        let server = dir
-            .file_name()
-            .expect("plugin dir name")
-            .to_string_lossy()
-            .to_string();
-        let map = behavior_map(&manifest.tools);
-        assert_eq!(
-            map.len(),
-            manifest.tools.len(),
-            "{server}: duplicate descriptor names"
-        );
-        declaring_plugins += 1;
-        for entry in &manifest.tools {
-            declared_tools += 1;
-            let qualified = tool_qualify(&server, &entry.name);
-            // Resolve exactly like the registry does (raw or qualified name).
-            let behavior = for_tool(&map, &server, &qualified);
-            if behavior.repeat_guard_enabled() {
-                guarded.insert(qualified);
-            }
-        }
-    }
-
-    assert!(
-        declaring_plugins >= 7,
-        "most tool plugins must declare descriptors, only {declaring_plugins} did"
-    );
-    assert!(
-        declared_tools >= 16,
-        "too few declared tools: {declared_tools}"
-    );
-    let guarded_refs: BTreeSet<&str> = guarded.iter().map(String::as_str).collect();
-    assert_eq!(
-        guarded_refs, expected,
-        "descriptor-derived guarded set must equal the legacy allowlist plus the unified tasks read tools"
-    );
-}
-
-/// Fail CLOSED BUT LOUD: an undeclared read-looking tool is not guarded, and
-/// the heuristic that drives the one-per-process warning still sees it.
-#[test]
-fn undeclared_read_looking_tool_fails_closed_and_is_flagged() {
-    let entries: Vec<ToolManifestEntry> = serde_json::from_value(json!([
-        { "name": "search_widgets", "behavior": { "read_only": true } },
-        { "name": "zap_widgets" }
-    ]))
-    .expect("descriptor entries parse");
-    let map = behavior_map(&entries);
-
-    assert!(for_tool(&map, "zorp", "search_widgets").repeat_guard_enabled());
-    assert!(!for_tool(&map, "zorp", "zap_widgets").read_only);
-    assert!(!for_tool(&map, "zorp", "search_undeclared").read_only);
-    assert!(looks_like_read_tool("search_undeclared"));
-    assert!(!looks_like_read_tool("zap_widgets"));
 }

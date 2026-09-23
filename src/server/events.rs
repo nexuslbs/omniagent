@@ -89,10 +89,7 @@ async fn list_handler() -> impl IntoResponse {
 
 async fn describe_handler(Path(correlation_id): Path<String>) -> impl IntoResponse {
     match crate::events::describe(&correlation_id) {
-        Some(interaction) => (
-            StatusCode::OK,
-            Json(json!({ "interaction": interaction })),
-        ),
+        Some(interaction) => (StatusCode::OK, Json(json!({ "interaction": interaction }))),
         None => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "unknown correlation_id", "correlation_id": correlation_id })),

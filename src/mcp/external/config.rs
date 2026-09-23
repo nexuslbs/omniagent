@@ -921,7 +921,7 @@ mod tests {
 
         let fs = manifest_tool_behavior(&dir("filesystem"));
         let read = crate::mcp::behavior::for_tool(&fs, "filesystem", "filesystem__read");
-        assert!(read.read_only && read.repeat_guard_enabled());
+        assert!(read.read_only);
         // No descriptor for the write tool: fail closed.
         assert!(!crate::mcp::behavior::for_tool(&fs, "filesystem", "filesystem__write").read_only);
     }

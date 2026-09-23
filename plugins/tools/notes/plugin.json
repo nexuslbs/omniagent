@@ -20,7 +20,7 @@
   ],
   "label": "notes",
   "tools": [
-    { "name": "note_read", "behavior": { "read_only": true, "repeat_guard": true } },
-    { "name": "note_list", "behavior": { "read_only": true, "repeat_guard": false } }
+    { "name": "note_read", "behavior": { "read_only": true } },
+    { "name": "note_list", "behavior": { "read_only": true } }
   ]
 }

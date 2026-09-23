@@ -100,7 +100,9 @@ fn cap_source_provenance_is_computable() {
 
 /// Recursively collect every `.rs` file below `dir` (skipping `target/`).
 fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -133,7 +135,9 @@ fn no_hidden_interactive_cap_is_reintroduced() {
     let mut files: Vec<PathBuf> = Vec::new();
     collect_rs(&repo_root().join("src"), &mut files);
     for f in files {
-        let Ok(text) = fs::read_to_string(&f) else { continue };
+        let Ok(text) = fs::read_to_string(&f) else {
+            continue;
+        };
         for (n, line) in text.lines().enumerate() {
             let t = line.trim();
             if t.starts_with("//") || t.starts_with('#') {

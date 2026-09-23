@@ -27,23 +27,23 @@
   ],
   "tools": [
     { "name": "create_kanban_task", "behavior": {} },
-    { "name": "list_kanban_tasks", "behavior": { "read_only": true, "repeat_guard": true } },
+    { "name": "list_kanban_tasks", "behavior": { "read_only": true } },
     { "name": "update_kanban_task", "behavior": {} },
     { "name": "delete_kanban_task", "behavior": {} },
     { "name": "add_kanban_dependency", "behavior": {} },
     { "name": "remove_kanban_dependency", "behavior": {} },
     { "name": "kanban_review_task", "behavior": {} },
     { "name": "create_cron_job", "behavior": {} },
-    { "name": "list_cron_jobs", "behavior": { "read_only": true, "repeat_guard": true } },
+    { "name": "list_cron_jobs", "behavior": { "read_only": true } },
     { "name": "update_cron_job", "behavior": {} },
     { "name": "delete_cron_job", "behavior": {} },
-    { "name": "list_hooks", "behavior": { "read_only": true, "repeat_guard": true } },
-    { "name": "get_hook", "behavior": { "read_only": true, "repeat_guard": true } },
+    { "name": "list_hooks", "behavior": { "read_only": true } },
+    { "name": "get_hook", "behavior": { "read_only": true } },
     { "name": "create_hook", "behavior": {} },
     { "name": "update_hook", "behavior": {} },
     { "name": "toggle_hook", "behavior": {} },
     { "name": "delete_hook", "behavior": {} },
     { "name": "fire_hook", "behavior": { "affects_own_stack": true } },
-    { "name": "list_hook_threads", "behavior": { "read_only": true, "repeat_guard": true } }
+    { "name": "list_hook_threads", "behavior": { "read_only": true } }
   ]
 }

@@ -19,7 +19,7 @@
     }
   ],
   "tools": [
-    { "name": "list_skills", "behavior": { "read_only": true, "repeat_guard": true } },
-    { "name": "view_skill", "behavior": { "read_only": true, "repeat_guard": true } }
+    { "name": "list_skills", "behavior": { "read_only": true } },
+    { "name": "view_skill", "behavior": { "read_only": true } }
   ]
 }

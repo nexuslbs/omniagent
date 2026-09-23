@@ -59,6 +59,15 @@ pub enum Error {
         retry_after: Option<u64>,
     },
 
+    /// A provider HTTP error response carrying its STRUCTURED transport signal
+    /// (the HTTP status code) next to the raw body. Provider classification
+    /// (billing / auth / permission) must decide on `status`, never on the body
+    /// text (efficiency contract, design constraints items 4-5).
+    ProviderHttp {
+        status: u16,
+        body: String,
+    },
+
     // ── Generic string message ──
     /// Catch-all for string-based error messages.
     Message(String),
@@ -137,6 +146,29 @@ impl Error {
             _ => None,
         }
     }
+
+    /// The provider transport status, when this error carries one (structured
+    /// signal for the provider fast-fail classifier).
+    pub fn provider_status(&self) -> Option<u16> {
+        match self {
+            Error::ProviderHttp { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+
+    /// Prefix this error with a context message while PRESERVING the structured
+    /// provider transport signal: a wrapped `ProviderHttp` keeps its status, so
+    /// the fast-fail classifier never has to fall back to text matching.
+    pub fn context(self, msg: impl Into<String>) -> Error {
+        let msg = msg.into();
+        match self {
+            Error::ProviderHttp { status, body } => Error::ProviderHttp {
+                status,
+                body: format!("{}: {}", msg, body),
+            },
+            other => Error::Message(format!("{}: {}", msg, other)),
+        }
+    }
 }
 
 impl fmt::Display for Error {
@@ -167,6 +199,9 @@ impl fmt::Display for Error {
                 Some(secs) => write!(f, "rate limited (HTTP 429); retry after {secs}s"),
                 None => write!(f, "rate limited (HTTP 429)"),
             },
+            Error::ProviderHttp { status, body } => {
+                write!(f, "provider HTTP {}: {}", status, body)
+            }
             Error::Message(s) => write!(f, "{}", s),
         }
     }

@@ -54,10 +54,10 @@
     }
   ],
   "tools": [
-    { "name": "filesystem_read", "behavior": { "read_only": true, "repeat_guard": true } },
-    { "name": "filesystem_list", "behavior": { "read_only": true, "repeat_guard": true } },
-    { "name": "filesystem_search", "behavior": { "read_only": true, "repeat_guard": true } },
-    { "name": "filesystem_info", "behavior": { "read_only": true, "repeat_guard": true } },
-    { "name": "filesystem_grep", "behavior": { "read_only": true, "repeat_guard": false } }
+    { "name": "filesystem_read", "behavior": { "read_only": true } },
+    { "name": "filesystem_list", "behavior": { "read_only": true } },
+    { "name": "filesystem_search", "behavior": { "read_only": true } },
+    { "name": "filesystem_info", "behavior": { "read_only": true } },
+    { "name": "filesystem_grep", "behavior": { "read_only": true } }
   ]
 }

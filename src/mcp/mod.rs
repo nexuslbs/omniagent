@@ -828,24 +828,6 @@ impl McpRegistry {
     // never from a hardcoded tool-name allowlist: a tool registered under
     // another id keeps its declared protection.
 
-    /// Tools whose declared behaviour applies the exact-repeat read guard.
-    ///
-    /// Fail CLOSED BUT LOUD: an undeclared tool is never treated as
-    /// read-only; a read-looking name emits one warning per process so the
-    /// missing manifest entry stays visible.
-    pub fn guarded_read_only_tools(&self) -> std::collections::HashSet<String> {
-        for tool in self.tools.values() {
-            if tool.behavior.is_empty() {
-                crate::mcp::behavior::warn_missing_descriptor(&tool.name);
-            }
-        }
-        self.tools
-            .values()
-            .filter(|t| t.behavior.repeat_guard_enabled())
-            .map(|t| t.name.clone())
-            .collect()
-    }
-
     /// Tools that declare themselves read-only. Handed to the prompt plugin
     /// so compaction keeps a generous excerpt of their results.
     pub fn read_only_tools(&self) -> Vec<String> {
@@ -2436,34 +2418,17 @@ mod tests {
     #[test]
     fn behavior_sets_are_derived_from_descriptors() {
         let mut reg = McpRegistry::new();
-        // (a) A read-only tool under an id nobody hardcoded IS guarded.
+        // (a) A read-only tool under an id nobody hardcoded IS recognised.
         let mut custom = make_tool("zorp_inspect", None, None);
         custom.behavior = ToolBehavior {
             read_only: true,
             ..Default::default()
         };
         reg.register(custom);
-        // A name that LOOKS like a legacy read tool but declares no
-        // descriptor stays unguarded: fail closed, never allowlist by name.
-        reg.register(make_tool("filesystem_read", None, None));
+        // A tool that declares nothing stays unflagged: fail closed, never
+        // recognise by name.
+        reg.register(make_tool("zorp_mutate", None, None));
 
-        let guarded = reg.guarded_read_only_tools();
-        assert!(
-            guarded.contains("zorp_inspect"),
-            "descriptor-declared read tool must be guarded"
-        );
-        assert!(
-            !guarded.contains("filesystem_read"),
-            "undeclared tool must fail closed"
-        );
-        assert!(crate::agent::helpers::is_guarded_read_only(
-            &guarded,
-            "zorp_inspect"
-        ));
-        assert!(!crate::agent::helpers::is_guarded_read_only(
-            &guarded,
-            "filesystem_read"
-        ));
         // The set handed to the prompt plugin follows descriptors too.
         assert_eq!(reg.read_only_tools(), vec!["zorp_inspect".to_string()]);
     }

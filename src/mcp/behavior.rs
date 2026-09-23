@@ -1,17 +1,16 @@
 //! Tool behaviour descriptors (audit V-2).
 //!
 //! Core agent behaviour must never be driven by hardcoded tool-NAME
-//! allowlists: a tool registered under another id, or a new read-only tool,
-//! would silently lose its protection. Instead every tool MAY declare its
-//! behaviour in its plugin manifest (`plugins/tools/<plugin>/plugin.json`):
+//! allowlists: a tool registered under another id would silently lose its
+//! declared protection. Instead every tool MAY declare its behaviour in its
+//! plugin manifest (`plugins/tools/<plugin>/plugin.json`):
 //!
 //! ```json
 //! {
 //!   "name": "Filesystem",
 //!   "type": "mcp",
 //!   "tools": [
-//!     { "name": "filesystem_read",
-//!       "behavior": { "read_only": true, "repeat_guard": true } },
+//!     { "name": "filesystem_read", "behavior": { "read_only": true } },
 //!     { "name": "manage_subtasks", "family": "subtasks" },
 //!     { "name": "docker_compose", "behavior": { "affects_own_stack": true } }
 //!   ]
@@ -21,21 +20,21 @@
 //! The manifest is read by the plugin scanner, attached to the server config
 //! and carried onto every registered tool, so the core agent loop can build
 //!
-//! * the guarded-read set (exact-repeat read guard),
+//! * the read-only set (the prompt plugin keeps a generous excerpt of those
+//!   results when compaction drains them),
 //! * the own-stack set (self-restart guard), and
 //! * the subtask family set (proactive subtask reminder)
 //!
 //! from the registry - never from a name allowlist.
 //!
-//! Fail CLOSED BUT LOUD: a tool without a descriptor is treated as
-//! non-read-only (no guard) and, when its name still looks like a read, a
-//! warning is emitted once per process so a missing manifest entry is
-//! visible instead of silently allowlisted.
+//! NOTE (efficiency contract, incident 2874): the core does NOT classify an
+//! INVOCATION as read-only and does not guard repeats of one. A repeated
+//! invocation is handled generically by the invocation ledger in
+//! `crate::agent::efficiency`, which is keyed on the opaque tool id plus the
+//! canonical arguments and never consults a read-only declaration.
 
-use once_cell::sync::Lazy;
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// Declared behaviour of a single tool.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,10 +45,6 @@ pub struct ToolBehavior {
     /// working memory).
     #[serde(default)]
     pub read_only: bool,
-    /// Whether the exact-repeat read guard applies. When omitted the guard
-    /// follows `read_only`; `false` opts a read-only tool out of the guard.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repeat_guard: Option<bool>,
     /// Coordination family (e.g. `subtasks`): the core loop treats every
     /// tool of the family as the same capability, so a renamed or moved tool
     /// stays recognised.
@@ -62,18 +57,9 @@ pub struct ToolBehavior {
 }
 
 impl ToolBehavior {
-    /// Effective repeat-guard flag: an explicit value wins, otherwise a
-    /// read-only tool is guarded.
-    pub fn repeat_guard_enabled(&self) -> bool {
-        self.repeat_guard.unwrap_or(self.read_only)
-    }
-
     /// True when the entry declares no flag at all (declared but neutral).
     pub fn is_empty(&self) -> bool {
-        !self.read_only
-            && self.repeat_guard.is_none()
-            && self.family.is_none()
-            && !self.affects_own_stack
+        !self.read_only && self.family.is_none() && !self.affects_own_stack
     }
 }
 
@@ -94,8 +80,6 @@ pub struct ToolManifestEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repeat_guard: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub affects_own_stack: Option<bool>,
 }
 
@@ -105,9 +89,6 @@ impl ToolManifestEntry {
         let mut behavior = self.behavior.clone().unwrap_or_default();
         if let Some(v) = self.read_only {
             behavior.read_only = v;
-        }
-        if let Some(v) = self.repeat_guard {
-            behavior.repeat_guard = Some(v);
         }
         if let Some(v) = &self.family {
             behavior.family = Some(v.clone());
@@ -154,40 +135,6 @@ pub fn for_tool(map: &ToolBehaviorMap, server: &str, tool_name: &str) -> ToolBeh
     ToolBehavior::default()
 }
 
-/// One warning per tool per process (the registry set is rebuilt on every
-/// agent iteration, the log must not be flooded).
-static WARNED_MISSING_DESCRIPTOR: Lazy<Mutex<HashSet<String>>> =
-    Lazy::new(|| Mutex::new(HashSet::new()));
-
-/// True when a tool NAME looks like a read (used only for the loud warning,
-/// never for the guard decision itself).
-pub fn looks_like_read_tool(name: &str) -> bool {
-    const READ_SEGMENTS: [&str; 9] = [
-        "read", "list", "search", "info", "view", "get", "wiki", "notes", "skills",
-    ];
-    name.split(['_', '-'])
-        .any(|segment| READ_SEGMENTS.contains(&segment))
-}
-
-/// Fail CLOSED BUT LOUD: a tool without a descriptor is never silently
-/// treated as read-only - warn once per process when the name still looks
-/// like a read so the missing manifest entry is visible.
-pub fn warn_missing_descriptor(tool: &str) {
-    if !looks_like_read_tool(tool) {
-        return;
-    }
-    if !WARNED_MISSING_DESCRIPTOR.lock().insert(tool.to_string()) {
-        return;
-    }
-    tracing::warn!(
-        "tool '{}' has no behavior descriptor in its plugin manifest; treating it as \
-         non-read-only (repeat guard disabled). Declare it, e.g. \
-         \"tools\": [{{ \"name\": \"{}\", \"behavior\": {{ \"read_only\": true }} }}]",
-        tool,
-        tool
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,74 +143,50 @@ mod tests {
     fn parses_nested_and_flat_declarations() {
         let json = serde_json::json!({
             "tools": [
-                { "name": "filesystem_read",
-                  "behavior": { "read_only": true, "repeat_guard": true } },
-                { "name": "manage_subtasks", "family": "subtasks" },
-                { "name": "docker_compose", "behavior": { "affects_own_stack": true } },
-                { "name": "notes_note-read", "read_only": true }
+                { "name": "zorp_read", "behavior": { "read_only": true } },
+                { "name": "zorp_coord", "family": "coordination" },
+                { "name": "zorp_stack", "behavior": { "affects_own_stack": true } },
+                { "name": "zorp_flat", "read_only": true }
             ]
         });
         let entries: Vec<ToolManifestEntry> =
             serde_json::from_value(json["tools"].clone()).expect("tools array parses");
         let map = behavior_map(&entries);
 
-        let read = map.get("filesystem_read").expect("entry present");
-        assert!(read.read_only);
-        assert!(read.repeat_guard_enabled());
+        assert!(map.get("zorp_read").expect("entry present").read_only);
+        assert_eq!(
+            map.get("zorp_coord")
+                .expect("entry present")
+                .family
+                .as_deref(),
+            Some("coordination")
+        );
 
-        let subtasks = map.get("manage_subtasks").expect("entry present");
-        assert_eq!(subtasks.family.as_deref(), Some("subtasks"));
-        assert!(!subtasks.repeat_guard_enabled());
-
-        let docker = map.get("docker_compose").expect("entry present");
-        assert!(docker.affects_own_stack);
-        assert!(!docker.read_only);
+        let stack = map.get("zorp_stack").expect("entry present");
+        assert!(stack.affects_own_stack);
+        assert!(!stack.read_only);
 
         // Flat form: read_only at the top level, no nested behavior block.
-        let flat = map.get("notes_note-read").expect("entry present");
-        assert!(flat.read_only);
-        assert!(flat.repeat_guard_enabled());
-    }
-
-    #[test]
-    fn explicit_repeat_guard_false_opts_out() {
-        let entry: ToolManifestEntry = serde_json::from_value(serde_json::json!({
-            "name": "search_x",
-            "behavior": { "read_only": true, "repeat_guard": false }
-        }))
-        .unwrap();
-        let behavior = entry.resolved();
-        assert!(behavior.read_only);
-        assert!(!behavior.repeat_guard_enabled());
+        assert!(map.get("zorp_flat").expect("entry present").read_only);
     }
 
     #[test]
     fn lookup_accepts_raw_and_qualified_names() {
         let mut map = ToolBehaviorMap::new();
         map.insert(
-            "note_read".to_string(),
+            "inspect_widget".to_string(),
             ToolBehavior {
                 read_only: true,
                 ..Default::default()
             },
         );
         // Raw plugin name.
-        assert!(for_tool(&map, "notes", "note_read").read_only);
+        assert!(for_tool(&map, "zorp", "inspect_widget").read_only);
         // Qualified registry name (plugin reports the bare tool name).
-        assert!(for_tool(&map, "notes", "notes__note_read").read_only);
+        assert!(for_tool(&map, "zorp", "zorp__inspect_widget").read_only);
         // Legacy (pre-flip) qualified name: the one-release alias window.
-        assert!(for_tool(&map, "notes", "notes_note-read").read_only);
+        assert!(for_tool(&map, "zorp", "zorp_inspect-widget").read_only);
         // Unknown tool: fail closed (no declared behaviour).
-        assert!(!for_tool(&map, "notes", "notes_note-write").read_only);
-    }
-
-    #[test]
-    fn read_looking_names_are_detected_for_the_loud_warning() {
-        assert!(looks_like_read_tool("notes_note-list"));
-        assert!(looks_like_read_tool("tasks_list-cron-jobs"));
-        assert!(looks_like_read_tool("search_thread-messages"));
-        assert!(!looks_like_read_tool("docker_compose"));
-        assert!(!looks_like_read_tool("git_commit-and-push"));
-        assert!(!looks_like_read_tool("subtasks_manage-subtasks"));
+        assert!(!for_tool(&map, "zorp", "mutate_widget").read_only);
     }
 }

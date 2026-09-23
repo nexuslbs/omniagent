@@ -212,34 +212,6 @@ pub fn count_tokens(
 ///   6–10:   truncate bodies >1,000 chars to 200-char preview
 ///   11–15:  truncate bodies >300 chars to 100-char preview
 ///   16+:    replace entire body with metadata-only label
-/// WS-4b: which tools are read-only and therefore subject to the
-/// exact-repeat read guard. State-changing tools (writes, commits, clones)
-/// are excluded; executing one clears the guard map (reads after a mutation
-/// are always fresh).
-///
-/// audit V-2: the set is built from the tools' own DESCRIPTORS (declared in
-/// the plugin manifests and exposed by the registry), never from a hardcoded
-/// tool-name allowlist - a read-only tool registered under another id, or a
-/// new read-only plugin, is guarded without touching core. An undeclared tool
-/// is NOT read-only (fail closed) and the registry warns loudly about it.
-pub fn is_guarded_read_only(
-    guarded_read_tools: &std::collections::HashSet<String>,
-    tool: &str,
-) -> bool {
-    guarded_read_tools.contains(tool)
-}
-
-/// WS-4b: FNV-1a hash of a tool call's raw argument JSON - stable within the
-/// process, no imports needed.
-pub fn hash_tool_args(args: &str) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in args.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
-}
-
 /// WS-3/WS-4c: replace-or-append a marker-prefixed context block (budget
 /// hint, working notes, compaction notice). Keeps the message list bounded
 /// while making the latest value always visible to the LLM.

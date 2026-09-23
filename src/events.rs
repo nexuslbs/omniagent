@@ -99,7 +99,11 @@ fn is_abort_text(content: &str) -> bool {
     let lower = lower.trim_start_matches("/");
     ["abort", "cancel", "stop", "quit", "nevermind", "never mind"]
         .iter()
-        .any(|kw| lower == *kw || lower.starts_with(&format!("{} ", kw)) || lower.starts_with(kw) && lower.len() <= kw.len() + 2)
+        .any(|kw| {
+            lower == *kw
+                || lower.starts_with(&format!("{} ", kw))
+                || lower.starts_with(kw) && lower.len() <= kw.len() + 2
+        })
 }
 
 // ── Data shapes ─────────────────────────────────────────────────────────────
@@ -472,7 +476,8 @@ impl EventsEngine {
                     };
                 }
                 Some(entry) => {
-                    if Utc::now().timestamp_millis() >= entry.published_ms + entry.timeout_s * 1000 {
+                    if Utc::now().timestamp_millis() >= entry.published_ms + entry.timeout_s * 1000
+                    {
                         // The interaction deadline passed: the bus closes the
                         // interaction so the waiter does not hang.
                         let payload = json!({
@@ -645,7 +650,8 @@ pub async fn publish(
     correlation_id: Option<String>,
     payload: Value,
 ) -> AppResult<PublishResult> {
-    let engine = engine().ok_or_else(|| Error::Message("events bus not initialized".to_string()))?;
+    let engine =
+        engine().ok_or_else(|| Error::Message("events bus not initialized".to_string()))?;
     engine.publish(event, correlation_id, payload).await
 }
 
@@ -770,11 +776,7 @@ actions:
             calls: calls.clone(),
             fail: Mutex::new(fail.into_iter().map(str::to_string).collect()),
         });
-        let engine = EventsEngine::new(
-            dir.to_string_lossy().to_string(),
-            exec.clone(),
-            None,
-        );
+        let engine = EventsEngine::new(dir.to_string_lossy().to_string(), exec.clone(), None);
         (engine, exec)
     }
 
@@ -797,7 +799,10 @@ actions:
 
     #[test]
     fn terminal_event_names_and_outcomes() {
-        assert_eq!(terminal_event("solve-captcha", OUTCOME_SOLVED), "solve-captcha-resolved");
+        assert_eq!(
+            terminal_event("solve-captcha", OUTCOME_SOLVED),
+            "solve-captcha-resolved"
+        );
         assert_eq!(outcome_for_event("solve-captcha-resolved"), Some("solved"));
         assert_eq!(outcome_for_event("solve-captcha-aborted"), Some("aborted"));
         assert_eq!(outcome_for_event("solve-captcha-timeout"), Some("timeout"));

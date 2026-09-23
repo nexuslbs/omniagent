@@ -12,7 +12,6 @@
 //! - `anthropic_messages`: Anthropic-compatible `/v1/messages` (MiniMax, Qwen 3.7)
 //!   API mode is auto-detected from the model name.
 
-use crate::err_msg;
 use crate::error::{AppResult, Error, ErrorContext};
 use crate::plugins_yaml::{get_remote_plugin, PluginYamlType};
 use once_cell::sync::Lazy;
@@ -1476,7 +1475,12 @@ impl LLMClient {
             return Err(Error::RateLimited { retry_after });
         }
         if !status.is_success() {
-            err_msg!("OpenAI-compatible API returned {status}: {resp_text}");
+            // STRUCTURED transport signal: the status code is carried as data so
+            // the provider fast-fail classifier never matches on body text.
+            return Err(Error::ProviderHttp {
+                status: status.as_u16(),
+                body: resp_text,
+            });
         }
 
         let parsed: OpenAiResponse = serde_json::from_str(&resp_text)
@@ -1693,7 +1697,11 @@ impl LLMClient {
             return Err(Error::RateLimited { retry_after });
         }
         if !status.is_success() {
-            err_msg!("Anthropic API returned {status}: {resp_text}");
+            // STRUCTURED transport signal (see the OpenAI-compatible path).
+            return Err(Error::ProviderHttp {
+                status: status.as_u16(),
+                body: resp_text,
+            });
         }
 
         let parsed: AnthropicResponse = serde_json::from_str(&resp_text)
