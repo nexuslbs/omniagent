@@ -1062,7 +1062,20 @@ Previous plan:\n{}",
     // keeps the mid-run subtask reminders active even when plan mode is off,
     // so the appended obligation stays visible between tool rounds.
     let mut sub_prompt_tracking_active: bool = false;
+    // EFF-2: live-interrupt detection. A sub_cause / operator message merged
+    // into a RUNNING thread must change the agent's behaviour on the very next
+    // LLM call instead of being "appended as context only" (incident 2874: the
+    // operator's "why so slow" sub_cause was merged at 11:24 and the loop ran
+    // another 35 minutes). We count the appended Sub-Prompt markers in the
+    // live message list; when the count grows, an explicit LIVE INTERRUPT
+    // directive is injected before the next LLM call.
+    let mut sub_prompt_merges_seen: usize = 0;
 
+    // EFF-1: per-thread efficiency ledger (duplicate reads, read-only streak,
+    // state changes). Drives the escalating behavioural steering below and the
+    // duplicate-read stubs in the tool dispatch loop.
+    use crate::agent::efficiency as eff;
+    let mut eff_ledger = eff::EfficiencyLedger::new();
     // WS-4b: engine-level read guard - (tool, args-hash) -> (iteration, len)
     // for read-only tools. Cleared whenever a state-changing tool runs.
     let mut read_guard: std::collections::HashMap<(String, u64), (u32, usize)> =
@@ -1415,6 +1428,49 @@ Previous plan:\n{}",
             }
         }
 
+        // EFF-2: live interrupt. If a pending operator prompt / sub_cause was
+        // merged into this RUNNING thread since the last iteration, the merge
+        // marker count grows: elevate it to an explicit directive so the agent
+        // halts the current exploration and acts on / answers the new
+        // instruction on the very next LLM call (incident 2874: 35 extra
+        // minutes after the operator's "why so slow" sub_cause was merged).
+        let sub_prompt_merges = messages
+            .iter()
+            .filter(|m| m.content.contains("=== Sub-Prompt (from thread"))
+            .count();
+        if sub_prompt_merges > sub_prompt_merges_seen {
+            let newly = sub_prompt_merges - sub_prompt_merges_seen;
+            sub_prompt_merges_seen = sub_prompt_merges;
+            warn!(
+                "[efficiency] LIVE INTERRUPT for thread {}: {} new merged prompt(s) during processing",
+                thread.id, newly
+            );
+            helpers::upsert_system_message(
+                &mut messages,
+                "=== LIVE INTERRUPT ===",
+                format!(
+                    "=== LIVE INTERRUPT ===\n{} operator instruction/sub-cause was just merged into this running thread (see the newest '=== Sub-Prompt (from thread ...)' message above).\nSTOP the current exploration after the tool call you are running now.\n1. Re-read that newest Sub-Prompt message.\n2. If it changes the goal, act on it with your next tool call.\n3. If it is a question or a complaint (e.g. 'why is this taking so long'), ANSWER it in your next reply with concrete status: what is done, what remains, and the blocker.\nDo not continue an unrelated read/verify loop.",
+                    newly
+                ),
+            );
+            // A new instruction is a new unit of work: reset the read-only
+            // streak so the fresh task is not judged by the old loop.
+            eff_ledger.note_state_change();
+            eff_ledger.mark_state_change_at(current_iter as u32);
+        }
+
+        // EFF-1: escalating, behavioural progress steering (no hard cap, no
+        // truncation). Fires when the thread keeps reading without a state
+        // change, so the agent can comply within the same iteration.
+        if let Some(signal) = eff_ledger.steering(current_iter.max(0) as u32) {
+            warn!(
+                "[efficiency] {} | {}",
+                signal,
+                eff_ledger.metrics_summary(thread.id)
+            );
+            helpers::upsert_system_message(&mut messages, "=== Efficiency ===", signal);
+        }
+
         // WS-4c: budget hint every iteration (anti-death-spiral backstop).
         helpers::upsert_system_message(
                 &mut messages,
@@ -1697,6 +1753,19 @@ Previous plan:\n{}",
                     }
                 }
                 llm_error_retries += 1;
+                // EFF-1: fatal provider errors (402 / insufficient balance / auth)
+                // fail the thread immediately with the real reason. Retrying them
+                // can never succeed and only burns the remaining provider balance
+                // (incident 2874 ended on "402 Payment Required").
+                if let Some(reason) = eff::classify_fatal_provider_error(&format!("{:?}", e)) {
+                    error!(
+                        "[efficiency] fatal provider error for thread {}: {} (no retry attempted)",
+                        thread.id, reason
+                    );
+                    final_content = format!("Thread failed: {}", reason);
+                    force_failed = true;
+                    break;
+                }
                 if llm_error_retries >= llm_max_retries {
                     warn!(
                         "[executor] LLM provider failed {} consecutive time(s) (max {}) for thread {}: {:?}; marking thread failed",
@@ -2285,6 +2354,32 @@ Previous plan:\n{}",
             let tool_args = tc.function.arguments.clone();
             let tc_id = tc.id.clone();
 
+            // EFF-1: effective-scope duplicate detection. Unlike the exact
+            // args-hash guard below, this compares the READ SCOPE (file + paging
+            // window, search pattern, git argv), so re-reading the same file with
+            // a different offset/limit - the exact thread-2874 pattern (20x
+            // docker-compose.yml at offset 262) - is blocked with a compact stub.
+            match eff_ledger.observe(&tool_name, &tool_args, current_iter as u32) {
+                eff::ReadVerdict::Duplicate { first_iter, overlap } => {
+                    eff_ledger.record_block();
+                    let stub = match eff::parse_read_scope(&tool_name, &tool_args) {
+                        Some(scope) => {
+                            eff::duplicate_stub(&tool_name, &scope, first_iter, overlap)
+                        }
+                        None => format!(
+                            "[duplicate read - {} was already executed at iteration {}; the result is already in your context, no payload re-injected. Use your notes.]",
+                            tool_name, first_iter
+                        ),
+                    };
+                    warn!(
+                        "[efficiency] duplicate read blocked (thread {}): {} - {}",
+                        thread.id, tool_name, stub
+                    );
+                    tool_results[idx] = Some((tc_id.clone(), tool_name.clone(), stub));
+                    continue;
+                }
+                _ => {}
+            }
             // WS-4b: exact-repeat read guard for read-only tools.
             let args_hash = helpers::hash_tool_args(&tool_args);
             let guard_key = (tool_name.clone(), args_hash);
