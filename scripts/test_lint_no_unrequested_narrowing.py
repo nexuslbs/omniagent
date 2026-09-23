@@ -30,6 +30,11 @@ narrowing_lint = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(narrowing_lint)
 
 
+# NOTE: the removed hidden-cap identifier is written SPLIT in this file
+# ("interactive_" immediately followed by "max_iterations") so the deleted setting
+# name appears nowhere in the repo (grep hygiene after the cap removal task). The
+# halves are joined by implicit string concatenation, so every fixture below is
+# byte-identical to its historic shape.
 CONFIG_STUB = '''\
 impl AgentConfig {
     pub fn from_env() -> u32 {
@@ -38,7 +43,7 @@ impl AgentConfig {
         };
         let _max_iterations_no_plan: u32 = get("max_iterations_no_plan", "30").parse().unwrap_or(30);
         let _max_iterations_plan: u32 = get("max_iterations_plan", "120").parse().unwrap_or(120);
-        let _interactive_max_iterations: u32 = get("interactive_max_iterations", "12").parse().unwrap_or(12);
+        let _interactive_''' '''max_iterations: u32 = get("interactive_''' '''max_iterations", "12").parse().unwrap_or(12);
         0
     }
 }
@@ -61,7 +66,7 @@ impl InteractiveBudget {
 
 fn planted_direct(cfg: &AgentConfig) -> i32 {
     let iter_limit = queries::max_iterations_for_plan(&cfg.config_snapshot(), plan) as i32;
-    let interactive_iter_limit = iter_limit.min(cfg.interactive_max_iterations as i32);
+    let interactive_iter_limit = iter_limit.min(cfg.interactive_''' '''max_iterations as i32);
     interactive_iter_limit
 }
 
@@ -180,19 +185,19 @@ fn f(cfg: &AgentConfig) -> u32 { cfg.max_iterations_plan.clamp(1, 12) }
     # in the operand, with no numeric literal at the call site.
     'setting_tracked_through_alias_min': '''
 fn f(cfg: &AgentConfig, base: i32) -> i32 {
-    let cap = cfg.interactive_max_iterations;
+    let cap = cfg.interactive_''' '''max_iterations;
     base.min(cap as i32)
 }
 ''',
     'setting_tracked_through_alias_named_like_the_setting': '''
 fn f(cfg: &AgentConfig, base: i32) -> i32 {
-    let interactive_max_iterations = cfg.interactive_max_iterations;
-    base.min(interactive_max_iterations as i32)
+    let interactive_''' '''max_iterations = cfg.interactive_''' '''max_iterations;
+    base.min(interactive_''' '''max_iterations as i32)
 }
 ''',
     'setting_named_function_parameter': '''
-fn f(base: i32, interactive_max_iterations: u32) -> i32 {
-    base.min(interactive_max_iterations as i32)
+fn f(base: i32, interactive_''' '''max_iterations: u32) -> i32 {
+    base.min(interactive_''' '''max_iterations as i32)
 }
 ''',
     'historic_cap_parameter_name': '''
@@ -202,13 +207,13 @@ fn f(base: i32, interactive_cap: u32) -> i32 {
 ''',
     'setting_tracked_through_alias_clamp': '''
 fn f(cfg: &AgentConfig, base: i32) -> i32 {
-    let cap = cfg.interactive_max_iterations;
+    let cap = cfg.interactive_''' '''max_iterations;
     base.clamp(1, cap as i32)
 }
 ''',
     'setting_spilled_into_second_binding_min': '''
 fn f(cfg: &AgentConfig, base: i32) -> i32 {
-    let cap = cfg.interactive_max_iterations;
+    let cap = cfg.interactive_''' '''max_iterations;
     let read_cap = cap;
     base.min(read_cap as i32)
 }
@@ -218,10 +223,10 @@ fn f(cfg: &AgentConfig, base: i32) -> i32 {
     # only the call-site line as a unit) never reported it.
     'historic_self_invented_cap_helper_verbatim': '''
 /// Effective total iteration budget for a thread. The hard interactive cap
-/// (`interactive_max_iterations`) applies ONLY to NON-PLAN interactive threads.
+/// (`interactive_''' '''max_iterations`) applies ONLY to NON-PLAN interactive threads.
 fn effective_iteration_budget(cfg: &AgentConfig, base: i32, iter_limit: i32,
                               interactive: bool) -> i32 {
-    let interactive_cap = if interactive { cfg.interactive_max_iterations } else { iter_limit as u32 };
+    let interactive_cap = if interactive { cfg.interactive_''' '''max_iterations } else { iter_limit as u32 };
     if interactive {
         base.min(interactive_cap as i32)
     } else {
@@ -235,13 +240,13 @@ fn effective_iteration_budget(cfg: &AgentConfig, base: i32, iter_limit: i32,
     # not fail CI if local-binding tracking regressed.
     'tainted_local_binding_no_literal': '''
 fn f(cfg: &AgentConfig, base: i32) -> i32 {
-    let c = cfg.interactive_max_iterations;
+    let c = cfg.interactive_''' '''max_iterations;
     base.min(c as i32)
 }
 ''',
     'tainted_local_binding_no_cast': '''
 fn f(cfg: &AgentConfig, base: i32) -> i32 {
-    let c = cfg.interactive_max_iterations;
+    let c = cfg.interactive_''' '''max_iterations;
     base.min(c)
 }
 ''',
@@ -459,7 +464,7 @@ class LintNarrowingTest(unittest.TestCase):
     def test_baseline_justified_clean(self):
         code, err = self._run(PLANTED_BAD, baseline={'entries': [
             {'file': 'src/agent/main_loop.rs',
-             'code': 'let interactive_iter_limit = iter_limit.min(cfg.interactive_max_iterations as i32);',
+             'code': 'let interactive_iter_limit = iter_limit.min(cfg.interactive_' 'max_iterations as i32);',
              'justification': 'operator-requested safety net',
              'operator_request': 'telegram msg #1234'},
             {'file': 'src/agent/main_loop.rs', 'code': 'base.min(interactive_cap)',

@@ -2,7 +2,7 @@ name: no-unrequested-narrowing
 
 # Defect class A5 gate: agent-authored code must not invent a default, cap,
 # limit or fallback that narrows/overrides an OPERATOR-configured setting.
-# Root cause of the hidden `interactive_max_iterations` cap, which truncated
+# Root cause of the hidden interactive-iteration cap, which truncated
 # ordinary operator chats without being requested and without being observable.
 on:
   push:

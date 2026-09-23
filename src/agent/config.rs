@@ -685,13 +685,13 @@ mod tests {
         record_configured_keys(&map);
 
         assert!(setting_is_operator_configured("max_iterations_no_plan"));
-        assert!(!setting_is_operator_configured("interactive_max_iterations"));
+        assert!(!setting_is_operator_configured("some_unconfigured_knob"));
         assert_eq!(
             setting_source_label("max_iterations_no_plan"),
             "settings.yml/db (operator-configured)"
         );
         assert_eq!(
-            setting_source_label("interactive_max_iterations"),
+            setting_source_label("some_unconfigured_knob"),
             "code default (NOT configured by the operator)"
         );
     }

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """No-unrequested-narrowing lint for the omniagent delivery path.
 
-Defect class A5 (root cause of the hidden `interactive_max_iterations` cap):
+Defect class A5 (root cause of the hidden interactive-iteration cap):
 agent-authored code may NOT invent a default, cap, limit or fallback that
 NARROWS or OVERRIDES an operator-configured setting. The historical instance was
 
     let iter_limit = max_iterations_for_plan(&cfg.config_snapshot(), plan) as i32;
-    let interactive_iter_limit = iter_limit.min(cfg.interactive_max_iterations as i32);
+    let interactive_iter_limit = iter_limit.min(cfg.<hidden interactive cap> as i32);
 
-backed by `interactive_max_iterations: get(..., "12")`: a self-invented cap that
+backed by a code-default `get(..., "12")`: a self-invented cap that
 truncated ordinary operator chats, was never requested, saved no money and was
 invisible to the operator.
 
@@ -644,7 +644,7 @@ def scan_unit(unit: str, unit_raw: str, tainted: set[str],
         args_raw = call_raw(unit_raw, pos, name, args)
         # An argument counts as a narrowing operand when it is a literal (or a
         # literal-bound identifier) or when the argument ITSELF reads a setting
-        # (`cfg.interactive_max_iterations`, `get("..","12")`, a resolver call).
+        # (`cfg.<setting>`, `get("..","12")`, a resolver call).
         # Two ALREADY-RESOLVED values being combined (`reduce_target.min(
         # must_fit_target)`, e.g. the stricter of two operator budgets) is not a
         # narrowing of either setting and must not be reported.
@@ -687,7 +687,7 @@ def scan_unit(unit: str, unit_raw: str, tainted: set[str],
     # only fire when the narrowing operand carries a numeric literal or names a
     # setting through `cfg.`/`get(...)`. The historical self-invented cap passed
     # its value in differently:
-    #     let cap = cfg.interactive_max_iterations; base.min(cap as i32)
+    #     let cap = cfg.<hidden interactive cap>; base.min(cap as i32)
     #     fn f(base: i32, interactive_cap: u32) -> i32 { base.min(interactive_cap as i32) }
     # Neither operand carries a literal, so the exact root-cause shape used to
     # sail through. Rule: `min`/`max`/`clamp` on a budget-ish receiver with a

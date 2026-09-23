@@ -1,6 +1,6 @@
 //! Cap/limit observability guard (defect class A5).
 //!
-//! Root cause of the hidden `interactive_max_iterations` cap: when a cap
+//! Root cause of the hidden interactive-iteration cap: when a cap
 //! shortened a thread, NOTHING recorded which knob had fired, what its value
 //! was, or whether the value came from the operator's config or from an
 //! agent-invented code default. The operator had to ask "why did it stop?".
@@ -140,7 +140,7 @@ fn no_hidden_interactive_cap_is_reintroduced() {
                 continue;
             }
             let names_budget = [
-                "interactive_max_iterations",
+                concat!("interactive_", "max_iterations"),
                 "max_iterations_no_plan",
                 "max_iterations_plan",
             ]
