@@ -387,4 +387,66 @@ mod tests {
             );
         }
     }
+
+    /// EFF-4: the provider fast-fail decides on the STRUCTURED transport status,
+    /// never on a vendor's wording (provider-agnostic, design constraint 4).
+    #[test]
+    fn fatal_provider_statuses_are_classified_structurally() {
+        for status in [401u16, 402, 403] {
+            let err = Error::ProviderHttp {
+                status,
+                body: "whatever the vendor wrote".to_string(),
+            };
+            let reason = classify_provider_error(&err)
+                .unwrap_or_else(|| panic!("HTTP {status} must be terminal"));
+            assert!(
+                reason.contains(&status.to_string()),
+                "the reason must carry the structured status {status}: {reason}"
+            );
+        }
+    }
+
+    /// Every other transport status stays retryable: the fast-fail must not
+    /// swallow transient failures (safe default = retry normally).
+    #[test]
+    fn non_fatal_provider_statuses_stay_retryable() {
+        for status in [200u16, 400, 408, 409, 422, 429, 500, 502, 503, 504] {
+            let err = Error::ProviderHttp {
+                status,
+                body: String::new(),
+            };
+            assert!(
+                classify_provider_error(&err).is_none(),
+                "HTTP {status} must not be classified as terminal"
+            );
+        }
+    }
+
+    /// Text matching is NEVER the mechanism: the same wording without the
+    /// structured status is not classified (design constraint 3).
+    #[test]
+    fn provider_text_without_a_structured_status_is_never_terminal() {
+        for text in [
+            "402 Payment Required: Insufficient Balance",
+            "401 Unauthorized: invalid api key",
+            "403 Forbidden",
+        ] {
+            assert!(
+                classify_provider_error(&Error::Message(text.to_string())).is_none(),
+                "text-only error must not be classified: {text}"
+            );
+        }
+    }
+
+    /// The structured status survives context wrapping, so a re-worded error on
+    /// the way up cannot hide a 402 from the fast-fail.
+    #[test]
+    fn context_wrapping_preserves_the_structured_status() {
+        let wrapped = Error::ProviderHttp {
+            status: 402,
+            body: "raw".to_string(),
+        }
+        .context("chat completion failed");
+        assert!(classify_provider_error(&wrapped).is_some());
+    }
 }
