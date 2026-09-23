@@ -2375,6 +2375,38 @@ Previous plan:\n{}",
                         "[efficiency] duplicate read blocked (thread {}): {} - {}",
                         thread.id, tool_name, stub
                     );
+                    // EFF-1b: persist the stub as a real tool-result row. The
+                    // `continue` below skips the spawn that normally writes the
+                    // result message, so without this the duplicate block would
+                    // be invisible in the thread history (and in the gates /
+                    // counters that verify it).
+                    let db_max =
+                        crate::db::threads::get_max_thread_sequence(&cfg.pool, thread.id)
+                            .await
+                            .unwrap_or(0);
+                    let dup_msg = MessageNew {
+                        thread_id: thread.id,
+                        role: "agent".to_string(),
+                        content: stub.clone(),
+                        thread_sequence: effective_result_seq(db_max, result_seqs[idx]),
+                        external_id: None,
+                        metadata: serde_json::json!({"eff": "duplicate-read"}),
+                        embedding: None,
+                        summary_text: None,
+                        is_summary: false,
+                        original_thread_id: None,
+                        msg_type: "tool-result".to_string(),
+                        msg_subtype: Some(tool_name.clone()),
+                        iteration_number: current_iter,
+                        duration_ms: 0,
+                        token_usage: serde_json::json!({}),
+                    };
+                    match helpers::persist_or_abort(&cfg.pool, &dup_msg, thread.id).await {
+                        helpers::CreateMessageResult::OtherError(e) => {
+                            error!("Failed to persist duplicate-read stub: {:?}", e)
+                        }
+                        _ => {}
+                    }
                     tool_results[idx] = Some((tc_id.clone(), tool_name.clone(), stub));
                     continue;
                 }
