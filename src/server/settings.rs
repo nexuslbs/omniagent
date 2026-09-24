@@ -365,6 +365,16 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
+            "max_inline_chars".into(),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Per-result tool-output cap in chars: results larger than this are spilled in full to spill_dir and replaced inline by a bounded preview + [full output: path] locator. 0/off disables the cap (full result stays inline). Default 50000; read at every tool call so changes apply without a restart.".into(),
+                options: None,
+                readonly: false,
+                default: Some("50000".into()),
+            },
+        ),
+        (
             "max_unfinished_subtask_retries".into(),
             SettingMeta {
                 field_type: "number".into(),
@@ -690,6 +700,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
         let cat_name = match name.as_str() {
             // prompt category
             "max_inline_file_kb"
+            | "max_inline_chars"
             | "prompt_generate_tool"
             | "prompt_compact_messages_tool"
             | "prompt_log_level"
@@ -838,6 +849,7 @@ fn writable_setting_keys() -> std::collections::HashSet<&'static str> {
         "memory_max_chars",
         "default_provider",
         "max_inline_file_kb",
+        "max_inline_chars",
         "tool_bg_secs",
         "prompt_log_level",
         "prompt_token_budget_hard",
