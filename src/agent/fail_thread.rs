@@ -133,12 +133,14 @@ pub(crate) async fn fail_thread(
 // applies the metadata.workflow_step kanban transition:
 //   F0 ""       → executor default: task rests at its current status with
 //                 thread_status = NULL (thread re-creation is Phase 3 wiring).
-//   F1 running  → guard executions['running'] < retries+1 → increment counter
-//                 → task 'running', thread_status NULL. Invalid caller /
-//                 absent executor role / limit reached → blocked.
-//   F2 testing  → guard executions['testing'] < retries+1 → increment counter
-//                 → task 'testing', thread_status NULL. Invalid caller /
-//                 absent tester role / limit reached → blocked.
+//   F1 running  → guard rerun_allowed(executions['running'], retries+1) ->
+//                 increment counter -> task 'running', thread_status NULL.
+//                 Invalid caller / absent executor role / limit reached ->
+//                 blocked (or review with clear_executions_on_review).
+//   F2 testing  → guard rerun_allowed(executions['testing'], retries+1) ->
+//                 increment counter -> task 'testing', thread_status NULL.
+//                 Invalid caller / absent tester role / limit reached ->
+//                 blocked (or review with clear_executions_on_review).
 //   F3 blocked  → task 'blocked', thread_status NULL, no thread.
 //   F4 (other)  → task 'blocked' + auto comment, no thread (includes 'review'
 //                 and role names - N6).
@@ -354,9 +356,18 @@ pub async fn manual_review_decision(
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_else(|| serde_json::json!({}));
 
+    // Retry budget: workflow_state.executions counts RERUNS only (the initial
+    // dispatch never increments), so a re-run is allowed iff reruns + 1 (the
+    // initial run) stays under the TOTAL limit = retries + 1.
     let budget_ok = match decision {
-        "rework" => execution_count(&state, "running") < retry_limit(&wf, "executor"),
-        "retest" => execution_count(&state, "testing") < retry_limit(&wf, "tester"),
+        "rework" => rerun_allowed(
+            execution_count(&state, "running"),
+            retry_limit(&wf, "executor"),
+        ),
+        "retest" => rerun_allowed(
+            execution_count(&state, "testing"),
+            retry_limit(&wf, "tester"),
+        ),
         _ => true,
     };
 
@@ -590,6 +601,9 @@ pub(crate) fn normalize_workflow_step(workflow_step: Option<&str>) -> &'static s
 }
 
 /// Read the execution counter for a step from workflow_state.executions.
+/// The counter records RERUNS only: the step's initial dispatch is execution
+/// #1 and is never counted, so TOTAL executions = 1 + counter. The retry
+/// guard accounts for the initial run via `rerun_allowed` (+ 1).
 /// Outcome of the D7-aware retry guard when a step re-entry would exceed the
 /// workflow's retry limit.
 #[derive(Debug, PartialEq, Eq)]
@@ -668,6 +682,14 @@ fn retry_limit(wf: &crate::workflows::Workflow, role: &str) -> u64 {
         .or(wf.defaults.retries)
         .unwrap_or(0) as u64
         + 1
+}
+
+/// A step re-entry is allowed iff the reruns already consumed plus the INITIAL
+/// run (execution #1, which the counter never records) stays within the step's
+/// TOTAL execution limit (`retries + 1`). The counter counts reruns only, so
+/// the initial run is accounted for by the `+ 1`.
+fn rerun_allowed(reruns: u64, limit: u64) -> bool {
+    reruns + 1 < limit
 }
 
 /// Execute the builtin fail-thread tool for the current thread.
@@ -1220,16 +1242,21 @@ pub(crate) async fn engine_transition(
         }
     }
 
-    // Retry guard (D1/R2 + D7): limit = retries + 1; a re-entry that would
-    // exceed the limit is converted BEFORE any thread is created. With
-    // `clear_executions_on_review` (D7) an executor/tester limit sends the
-    // task to `review` instead of `blocked` and zeroes the running/testing
+    // Retry guard (D1/R2 + D7): limit = retries + 1 TOTAL executions. The
+    // counter records reruns only, so the guard blocks when reruns + 1 (the
+    // initial run) reaches the limit; a re-entry that would exceed it is
+    // converted BEFORE any thread is created. At exhaustion the guard has
+    // PRIORITY over the requested rework (operator 2026-09-23): a
+    // fail_thread -> running rework is NOT honoured - it routes to review /
+    // blocked; only an explicit fail_thread -> blocked ends the task blocked.
+    // With `clear_executions_on_review` (D7) an executor/tester limit sends
+    // the task to `review` instead of `blocked` and zeroes the running/testing
     // counters; the reviewer step is ALWAYS blocked (boundedness guarantee).
     // With `review_on_fail` a non-reviewer step at its limit also goes to
     // review (the reviewer decides); auto_approve forces the flag off.
     if increment {
         if let Some(step) = rerun_step.as_deref() {
-            if execution_count(&executions, step) >= limit_for(step) {
+            if !rerun_allowed(execution_count(&executions, step), limit_for(step)) {
                 let clear_on_review = workflow
                     .as_ref()
                     .is_some_and(|w| w.clear_executions_on_review);
@@ -1820,6 +1847,24 @@ mod tests {
     }
 
     #[test]
+    fn rerun_allowed_accounts_for_initial_run() {
+        // The execution counter records RERUNS only; the initial dispatch is
+        // execution #1. A re-entry is allowed iff reruns + 1 < TOTAL limit.
+        // retries:0 -> limit 1: the initial run is the ONLY execution - a
+        // first re-entry is already blocked.
+        assert!(!rerun_allowed(0, 1));
+        // retries:1 -> limit 2: exactly 1 rerun allowed, the 2nd is blocked.
+        assert!(rerun_allowed(0, 2));
+        assert!(!rerun_allowed(1, 2));
+        // retries:3 -> limit 4: 3 reruns allowed (total 4), the 4th blocked
+        // (total would be 5).
+        assert!(rerun_allowed(0, 4));
+        assert!(rerun_allowed(1, 4));
+        assert!(rerun_allowed(2, 4));
+        assert!(!rerun_allowed(3, 4));
+    }
+
+    #[test]
     fn role_for_step_maps_keys() {
         assert_eq!(role_for_step("running"), "executor");
         assert_eq!(role_for_step("testing"), "tester");
@@ -2232,7 +2277,7 @@ mod tests_rerun_script {
         std::fs::create_dir_all(data_dir.join("config")).unwrap();
         std::fs::write(
             data_dir.join("config").join("workflows.yml"),
-            "workflows:\n  test-wf:\n    profile: test\n    provider: noop\n    model: noop\n    plan_mode: manual\n    retries: 0\n    clear_executions_on_review: false\n    roles:\n      executor:\n        template: \"executor system prompt\"\n        provider: noop\n        model: noop\n      tester:\n        template: \"tester system prompt\"\n        provider: noop\n        model: noop\n      reviewer:\n        template: \"reviewer system prompt\"\n        provider: noop\n        model: noop\n",
+            "workflows:\n  test-wf:\n    profile: test\n    provider: noop\n    model: noop\n    plan_mode: manual\n    retries: 1\n    clear_executions_on_review: false\n    roles:\n      executor:\n        template: \"executor system prompt\"\n        provider: noop\n        model: noop\n      tester:\n        template: \"tester system prompt\"\n        provider: noop\n        model: noop\n      reviewer:\n        template: \"reviewer system prompt\"\n        provider: noop\n        model: noop\n",
         )
         .unwrap();
 
@@ -2266,8 +2311,8 @@ mod tests_rerun_script {
         .await;
 
         sql_forge!(
-            "INSERT INTO kanban_tasks (id, title, body, status, priority, channel_id, profile, position, template, plan, workflow_id)
-             VALUES (:task_id, 'RerunScriptTest', '', 'running', 1, 'kanban', 'test', 0, NULL, false, 'test-wf')",
+            "INSERT INTO kanban_tasks (id, title, body, status, priority, channel_id, profile, position, template, plan, workflow_id, board)
+             VALUES (:task_id, 'RerunScriptTest', '', 'running', 1, 'kanban', 'test', 0, NULL, false, 'test-wf', 'main')",
             ( :task_id = &task_id )
         )
         .execute(&pool)
@@ -2390,7 +2435,8 @@ mod tests_r8n_no_workflow_blocked {
     use super::*;
 
     /// Throwaway data_dir; when `wf` is Some, write workflows.yml containing
-    /// that workflow (executor role, retries 0 → retry limit 1).
+    /// that workflow (executor role, retries 1 -> retry limit 2 = 2 TOTAL
+    /// executions: the initial run + 1 retry).
     fn temp_data_dir(tag: &str, wf: Option<&str>) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("r8n-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2399,7 +2445,7 @@ mod tests_r8n_no_workflow_blocked {
             std::fs::write(
                 dir.join("config").join("workflows.yml"),
                 format!(
-                    "workflows:\n  {name}:\n    profile: test\n    provider: noop\n    model: noop\n    plan_mode: manual\n    retries: 0\n    clear_executions_on_review: false\n    roles:\n      executor:\n        template: \"executor system prompt\"\n        provider: noop\n        model: noop\n"
+                    "workflows:\n  {name}:\n    profile: test\n    provider: noop\n    model: noop\n    plan_mode: manual\n    retries: 1\n    clear_executions_on_review: false\n    roles:\n      executor:\n        template: \"executor system prompt\"\n        provider: noop\n        model: noop\n"
                 ),
             )
             .unwrap();
@@ -2441,11 +2487,12 @@ mod tests_r8n_no_workflow_blocked {
         .await;
 
         sql_forge!(
-            "INSERT INTO kanban_tasks (id, title, body, status, priority, channel_id, profile, position, template, plan, workflow_id)
-             VALUES (:task_id, 'R8N', '', 'running', 1, 'kanban', 'test', 0, NULL, false, NULLIF(:workflow_id, '')::text)",
+            "INSERT INTO kanban_tasks (id, title, body, status, priority, channel_id, profile, position, template, plan, workflow_id, board)
+             VALUES (:task_id, 'R8N', '', COALESCE(NULLIF(:thread_step, ''), 'running'), 1, 'kanban', 'test', 0, NULL, false, NULLIF(:workflow_id, '')::text, 'main')",
             (
                 :task_id = task_id,
                 :workflow_id = workflow_id.unwrap_or(""),
+                :thread_step = thread_step.unwrap_or(""),
             )
         )
         .execute(pool)
@@ -2734,7 +2781,8 @@ mod tests_r8n_no_workflow_blocked {
 
     // ── review_on_fail / double-normalization regression (fail-thread task) ──
     /// Throwaway data_dir with a workflow carrying review_on_fail /
-    /// auto_approve flags (executor role only, retries 0 → retry limit 1).
+    /// auto_approve flags (executor role only, retries 1 -> retry limit 2 =
+    /// 2 TOTAL executions: the initial run + 1 retry).
     fn temp_data_dir_flagged(
         tag: &str,
         review_on_fail: bool,
@@ -2746,7 +2794,7 @@ mod tests_r8n_no_workflow_blocked {
         std::fs::write(
             dir.join("config").join("workflows.yml"),
             format!(
-                "workflows:\n  test-wf:\n    profile: test\n    provider: noop\n    model: noop\n    plan_mode: manual\n    retries: 0\n    clear_executions_on_review: false\n    review_on_fail: {}\n    auto_approve: {}\n    roles:\n      executor:\n        template: \"executor system prompt\"\n        provider: noop\n        model: noop\n",
+                "workflows:\n  test-wf:\n    profile: test\n    provider: noop\n    model: noop\n    plan_mode: manual\n    retries: 1\n    clear_executions_on_review: false\n    review_on_fail: {}\n    auto_approve: {}\n    roles:\n      executor:\n        template: \"executor system prompt\"\n        provider: noop\n        model: noop\n",
                 if review_on_fail { "true" } else { "false" },
                 if auto_approve { "true" } else { "false" },
             ),
@@ -2976,9 +3024,9 @@ mod tests_r8n_no_workflow_blocked {
             eprintln!("skipping: cannot connect to {url}");
             return;
         };
-        // retries 1 -> retry limit 2 for every step (incl. the reviewer,
-        // whose counter is never cleared).
-        let data_dir = temp_data_dir_review("wf-revfail", 1);
+        // retries 2 -> retry limit 3 for every step (incl. the reviewer,
+        // whose counter is never cleared): 3 TOTAL reviewer executions.
+        let data_dir = temp_data_dir_review("wf-revfail", 2);
         let task_id = format!("rv-revfail-{}", std::process::id());
         let parent = parent_thread(
             setup(&pool, &task_id, Some("test-wf"), Some("review")).await,
@@ -3022,7 +3070,7 @@ mod tests_r8n_no_workflow_blocked {
         .expect("engine_transition should succeed")
         .expect("second failed reviewer must create a re-run thread");
 
-        // R3 hard-fails: reviewer budget (limit 2) exhausted -> BLOCKED. The
+        // R3 hard-fails: reviewer budget (limit 3) exhausted -> BLOCKED. The
         // reviewer counter is never cleared, so the loop terminates here.
         let parent3 = parent_thread(r3, task_id.clone(), Some("review".to_string()));
         let result = engine_transition(
@@ -3049,6 +3097,227 @@ mod tests_r8n_no_workflow_blocked {
         );
 
         cleanup(&pool, &task_id, &[parent.id, r2, r3]).await;
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live DATABASE_URL"]
+    async fn retries_zero_allows_one_execution_then_routes_to_review() {
+        // Retry budget off-by-one (operator 2026-09-23): the execution limit
+        // counts the INITIAL run, so retries:0 -> limit 1 TOTAL execution.
+        // The first re-entry (a fail_thread rework request) is blocked by the
+        // guard and routed to review (clear_executions_on_review), never
+        // spawning a 2nd executor thread.
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
+            eprintln!("skipping: cannot connect to {url}");
+            return;
+        };
+        let data_dir = temp_data_dir_review("r0", 0);
+        let task_id = format!("rv-r0-{}", std::process::id());
+        let parent = parent_thread(
+            setup(&pool, &task_id, Some("test-wf"), Some("running")).await,
+            task_id.clone(),
+            Some("running".to_string()),
+        );
+        // The only execution (the initial run) fails and requests a rework:
+        // reruns 0 + 1 >= limit 1 -> the guard converts it to review.
+        let review_id = engine_transition(
+            &pool,
+            data_dir.to_str().unwrap(),
+            &parent,
+            RerunKind::FailTool {
+                step: "running".to_string(),
+            },
+        )
+        .await
+        .expect("engine_transition should succeed")
+        .expect("retries 0: the first rework request must route to review");
+        let step: String = sql_forge!(
+            scalar String,
+            "SELECT workflow_step FROM threads WHERE id = :review_id",
+            ( :review_id = review_id )
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("fetch review thread step");
+        assert_eq!(
+            step, "review",
+            "retries 0: rework must become a review thread"
+        );
+        assert_eq!(
+            task_status(&pool, &task_id).await,
+            "review",
+            "retries 0: the task must land in review, not running"
+        );
+        let running: i64 = sql_forge!(
+            scalar i64,
+            "SELECT count(*) FROM threads WHERE task_id = :task_id AND workflow_step = 'running'",
+            ( :task_id = &task_id )
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count executor threads");
+        assert_eq!(
+            running, 1,
+            "retries 0: exactly 1 executor execution (the initial run), no re-run thread"
+        );
+
+        cleanup(&pool, &task_id, &[parent.id, review_id]).await;
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live DATABASE_URL"]
+    async fn retries_three_allows_four_executions_then_review() {
+        // retries:3 -> limit 4 TOTAL executions (1 initial + 3 retries): the
+        // first 3 failures each consume one retry (executor re-run), the 4th
+        // failure is blocked by the guard and routed to review. Never a 5th
+        // execution (the operator's observed 5-execution bug).
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
+            eprintln!("skipping: cannot connect to {url}");
+            return;
+        };
+        let data_dir = temp_data_dir_review("r3", 3);
+        let task_id = format!("rv-r3-{}", std::process::id());
+        let parent = parent_thread(
+            setup(&pool, &task_id, Some("test-wf"), Some("running")).await,
+            task_id.clone(),
+            Some("running".to_string()),
+        );
+        // Failures 1-3: budget remains (reruns 0,1,2 + 1 < 4) -> re-run.
+        let mut prev = parent.id;
+        for i in 1..=3 {
+            let cur = parent_thread(prev, task_id.clone(), Some("running".to_string()));
+            let new_id = engine_transition(
+                &pool,
+                data_dir.to_str().unwrap(),
+                &cur,
+                RerunKind::FailTool {
+                    step: "running".to_string(),
+                },
+            )
+            .await
+            .expect("engine_transition should succeed")
+            .unwrap_or_else(|| panic!("failure {i} must consume a retry via an executor re-run"));
+            let step: String = sql_forge!(
+                scalar String,
+                "SELECT workflow_step FROM threads WHERE id = :new_id",
+                ( :new_id = new_id )
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("fetch rerun thread step");
+            assert_eq!(step, "running", "failure {i} must re-run the executor step");
+            prev = new_id;
+        }
+        assert_eq!(task_status(&pool, &task_id).await, "running");
+
+        // Failure 4 (the 3rd re-run thread fails): reruns 3 + 1 >= 4 -> the
+        // guard converts the rework to review - no 5th executor execution.
+        let parent4 = parent_thread(prev, task_id.clone(), Some("running".to_string()));
+        let review_id = engine_transition(
+            &pool,
+            data_dir.to_str().unwrap(),
+            &parent4,
+            RerunKind::FailTool {
+                step: "running".to_string(),
+            },
+        )
+        .await
+        .expect("engine_transition should succeed")
+        .expect("failure 4 must route to review, never a 5th execution");
+        let step: String = sql_forge!(
+            scalar String,
+            "SELECT workflow_step FROM threads WHERE id = :review_id",
+            ( :review_id = review_id )
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("fetch review thread step");
+        assert_eq!(
+            step, "review",
+            "the 4th failure must become a review thread"
+        );
+        assert_eq!(task_status(&pool, &task_id).await, "review");
+        let running: i64 = sql_forge!(
+            scalar i64,
+            "SELECT count(*) FROM threads WHERE task_id = :task_id AND workflow_step = 'running'",
+            ( :task_id = &task_id )
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count executor threads");
+        assert_eq!(
+            running, 4,
+            "retries 3: at most 4 executor executions (initial + 3 retries), never 5"
+        );
+
+        cleanup(&pool, &task_id, &[parent.id, review_id]).await;
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live DATABASE_URL"]
+    async fn fail_tool_blocked_at_exhaustion_still_blocks() {
+        // Guard priority (operator 2026-09-23): at exhaustion a fail_thread
+        // -> running rework is converted to review, but an EXPLICIT
+        // fail_thread -> blocked still ends the task blocked (boundedness).
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
+            eprintln!("skipping: cannot connect to {url}");
+            return;
+        };
+        let data_dir = temp_data_dir_review("gb", 1);
+        let task_id = format!("rv-gb-{}", std::process::id());
+        let parent = parent_thread(
+            setup(&pool, &task_id, Some("test-wf"), Some("running")).await,
+            task_id.clone(),
+            Some("running".to_string()),
+        );
+        // Failure 1: budget remains (reruns 0 + 1 < 2) -> re-run.
+        let r2 = engine_transition(
+            &pool,
+            data_dir.to_str().unwrap(),
+            &parent,
+            RerunKind::FailTool {
+                step: "running".to_string(),
+            },
+        )
+        .await
+        .expect("engine_transition should succeed")
+        .expect("failure 1 must re-run the executor step");
+        // Failure 2: explicit fail_thread -> blocked at the limit. The guard
+        // does NOT apply (no re-run requested) - the task ends blocked.
+        let parent2 = parent_thread(r2, task_id.clone(), Some("running".to_string()));
+        let result = engine_transition(
+            &pool,
+            data_dir.to_str().unwrap(),
+            &parent2,
+            RerunKind::FailTool {
+                step: "blocked".to_string(),
+            },
+        )
+        .await
+        .expect("engine_transition should succeed");
+        assert_eq!(result, None, "explicit blocked must not create a thread");
+        assert_eq!(
+            task_status(&pool, &task_id).await,
+            "blocked",
+            "explicit fail_thread -> blocked ends the task blocked"
+        );
+
+        cleanup(&pool, &task_id, &[parent.id, r2]).await;
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
@@ -3220,8 +3489,8 @@ mod tests_fail_tool_lifecycle {
         .execute(pool)
         .await;
         sql_forge!(
-                "INSERT INTO kanban_tasks (id, title, body, status, priority, channel_id, profile, position, template, plan, workflow_id)
-                 VALUES (:task_id, 'lifecycle', '', 'running', 1, 'kanban', 'test', 0, NULL, false, NULL)",
+                "INSERT INTO kanban_tasks (id, title, body, status, priority, channel_id, profile, position, template, plan, workflow_id, board)
+                 VALUES (:task_id, 'lifecycle', '', 'running', 1, 'kanban', 'test', 0, NULL, false, NULL, 'main')",
                 ( :task_id = task_id )
             )
             .execute(pool)
