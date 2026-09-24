@@ -278,6 +278,18 @@ impl HeaderValue {
             },
         }
     }
+
+    /// The request-time context this value needs, for diagnostics: `channel`,
+    /// `profile`, or `literal` for a value that always resolves.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            HeaderValue::Literal(_) => "literal",
+            HeaderValue::Typed { kind } => match kind {
+                HeaderKind::Channel => "channel",
+                HeaderKind::Profile => "profile",
+            },
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -635,11 +647,52 @@ pub fn resolve_header_specs(
 ) -> Vec<(String, String)> {
     specs
         .iter()
-        .filter_map(|(name, spec)| {
-            spec.resolve(channel_name, profile_name)
-                .map(|value| (name.clone(), value))
+        .filter_map(|(name, spec)| match spec.resolve(channel_name, profile_name) {
+            // A resolved, non-blank value is attached as-is.
+            Some(value) if !value.trim().is_empty() => Some((name.clone(), value)),
+            // A typed value that resolved to an EMPTY string (e.g. a channel
+            // whose row could not be looked up) must never be sent: an empty
+            // header is indistinguishable from a missing one upstream, so a
+            // provider that requires it would reject the request. Omit it -
+            // but never silently, or the failure is undiagnosable.
+            Some(_) => {
+                tracing::warn!(
+                    "[llm] custom header '{}' resolved to an empty value; \
+                     omitting it from the outgoing request",
+                    name,
+                );
+                None
+            }
+            // A typed value with no request context at all: the header cannot
+            // be attached. Omitting a header a provider requires breaks the
+            // request, so this is logged too (literals always resolve here).
+            None => {
+                tracing::warn!(
+                    "[llm] custom header '{}' needs a {} context that is \
+                     unavailable in this request path; omitting it",
+                    name,
+                    spec.kind_name(),
+                );
+                None
+            }
         })
         .collect()
+}
+
+/// Pick the channel name a typed `channel` header must resolve to for a thread.
+///
+/// The channel row for a thread can be missing (channels.yml renamed/rebound
+/// since the thread was created), which yields an EMPTY channel name and,
+/// before the 2026-09-24 fix, a blank required header - indistinguishable
+/// upstream from a missing header (OpenCode Go answers `400 MissingSessionID`).
+/// A channel's id IS its channels.yml key (== its name), so the thread's own
+/// `channel_id` is the correct, always-available fallback.
+pub fn header_channel_name(channel_name: &str, thread_channel_id: &str) -> String {
+    if channel_name.trim().is_empty() {
+        thread_channel_id.to_string()
+    } else {
+        channel_name.to_string()
+    }
 }
 
 /// Resolve the custom HTTP headers a request to (provider, model) must carry:
@@ -989,6 +1042,84 @@ providers:
                 kind: crate::models_yaml::HeaderKind::Profile
             }
         );
+    }
+
+    /// Regression (2026-09-24): a typed `channel` header must always leave as
+    /// the channel NAME, and an unresolved/empty value must be OMITTED (never
+    /// sent blank). A blank/absent `x-opencode-session` is what made OpenCode Go
+    /// answer 400 MissingSessionID.
+    #[test]
+    fn test_resolve_header_specs_never_emits_blank_and_always_names_the_channel() {
+        let specs = vec![
+            (
+                "x-opencode-session".to_string(),
+                HeaderValue::Typed {
+                    kind: HeaderKind::Channel,
+                },
+            ),
+            (
+                "x-profile".to_string(),
+                HeaderValue::Typed {
+                    kind: HeaderKind::Profile,
+                },
+            ),
+            (
+                "x-literal".to_string(),
+                HeaderValue::Literal("fixed".into()),
+            ),
+            (
+                "x-blank-literal".to_string(),
+                HeaderValue::Literal("   ".into()),
+            ),
+        ];
+
+        // Full context: the channel header carries the channel name.
+        assert_eq!(
+            resolve_header_specs(&specs, Some("omnidev"), Some("omni")),
+            vec![
+                ("x-opencode-session".to_string(), "omnidev".to_string()),
+                ("x-profile".to_string(), "omni".to_string()),
+                ("x-literal".to_string(), "fixed".to_string()),
+            ]
+        );
+
+        // No context (global/planning client): the typed headers are dropped
+        // instead of being sent empty; literals still pass through.
+        assert_eq!(
+            resolve_header_specs(&specs, None, None),
+            vec![("x-literal".to_string(), "fixed".to_string())]
+        );
+
+        // An EMPTY channel name resolves to an empty value: it must be dropped,
+        // not turned into an empty `x-opencode-session` header.
+        assert_eq!(
+            resolve_header_specs(&specs, Some(""), Some("omni")),
+            vec![
+                ("x-profile".to_string(), "omni".to_string()),
+                ("x-literal".to_string(), "fixed".to_string()),
+            ]
+        );
+
+        // Same for a whitespace-only name.
+        assert_eq!(
+            resolve_header_specs(&specs, Some("  "), Some("omni")),
+            vec![
+                ("x-profile".to_string(), "omni".to_string()),
+                ("x-literal".to_string(), "fixed".to_string()),
+            ]
+        );
+    }
+
+    /// Regression (2026-09-24): the channel name used for typed `channel`
+    /// headers must never be empty, even when the channel row is missing.
+    #[test]
+    fn test_header_channel_name_falls_back_to_thread_channel_id() {
+        assert_eq!(header_channel_name("omnidev", "omnidev"), "omnidev");
+        // Channel row missing / unknown -> the thread's channel_id is the name.
+        assert_eq!(header_channel_name("", "omnidev"), "omnidev");
+        assert_eq!(header_channel_name("   ", "omnidev"), "omnidev");
+        // A known row wins over the id (they are normally identical).
+        assert_eq!(header_channel_name("renamed", "old-key"), "renamed");
     }
 
     #[test]

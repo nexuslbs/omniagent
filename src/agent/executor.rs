@@ -110,6 +110,12 @@ pub async fn process_thread(
         .await?
         .unwrap_or_default();
 
+    // Name used for typed `channel` provider headers: the channel row's name
+    // with the thread's own `channel_id` as fallback, so a required header can
+    // never go out blank (see `models_yaml::header_channel_name`).
+    let header_channel_name =
+        crate::models_yaml::header_channel_name(&channel.name, &thread.channel_id);
+
     let per_thread_llm = {
         let base_url = crate::llm::resolve_default_base_url(&provider_name_val);
         // Effective API mode: models.yml model_config.<model>.api_mode first,
@@ -147,7 +153,7 @@ pub async fn process_thread(
             &cfg.ctx.data_dir,
             &provider_name_val,
             &model_name_val,
-            Some(channel.name.as_str()),
+            Some(header_channel_name.as_str()),
             Some(profile_name.as_str()),
         );
 
