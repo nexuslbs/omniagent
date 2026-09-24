@@ -324,6 +324,7 @@ pub(crate) async fn handle_response(
                 metadata: serde_json::json!({
                     "context": evidence_metadata["context"],
                     "grounding": evidence_metadata["grounding"],
+                    "prompt_accounting": evidence_metadata["prompt_accounting"],
                 }),
                 embedding: None,
                 summary_text: None,
@@ -380,6 +381,7 @@ pub(crate) async fn handle_response(
             metadata: serde_json::json!({
                 "context": evidence_metadata["context"],
                 "grounding": evidence_metadata["grounding"],
+                "prompt_accounting": evidence_metadata["prompt_accounting"],
             }),
             embedding: None,
             summary_text: None,
