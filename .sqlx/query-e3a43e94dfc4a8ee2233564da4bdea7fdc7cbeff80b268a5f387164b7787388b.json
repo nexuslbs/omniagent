@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            workflow_state,\n            TO_CHAR(NOW() AT TIME ZONE 'UTC',\n                    'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"')\n                AS now_utc\n        FROM kanban_tasks\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "workflow_state",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "workflow_state"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "now_utc",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      true,
+      null
+    ]
+  },
+  "hash": "e3a43e94dfc4a8ee2233564da4bdea7fdc7cbeff80b268a5f387164b7787388b"
+}

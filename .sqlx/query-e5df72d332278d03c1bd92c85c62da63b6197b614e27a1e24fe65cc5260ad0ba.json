@@ -1,0 +1,44 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            COUNT(*) FILTER (WHERE th.workflow_step = 'running') AS executor,\n            COUNT(*) FILTER (WHERE th.workflow_step = 'testing') AS tester,\n            COUNT(*) FILTER (WHERE th.workflow_step = 'review')  AS reviewer,\n            MAX(kt.workflow_state ->> 'executions_reset_at')     AS executions_reset_at\n        FROM threads th\n        JOIN kanban_tasks kt ON kt.id = th.task_id\n        WHERE th.task_id = $1\n          AND th.created_at >= COALESCE(\n                CASE\n                  WHEN (kt.workflow_state ->> 'executions_reset_at')\n                       ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'\n                  THEN (kt.workflow_state ->> 'executions_reset_at')::timestamptz\n                END,\n                '-infinity'::timestamptz\n              )\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "executor",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "tester",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "reviewer",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "executions_reset_at",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "e5df72d332278d03c1bd92c85c62da63b6197b614e27a1e24fe65cc5260ad0ba"
+}

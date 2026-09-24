@@ -646,7 +646,7 @@ fn test_kanban_reset_workflow_executions_is_observable() {
         .post(format!("{}/kanban/tasks", BASE))
         .json(&serde_json::json!({
             "title": format!("reset-executions-{}", std::process::id()),
-            "board": "workstation",
+            "board": "plain",
             "status": "backlog",
         }))
         .send()
