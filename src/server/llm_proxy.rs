@@ -23,7 +23,8 @@ pub struct LlmChatRequest {
     pub temperature: f32,
     /// Optional request context used to resolve typed headers declared for
     /// this provider in models.yml (e.g. `{ type: channel }`). When omitted,
-    /// typed headers cannot be resolved and are skipped.
+    /// a typed header resolves to the `fallback` value it declares (if any)
+    /// and is skipped only when it has no usable value at all.
     #[serde(default)]
     pub channel: Option<String>,
     #[serde(default)]

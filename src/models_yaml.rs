@@ -233,7 +233,7 @@ pub struct ModelConfig {
 ///
 /// ```yaml
 /// headers:
-///   x-opencode-session: { type: channel }
+///   x-opencode-session: { type: channel, fallback: omniagent }
 ///   x-custom-flag: "some literal"
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -245,6 +245,15 @@ pub enum HeaderValue {
     Typed {
         #[serde(rename = "type")]
         kind: HeaderKind,
+        /// Value used when the typed context is unavailable in this request
+        /// path (no channel/profile in scope) or resolves to empty. Without
+        /// it such a header is omitted, and a provider that REQUIRES it
+        /// answers the request as if the header were missing (OpenCode Go:
+        /// `400 MissingSessionID`); with it the header is always sent.
+        /// Optional and provider-agnostic: core only resolves what the
+        /// config declares.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fallback: Option<String>,
     },
 }
 
@@ -263,8 +272,13 @@ impl HeaderValue {
     ///
     /// Literal values always resolve. `channel`/`profile` typed values need
     /// the channel/profile name of the running thread; when that context is
-    /// absent they cannot be resolved and `None` is returned (the caller then
-    /// simply omits the header).
+    /// absent, or resolves to an empty/whitespace string, the configured
+    /// `fallback` is used, and only without one is `None` returned (the
+    /// caller then omits the header). A provider that REQUIRES a header
+    /// treats a missing one as an error (OpenCode Go: `400
+    /// MissingSessionID`), so `fallback` is how a deployment keeps such a
+    /// header on EVERY request path (thread, global/non-thread client,
+    /// proxy call without a channel).
     pub fn resolve(
         &self,
         channel_name: Option<&str>,
@@ -272,10 +286,23 @@ impl HeaderValue {
     ) -> Option<String> {
         match self {
             HeaderValue::Literal(value) => Some(value.clone()),
-            HeaderValue::Typed { kind } => match kind {
-                HeaderKind::Channel => channel_name.map(str::to_string),
-                HeaderKind::Profile => profile_name.map(str::to_string),
-            },
+            HeaderValue::Typed { kind, fallback } => {
+                let resolved = match kind {
+                    HeaderKind::Channel => channel_name.map(str::to_string),
+                    HeaderKind::Profile => profile_name.map(str::to_string),
+                };
+                match resolved {
+                    Some(value) if !value.trim().is_empty() => Some(value),
+                    // Missing/blank context: a usable fallback keeps the
+                    // header present; without one the old behaviour is kept
+                    // (None without context, the blank value with one) and
+                    // `resolve_header_specs` omits it loudly.
+                    _ => fallback
+                        .clone()
+                        .filter(|f| !f.trim().is_empty())
+                        .or(resolved),
+                }
+            }
         }
     }
 
@@ -284,7 +311,7 @@ impl HeaderValue {
     pub fn kind_name(&self) -> &'static str {
         match self {
             HeaderValue::Literal(_) => "literal",
-            HeaderValue::Typed { kind } => match kind {
+            HeaderValue::Typed { kind, .. } => match kind {
                 HeaderKind::Channel => "channel",
                 HeaderKind::Profile => "profile",
             },
@@ -647,35 +674,38 @@ pub fn resolve_header_specs(
 ) -> Vec<(String, String)> {
     specs
         .iter()
-        .filter_map(|(name, spec)| match spec.resolve(channel_name, profile_name) {
-            // A resolved, non-blank value is attached as-is.
-            Some(value) if !value.trim().is_empty() => Some((name.clone(), value)),
-            // A typed value that resolved to an EMPTY string (e.g. a channel
-            // whose row could not be looked up) must never be sent: an empty
-            // header is indistinguishable from a missing one upstream, so a
-            // provider that requires it would reject the request. Omit it -
-            // but never silently, or the failure is undiagnosable.
-            Some(_) => {
-                tracing::warn!(
-                    "[llm] custom header '{}' resolved to an empty value; \
+        .filter_map(
+            |(name, spec)| match spec.resolve(channel_name, profile_name) {
+                // A resolved, non-blank value is attached as-is.
+                Some(value) if !value.trim().is_empty() => Some((name.clone(), value)),
+                // A typed value that resolved to an EMPTY string (e.g. a channel
+                // whose row could not be looked up) must never be sent: an empty
+                // header is indistinguishable from a missing one upstream, so a
+                // provider that requires it would reject the request. Omit it -
+                // but never silently, or the failure is undiagnosable.
+                Some(_) => {
+                    tracing::warn!(
+                        "[llm] custom header '{}' resolved to an empty value; \
                      omitting it from the outgoing request",
-                    name,
-                );
-                None
-            }
-            // A typed value with no request context at all: the header cannot
-            // be attached. Omitting a header a provider requires breaks the
-            // request, so this is logged too (literals always resolve here).
-            None => {
-                tracing::warn!(
-                    "[llm] custom header '{}' needs a {} context that is \
-                     unavailable in this request path; omitting it",
-                    name,
-                    spec.kind_name(),
-                );
-                None
-            }
-        })
+                        name,
+                    );
+                    None
+                }
+                // A typed value with no request context at all: the header cannot
+                // be attached. Omitting a header a provider requires breaks the
+                // request, so this is logged too (literals always resolve here).
+                None => {
+                    tracing::warn!(
+                        "[llm] custom header '{}' needs a {} context that is \
+                     unavailable in this request path and no fallback is \
+                     configured; omitting it",
+                        name,
+                        spec.kind_name(),
+                    );
+                    None
+                }
+            },
+        )
         .collect()
 }
 
@@ -1031,7 +1061,8 @@ providers:
         assert_eq!(
             chan,
             crate::models_yaml::HeaderValue::Typed {
-                kind: crate::models_yaml::HeaderKind::Channel
+                kind: crate::models_yaml::HeaderKind::Channel,
+                fallback: None,
             }
         );
         let prof: crate::models_yaml::HeaderValue =
@@ -1039,7 +1070,8 @@ providers:
         assert_eq!(
             prof,
             crate::models_yaml::HeaderValue::Typed {
-                kind: crate::models_yaml::HeaderKind::Profile
+                kind: crate::models_yaml::HeaderKind::Profile,
+                fallback: None,
             }
         );
     }
@@ -1055,12 +1087,14 @@ providers:
                 "x-opencode-session".to_string(),
                 HeaderValue::Typed {
                     kind: HeaderKind::Channel,
+                    fallback: None,
                 },
             ),
             (
                 "x-profile".to_string(),
                 HeaderValue::Typed {
                     kind: HeaderKind::Profile,
+                    fallback: None,
                 },
             ),
             (
@@ -1127,9 +1161,11 @@ providers:
         let literal = HeaderValue::Literal("fixed".into());
         let channel = HeaderValue::Typed {
             kind: HeaderKind::Channel,
+            fallback: None,
         };
         let profile = HeaderValue::Typed {
             kind: HeaderKind::Profile,
+            fallback: None,
         };
         assert_eq!(
             literal.resolve(Some("main"), Some("omni")),
@@ -1156,12 +1192,14 @@ providers:
                 "x-chan".to_string(),
                 HeaderValue::Typed {
                     kind: HeaderKind::Channel,
+                    fallback: None,
                 },
             ),
             (
                 "x-prof".to_string(),
                 HeaderValue::Typed {
                     kind: HeaderKind::Profile,
+                    fallback: None,
                 },
             ),
         ];
@@ -1176,6 +1214,119 @@ providers:
         );
         let no_ctx = crate::models_yaml::resolve_header_specs(&specs, None, None);
         assert_eq!(no_ctx, vec![("x-static".to_string(), "v".to_string())]);
+    }
+
+    /// Regression (2026-09-24, reopened): a header a provider REQUIRES must
+    /// never disappear on a path that has no channel/profile in scope. The
+    /// config declares a `fallback`; core stays provider-agnostic and only
+    /// resolves what the config declares.
+    #[test]
+    fn test_typed_header_fallback_used_when_context_is_missing_or_blank() {
+        let with_fb = HeaderValue::Typed {
+            kind: HeaderKind::Channel,
+            fallback: Some("omniagent".into()),
+        };
+        // No context at all: global/non-thread client, proxy call without a
+        // channel, planning/summary client built outside a thread.
+        assert_eq!(with_fb.resolve(None, None), Some("omniagent".into()));
+        // Blank context: the channel row could not be resolved.
+        assert_eq!(with_fb.resolve(Some(""), None), Some("omniagent".into()));
+        assert_eq!(with_fb.resolve(Some("   "), None), Some("omniagent".into()));
+        // A real context always wins over the fallback.
+        assert_eq!(with_fb.resolve(Some("main"), None), Some("main".into()));
+        // No fallback -> previous behaviour (omitted, never sent blank).
+        let no_fb = HeaderValue::Typed {
+            kind: HeaderKind::Channel,
+            fallback: None,
+        };
+        assert_eq!(no_fb.resolve(None, None), None);
+        assert_eq!(no_fb.resolve(Some(""), None), Some("".into()));
+        // A blank fallback is not a value: the header is still omitted.
+        let blank_fb = HeaderValue::Typed {
+            kind: HeaderKind::Channel,
+            fallback: Some("  ".into()),
+        };
+        assert_eq!(blank_fb.resolve(None, None), None);
+        assert_eq!(
+            resolve_header_specs(&[("x-session".to_string(), with_fb)], None, None),
+            vec![("x-session".to_string(), "omniagent".to_string())]
+        );
+        assert_eq!(
+            resolve_header_specs(&[("x-session".to_string(), no_fb)], None, None),
+            Vec::<(String, String)>::new()
+        );
+    }
+
+    /// The fallback is part of the config schema (models.yml and provider
+    /// plugin config headers share the same spec) and reaches the outgoing
+    /// request through the ONE shared resolver.
+    #[test]
+    fn test_typed_header_fallback_parses_from_config_and_reaches_the_client() {
+        let spec: HeaderValue =
+            serde_json::from_value(serde_json::json!({"type": "channel", "fallback": "omniagent"}))
+                .unwrap();
+        assert_eq!(
+            spec,
+            HeaderValue::Typed {
+                kind: HeaderKind::Channel,
+                fallback: Some("omniagent".into()),
+            }
+        );
+        // Backwards compatible: a spec without the key parses as before.
+        let older: HeaderValue =
+            serde_json::from_value(serde_json::json!({"type": "channel"})).unwrap();
+        assert_eq!(
+            older,
+            HeaderValue::Typed {
+                kind: HeaderKind::Channel,
+                fallback: None,
+            }
+        );
+
+        let dir = std::env::temp_dir().join(format!(
+            "omnidev-modelsyml-header-fallback-{}",
+            std::process::id()
+        ));
+        let cfg_dir = dir.join("config");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join("models.yml"),
+            r#"
+providers:
+  opencode-go:
+    plugin: false
+    api_mode: "chat_completions"
+    headers:
+      x-opencode-session: { type: channel, fallback: omniagent }
+      x-literal: "fixed"
+"#,
+        )
+        .unwrap();
+
+        // The real failing case: no channel context at all -> the required
+        // header is STILL sent (its presence is what the gateway checks).
+        assert_eq!(
+            resolve_extra_headers(dir.to_str().unwrap(), "opencode-go", "m", None, None),
+            vec![
+                ("x-literal".to_string(), "fixed".to_string()),
+                ("x-opencode-session".to_string(), "omniagent".to_string()),
+            ]
+        );
+        // With a channel in scope the channel name wins.
+        assert_eq!(
+            resolve_extra_headers(
+                dir.to_str().unwrap(),
+                "opencode-go",
+                "m",
+                Some("omnidev"),
+                None
+            ),
+            vec![
+                ("x-literal".to_string(), "fixed".to_string()),
+                ("x-opencode-session".to_string(), "omnidev".to_string()),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

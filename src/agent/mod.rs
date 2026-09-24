@@ -99,10 +99,12 @@ impl Agent {
         };
         let provider_name = default_provider.0.clone();
         // Global (non-thread) client: no channel/profile request context, so
-        // only literal models.yml headers apply (typed channel/profile values
-        // are skipped). Still routed through the shared resolver, so a
-        // code-less (plugin: false) provider receives every header it
-        // declares in models.yml, exactly like the per-thread client.
+        // literal models.yml headers apply plus the `fallback` of any typed
+        // header that declares one (typed channel/profile values with neither
+        // context nor fallback are skipped loudly). Still routed through the
+        // shared resolver, so a code-less (plugin: false) provider receives
+        // every header it declares in models.yml, exactly like the per-thread
+        // client.
         let extra_headers = crate::models_yaml::resolve_extra_headers(
             &data_dir,
             &provider_name,
@@ -123,7 +125,7 @@ impl Agent {
                 .get(&provider_name)
                 .map(|m| m.supports_reasoning)
                 .unwrap_or(false),
-            // Resolved above: literal-only models.yml headers for this provider.
+            // Resolved above: literal (and typed-fallback) models.yml headers.
             extra_headers,
         };
         let llm = Arc::new(LLMClient::new(llm_config));
