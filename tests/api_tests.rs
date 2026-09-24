@@ -683,7 +683,11 @@ fn test_kanban_reset_workflow_executions_is_observable() {
         .get(format!("{}/kanban/tasks/{}", BASE, task_id))
         .send()
         .unwrap();
-    assert_eq!(resp.status(), 200, "GET /kanban/tasks/{{id}} should succeed");
+    assert_eq!(
+        resp.status(),
+        200,
+        "GET /kanban/tasks/{{id}} should succeed"
+    );
     let json: serde_json::Value = resp.json().unwrap();
     let counters = &json["data"]["counters"];
     for role in ["executor", "tester", "reviewer", "executions", "retries"] {
