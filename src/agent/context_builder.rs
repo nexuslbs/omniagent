@@ -573,6 +573,31 @@ mod tests {
     }
 
     #[test]
+    fn all_five_template_kinds_reject_with_kind_label() {
+        // Verification gate: for EACH of the 5 template kinds (kanban task,
+        // hook, schedule task, workflow, channel) an absent template must be
+        // rejected with an actionable error naming the kind, the offending
+        // value and the expected profiles/<profile>/templates/ location.
+        let dir = tmp_dir();
+        for kind in [
+            "kanban task",
+            "hook",
+            "schedule task",
+            "workflow",
+            "channel",
+        ] {
+            let err = load_profile_template(data_dir(&dir), "omni", kind, "nope")
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains(&format!("{kind} template 'nope' not found"))
+                    && err.contains("profiles/omni/templates/nope.md"),
+                "kind {kind:?} -> err: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn template_kind_derivation() {
         let mut thread = Thread {
             id: 1,
