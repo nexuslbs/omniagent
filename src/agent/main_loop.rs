@@ -10,9 +10,7 @@ use crate::db::types::{Channel, Message, MessageNew, Thread};
 use crate::err_msg;
 use crate::error::AppResult;
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient, Usage};
-use crate::mcp::{
-    spill_tool_result, truncate_content, McpToolCall, McpToolResult, DEFAULT_MAX_TOOL_OUTPUT_CHARS,
-};
+use crate::mcp::{spill_tool_result, truncate_content, McpToolCall, McpToolResult};
 use futures::FutureExt;
 use std::time::Duration;
 use tokio::task::JoinSet;
@@ -2644,8 +2642,27 @@ Previous plan:\n{}",
                                 } => {
                                     match result {
                                         Ok(Ok(res)) => {
-                                            let truncated = truncate_content(
-                                                &res.content, DEFAULT_MAX_TOOL_OUTPUT_CHARS);
+                                            // Tool-output cap: apply the configured per-result cap
+                                            // (settings `max_inline_chars`) to backgrounded results
+                                            // too. 0/off disables the cap: keep the full content.
+                                            let truncated = if max_inline_chars == 0 {
+                                                res.content.clone()
+                                            } else if res.content.len() > max_inline_chars {
+                                                tracing::info!(
+                                                    thread_id = tid,
+                                                    knob = "max_inline_chars",
+                                                    value = max_inline_chars,
+                                                    source = crate::agent::config::setting_source_label(
+                                                        "max_inline_chars"
+                                                    ),
+                                                    tool = %bg_tool_name,
+                                                    content_chars = res.content.len(),
+                                                    "tool-output cap fired: truncating backgrounded tool result"
+                                                );
+                                                truncate_content(&res.content, max_inline_chars)
+                                            } else {
+                                                res.content.clone()
+                                            };
                                             bg_registry.set_status(&task_id_bg,
                                                 crate::agent::task_registry::TaskStatus::Completed(
                                                     truncated)).await;
@@ -2694,7 +2711,22 @@ Previous plan:\n{}",
                         // Tool-result spill: oversized results (> max_inline_chars)
                         // are persisted in full to a session-scoped spill file and
                         // replaced inline by a preview + locator so the model can
-                        // recover the full output via filesystem_read.
+                        // recover the full output via filesystem_read. 0/off
+                        // (max_inline_chars == 0) disables the cap: full result
+                        // stays inline, no spill.
+                        if max_inline_chars > 0 && res.content.len() > max_inline_chars {
+                            tracing::info!(
+                                thread_id = tid,
+                                knob = "max_inline_chars",
+                                value = max_inline_chars,
+                                source = crate::agent::config::setting_source_label(
+                                    "max_inline_chars"
+                                ),
+                                tool = %tool_name,
+                                content_chars = res.content.len(),
+                                "tool-output cap fired: spilling oversized tool result"
+                            );
+                        }
                         let spilled = spill_tool_result(
                             &res.content,
                             tid,

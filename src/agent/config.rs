@@ -1,6 +1,6 @@
 use crate::agent::plugin_manager::PluginManager;
 use crate::error::{AppResult, ErrorContext};
-use crate::mcp::AppContext;
+use crate::mcp::{AppContext, DEFAULT_MAX_TOOL_OUTPUT_CHARS};
 use parking_lot::RwLock;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -273,6 +273,26 @@ pub fn setting_source_label(key: &str) -> &'static str {
         "code default (NOT configured by the operator)"
     }
 }
+
+/// Parse the `max_inline_chars` setting value (the per-result tool-output
+/// cap, in chars).
+///
+/// Semantics (documented in the operator settings reference):
+/// - `0`, `off`, `false`, `none`, `disabled` (trimmed, case-insensitive) or an
+///   empty value DISABLE the cap: the full tool result stays inline and is
+///   never spilled (`spill_tool_result` returns the content unchanged),
+/// - any positive integer is the cap in chars, used verbatim (no min/clamp -
+///   the operator's value is never narrowed),
+/// - an unparseable value falls back to the code default
+///   (`DEFAULT_MAX_TOOL_OUTPUT_CHARS` = 50000) so a typo never silently
+///   disables the cap.
+pub fn parse_max_inline_chars(raw: &str) -> usize {
+    let t = raw.trim().to_ascii_lowercase();
+    if t.is_empty() || matches!(t.as_str(), "0" | "off" | "false" | "none" | "disabled") {
+        return 0;
+    }
+    t.parse().unwrap_or(DEFAULT_MAX_TOOL_OUTPUT_CHARS)
+}
 /// Shared context bundle used by channel_handler and process_thread.
 /// Combines the infrastructure dependencies that are passed to both functions.
 #[derive(Clone)]
@@ -398,7 +418,10 @@ impl AgentConfig {
                 .ctx("PORT must be a valid number")?,
             platform_max_spawn_retries: get("platform_max_spawn_retries", "3").parse().unwrap_or(3),
             max_inline_file_kb: get("max_inline_file_kb", "100").parse().unwrap_or(100),
-            max_inline_chars: get("max_inline_chars", "50000").parse().unwrap_or(50000),
+            max_inline_chars: parse_max_inline_chars(&get(
+                "max_inline_chars",
+                &DEFAULT_MAX_TOOL_OUTPUT_CHARS.to_string(),
+            )),
             spill_dir: get("spill_dir", &format!("{}/data/spill", data_dir)),
             prune_head_chars: get("prune_head_chars", "12000").parse().unwrap_or(12000),
             prune_tail_chars: get("prune_tail_chars", "8000").parse().unwrap_or(8000),
@@ -524,7 +547,10 @@ impl AgentConfig {
                 .ctx("PORT must be a valid number")?,
             platform_max_spawn_retries: get("platform_max_spawn_retries", "3").parse().unwrap_or(3),
             max_inline_file_kb: get("max_inline_file_kb", "100").parse().unwrap_or(100),
-            max_inline_chars: get("max_inline_chars", "50000").parse().unwrap_or(50000),
+            max_inline_chars: parse_max_inline_chars(&get(
+                "max_inline_chars",
+                &DEFAULT_MAX_TOOL_OUTPUT_CHARS.to_string(),
+            )),
             spill_dir: get("spill_dir", &format!("{}/data/spill", data_dir)),
             prune_head_chars: get("prune_head_chars", "12000").parse().unwrap_or(12000),
             prune_tail_chars: get("prune_tail_chars", "8000").parse().unwrap_or(8000),
@@ -708,6 +734,26 @@ mod tests {
             setting_source_label("some_unconfigured_knob"),
             "code default (NOT configured by the operator)"
         );
+    }
+    // ── max_inline_chars parsing (per-result tool-output cap) ───────────────
+
+    #[test]
+    fn test_parse_max_inline_chars_semantics() {
+        // Disabled spellings: 0 / off / false / none / disabled / empty.
+        for raw in ["0", "off", "OFF", "false", "none", "disabled", " 0 ", ""] {
+            assert_eq!(
+                parse_max_inline_chars(raw),
+                0,
+                "expected {raw:?} to disable the cap"
+            );
+        }
+        // Positive integers are used verbatim (no min/clamp).
+        assert_eq!(parse_max_inline_chars("2000"), 2000);
+        assert_eq!(parse_max_inline_chars("50000"), 50_000);
+        // Unparseable values fall back to the code default (never silently
+        // disable the cap because of a typo).
+        assert_eq!(parse_max_inline_chars("abc"), DEFAULT_MAX_TOOL_OUTPUT_CHARS);
+        assert_eq!(parse_max_inline_chars("50k"), DEFAULT_MAX_TOOL_OUTPUT_CHARS);
     }
     // ── from_env helper closure ─────────────────────────────────────────────
     // The 'get' closure used inside from_env() is testable in isolation.

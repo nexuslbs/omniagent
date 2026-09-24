@@ -30,7 +30,10 @@ pub fn truncate_content(content: &str, max_chars: usize) -> String {
     )
 }
 
-/// Default maximum output size for tool results (50K chars).
+/// Default maximum output size for tool results (50K chars). This is the
+/// code default for the operator setting `max_inline_chars`; the effective
+/// cap is read from settings at every tool call, so the operator can change
+/// it at runtime without a restart.
 pub const DEFAULT_MAX_TOOL_OUTPUT_CHARS: usize = 50_000;
 /// Default maximum chars of a tool result kept inline in the `tool-result`
 /// message (settings `max_inline_chars`). Larger results are spilled to
@@ -153,6 +156,9 @@ fn write_spill_file(path: &std::path::Path, content: &str) -> std::io::Result<()
 /// and the returned inline content is a bounded head/tail preview + locator.
 /// Under the threshold the content is returned unchanged. Any write failure
 /// degrades to the classic inline truncation so the message is never lost.
+///
+/// `max_inline_chars == 0` DISABLES the cap (settings `max_inline_chars: 0`
+/// or `off`): the full result is kept inline and never spilled.
 pub fn spill_tool_result(
     content: &str,
     thread_id: i64,
@@ -161,6 +167,13 @@ pub fn spill_tool_result(
     spill_root: &std::path::Path,
     max_inline_chars: usize,
 ) -> SpilledOutput {
+    // Cap disabled: inline the full result, never spill.
+    if max_inline_chars == 0 {
+        return SpilledOutput {
+            inline: content.to_string(),
+            spill_path: None,
+        };
+    }
     if content.len() <= max_inline_chars {
         return SpilledOutput {
             inline: content.to_string(),
@@ -2811,6 +2824,81 @@ mod tests {
         let out = spill_tool_result(&content, 3, "call_ü", "tool", &root, max_inline);
         let p = out.spill_path.expect("spilled");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), content);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ── cap boundary (configurable max_inline_chars) ───────────────────────
+
+    #[test]
+    fn test_spill_boundary_exactly_at_cap_inlines() {
+        // Exactly at the cap: `len() <= cap` -> inline, no spill.
+        let root = spill_test_root("boundary_at");
+        let _ = std::fs::remove_dir_all(&root);
+        let cap = 500;
+        let content = "x".repeat(cap);
+        let out = spill_tool_result(&content, 9, "call_at", "tool", &root, cap);
+        assert_eq!(out.inline, content);
+        assert!(out.spill_path.is_none());
+        assert!(!root.exists(), "exactly-at-cap must not spill");
+    }
+
+    #[test]
+    fn test_spill_boundary_just_over_cap_spills() {
+        let root = spill_test_root("boundary_over");
+        let _ = std::fs::remove_dir_all(&root);
+        let cap = 500;
+        let content = "y".repeat(cap + 1);
+        let out = spill_tool_result(&content, 9, "call_over", "tool", &root, cap);
+        let path = out.spill_path.expect("just-over-cap must spill");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            content,
+            "full fidelity"
+        );
+        assert!(out.inline.contains("[full output: "));
+        assert!(out.inline.contains("omitted"));
+        // Preview head+tail scale with the cap (3/5 + 2/5 = cap); the marker
+        // and locator add a small fixed overhead (bounded in
+        // test_spill_preview_composition_and_bounds).
+        assert!(out.inline.len() < cap + 200);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_spill_disabled_cap_inlines_everything() {
+        // max_inline_chars == 0 (settings `max_inline_chars: 0`/`off`) disables
+        // the cap: full result inline, no spill, no spill dir created.
+        let root = spill_test_root("disabled");
+        let _ = std::fs::remove_dir_all(&root);
+        let huge = "z".repeat(200_000);
+        let out = spill_tool_result(&huge, 77, "call_x", "filesystem_read", &root, 0);
+        assert_eq!(out.inline, huge, "disabled cap inlines the FULL result");
+        assert!(out.spill_path.is_none());
+        assert!(!root.exists(), "disabled cap must never create a spill dir");
+    }
+
+    #[test]
+    fn test_spill_runtime_value_change_honored() {
+        // Simulates a settings reload between tool calls: the SAME content is
+        // inline at cap 50_000 (default) and spilled at cap 2_000 - the caller
+        // reads the current setting per result, so the new value applies
+        // without a restart.
+        let root = spill_test_root("runtime_change");
+        let _ = std::fs::remove_dir_all(&root);
+        let content: String = (0..3000).map(|i| format!("line {i}\n")).collect();
+        // Default cap (50_000): under threshold -> inline.
+        let inline = spill_tool_result(&content, 5, "call_r", "tool", &root, 50_000);
+        assert_eq!(inline.inline, content);
+        assert!(inline.spill_path.is_none());
+        // Operator lowers the cap to 2_000 at runtime: next result spills.
+        let spilled = spill_tool_result(&content, 5, "call_r", "tool", &root, 2_000);
+        let path = spilled.spill_path.expect("lowered cap must spill");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            content,
+            "full fidelity"
+        );
+        assert!(spilled.inline.contains("[full output: "));
         std::fs::remove_dir_all(&root).ok();
     }
 }
