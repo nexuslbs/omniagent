@@ -634,6 +634,11 @@ struct TaskCounters {
     /// Executor attempts beyond the first: `executions - 1` (0 when the task
     /// has no executor attempt yet). Reworks add executor attempts.
     retries: i64,
+    /// UTC timestamp of the task's last workflow-executions reset
+    /// (`workflow_state.executions_reset_at`), when it has one: the counters
+    /// above are measured FROM it, so the dashboard can label them "since".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    executions_reset_at: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -641,6 +646,7 @@ struct TaskCountersRow {
     executor: Option<i64>,
     tester: Option<i64>,
     reviewer: Option<i64>,
+    executions_reset_at: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1062,6 +1068,13 @@ async fn get_task_handler(
 /// that engine counter is resettable (`POST /kanban/tasks/{id}/workflow/
 /// executions/reset`) and is cleared on review for some workflows, so it does
 /// not answer "how much work did this task consume". The thread attempts do.
+///
+/// RESET BASELINE: an explicit reset (the dashboard button, or a dispatch from
+/// `Todo` that hands the task a fresh retry budget) records
+/// `workflow_state.executions_reset_at`; attempts older than it belong to a
+/// previous life and are NOT counted, so the reset is visible as 0 here. An
+/// operator reset that left these numbers unchanged is the reported bug
+/// (2026-09-24). Attempts made after the baseline count normally.
 async fn fetch_task_counters(
     pool: &sqlx::PgPool,
     task_id: &str,
@@ -1070,11 +1083,21 @@ async fn fetch_task_counters(
         TaskCountersRow,
         r#"
         SELECT
-            COUNT(*) FILTER (WHERE workflow_step = 'running') AS executor,
-            COUNT(*) FILTER (WHERE workflow_step = 'testing') AS tester,
-            COUNT(*) FILTER (WHERE workflow_step = 'review')  AS reviewer
-        FROM threads
-        WHERE task_id = :task_id
+            COUNT(*) FILTER (WHERE th.workflow_step = 'running') AS executor,
+            COUNT(*) FILTER (WHERE th.workflow_step = 'testing') AS tester,
+            COUNT(*) FILTER (WHERE th.workflow_step = 'review')  AS reviewer,
+            MAX(kt.workflow_state ->> 'executions_reset_at')     AS executions_reset_at
+        FROM threads th
+        JOIN kanban_tasks kt ON kt.id = th.task_id
+        WHERE th.task_id = :task_id
+          AND th.created_at >= COALESCE(
+                CASE
+                  WHEN (kt.workflow_state ->> 'executions_reset_at')
+                       ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'
+                  THEN (kt.workflow_state ->> 'executions_reset_at')::timestamptz
+                END,
+                '-infinity'::timestamptz
+              )
         "#,
         ( :task_id = task_id )
     )
@@ -1088,6 +1111,7 @@ async fn fetch_task_counters(
         reviewer: row.reviewer.unwrap_or(0),
         executions: executor,
         retries: (executor - 1).max(0),
+        executions_reset_at: row.executions_reset_at.filter(|s| !s.is_empty()),
     })
 }
 
@@ -3226,117 +3250,33 @@ async fn delete_board_handler(
 }
 
 // ---------------------------------------------------------------------------
-// Reset workflow executions (Phase 5)
+// Reset workflow executions
 // ---------------------------------------------------------------------------
 
-/// Strip the `executions` key from a `workflow_state` document.
-/// Returns `None` when the state is absent or not a JSON object.
-fn reset_executions_json(state: Option<&serde_json::Value>) -> Option<serde_json::Value> {
-    let value = state?;
-    let mut obj = value.as_object()?.clone();
-    obj.remove("executions");
-    Some(serde_json::Value::Object(obj))
-}
-
-/// Decide whether a reset is meaningful and compute the cleared state.
-/// A task without a `workflow_id` is a no-op (idempotent reset).
-fn resolve_workflow_reset(
-    workflow_id: &Option<String>,
-    state: &Option<serde_json::Value>,
-) -> (bool, Option<serde_json::Value>) {
-    match workflow_id {
-        None => (false, None),
-        Some(_) => (true, reset_executions_json(state.as_ref())),
-    }
-}
-
-#[derive(FromRow)]
-struct WorkflowResetRow {
-    id: String,
-    workflow_id: Option<String>,
-    board: Option<String>,
-    workflow_state: Option<serde_json::Value>,
-}
-
-#[derive(FromRow)]
-struct WorkflowResetUpdateRow {
-    id: String,
-}
-
+/// POST /kanban/tasks/{id}/workflow/executions/reset
+///
+/// Zero EVERY workflow execution counter of the task (`executor` = running,
+/// `tester` = testing, `reviewer` = review) and record the reset baseline the
+/// task-detail counters are measured from, so the operator's explicit reset is
+/// never a silent no-op: `GET /kanban/tasks/{id}` reports all three at 0 right
+/// after the call, and the next dispatch starts from a FULL retry budget
+/// (`workflow_state.executions` drives the engine's `retries + 1` limit).
+///
+/// Unconditional (a task without a workflow can still carry attempts) and
+/// idempotent. The write itself lives in
+/// [`crate::db::kanban::reset_workflow_executions`].
 async fn reset_workflow_executions_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let row = match sql_forge!(
-        WorkflowResetRow,
-        r#"SELECT id, workflow_id, board, workflow_state
-           FROM kanban_tasks
-           WHERE id = :id"#,
-        ( :id = &id )
-    )
-    .fetch_optional(&state.pool)
-    .await
-    {
-        Ok(row) => row,
-        Err(err) => {
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("failed to load task: {err}"),
-            );
-        }
-    };
-    let row = match row {
-        Some(row) => row,
-        None => return err_json(StatusCode::NOT_FOUND, "task not found"),
-    };
-    // Resolve the task's effective workflow ONCE at load (task → board): a
-    // board task has raw NULL workflow_id but inherits the board's workflow,
-    // so the reset decision must use the RESOLVED workflow_id.
-    let resolved = match crate::resolution::resolve_task_defaults(
-        &state.data_dir,
-        &crate::resolution::TaskFallbackFields {
-            board: row.board.as_deref(),
-            workflow_id: row.workflow_id.as_deref(),
-            channel_id: None,
-            profile: None,
-            plan: None,
-            template: None,
-        },
-    ) {
-        Ok(r) => r,
-        Err(board_err) => {
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("cannot resolve task defaults: {board_err}"),
-            );
-        }
-    };
-    let (should_reset, cleared) =
-        resolve_workflow_reset(&resolved.workflow_id, &row.workflow_state);
-    if !should_reset {
-        return ok_json(serde_json::json!({
-            "reset": false,
-            "message": "task has no workflow assigned; nothing to reset",
-        }));
-    }
-    let cleared = cleared.unwrap_or_else(|| serde_json::json!({}));
-    if let Err(err) = sql_forge!(
-        WorkflowResetUpdateRow,
-        r#"UPDATE kanban_tasks
-           SET workflow_state = :state
-           WHERE id = :id
-           RETURNING id"#,
-        ( :state = &cleared, :id = &id )
-    )
-    .fetch_optional(&state.pool)
-    .await
-    {
-        return err_json(
+    match crate::db::kanban::reset_workflow_executions(&state.pool, &id).await {
+        Ok(true) => ok_json(serde_json::json!({ "reset": true })),
+        Ok(false) => err_json(StatusCode::NOT_FOUND, "task not found"),
+        Err(err) => err_json(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("failed to reset workflow executions: {err}"),
-        );
+        ),
     }
-    ok_json(serde_json::json!({ "reset": true }))
 }
 
 // ---------------------------------------------------------------------------
@@ -3506,26 +3446,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_reset_executions_cleared() {
+    fn test_reset_executions_shared_helper_zeroes_all_steps() {
+        // The reset logic itself lives in `crate::db::kanban`
+        // (`cleared_workflow_state`, unit-tested there); the endpoint is a thin
+        // wrapper over `reset_workflow_executions` so the write path is shared
+        // with the Todo-dispatch reset.
         let state = serde_json::json!({
-            "executions": [{"step": "research", "ok": true}],
+            "executions": {"running": 4, "testing": 3, "review": 9},
             "step_index": 2,
         });
-        let cleared = reset_executions_json(Some(&state)).expect("object in, object out");
-        assert!(
-            cleared.get("executions").is_none(),
-            "executions must be cleared"
+        let cleared =
+            crate::db::kanban::cleared_workflow_state(Some(&state), "2026-09-24T15:20:31.123456Z");
+        assert_eq!(cleared["executions"]["running"], 0);
+        assert_eq!(cleared["executions"]["testing"], 0);
+        assert_eq!(cleared["executions"]["review"], 0);
+        assert_eq!(
+            cleared[crate::db::kanban::EXECUTIONS_RESET_AT_KEY],
+            serde_json::json!("2026-09-24T15:20:31.123456Z"),
+            "the reset baseline drives the counters back to 0"
         );
         assert_eq!(cleared["step_index"], 2, "other state must be preserved");
-    }
-
-    #[test]
-    fn test_reset_executions_idempotent() {
-        let state = serde_json::json!({"executions": [1, 2, 3]});
-        let once = reset_executions_json(Some(&state)).expect("cleared once");
-        let twice = reset_executions_json(Some(&once)).expect("cleared twice");
-        assert_eq!(once, twice);
-        assert!(twice.get("executions").is_none());
     }
 
     #[test]
@@ -3601,16 +3541,15 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_workflow_reset_noop_without_workflow_id() {
-        let state = serde_json::json!({"executions": [1]});
-        let (should, cleared) = resolve_workflow_reset(&None, &Some(state));
-        assert!(!should, "no workflow_id -> no reset");
-        assert!(cleared.is_none());
-
-        // A workflow_id makes the reset meaningful even with absent state.
-        let (should, cleared) = resolve_workflow_reset(&Some("wf-1".to_string()), &None);
-        assert!(should);
-        assert!(cleared.is_none());
+    fn test_reset_has_no_workflow_gate() {
+        // The manual reset is UNCONDITIONAL: a task without a workflow id can
+        // still carry attempts (threads), and its operator reset must never be
+        // a silent no-op. The per-task write is `reset_workflow_executions`.
+        let cleared =
+            crate::db::kanban::cleared_workflow_state(None, "2026-09-24T16:00:00.000000Z");
+        assert_eq!(cleared["executions"]["running"], 0);
+        assert_eq!(cleared["executions"]["testing"], 0);
+        assert_eq!(cleared["executions"]["review"], 0);
     }
 
     #[test]

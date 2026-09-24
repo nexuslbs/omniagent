@@ -448,7 +448,21 @@ pub async fn dispatch_todo_tasks(pool: &PgPool, data_dir: &str) -> AppResult<Dis
             }
         };
 
-    // 3. Start the executor thread via the shared status-dispatch path (the
+    // 3. Dispatch from `Todo` = a FRESH life for the task: reset ALL workflow
+    //    execution counters (executor/tester/reviewer = 0) so a re-queued task
+    //    starts with a full retry budget instead of inheriting the exhausted
+    //    counters of its previous life (operator report 2026-09-24). ONLY this
+    //    path resets: every other transition (retry, rework, re-test, review)
+    //    keeps its current accounting. Best-effort: a reset failure is logged
+    //    and never blocks the dispatch.
+    if let Err(e) = crate::db::kanban::reset_workflow_executions(pool, &picked.id).await {
+        warn!(
+            "[kanban/dispatch] failed to reset workflow executions for task {}: {:?}",
+            picked.id, e
+        );
+    }
+
+    // 3b. Start the executor thread via the shared status-dispatch path (the
     //    same code as status-change dispatch and /redispatch): it skips any
     //    stale active threads, resolves the executor role/template/plan and
     //    creates the thread with workflow_step='running'.

@@ -295,3 +295,179 @@ pub async fn delete_old_kanban_history(
     .await?;
     Ok(result.rows_affected())
 }
+
+// ---------------------------------------------------------------------------
+// Workflow executions reset (executor/tester/reviewer = 0)
+// ---------------------------------------------------------------------------
+
+/// `workflow_state` key recording WHEN the task's workflow execution counters
+/// were last reset (UTC, `YYYY-MM-DDTHH:MM:SS.ffffffZ`).
+///
+/// It is the baseline the task-detail counters use: every attempt older than
+/// it belongs to a previous life of the task and is no longer counted, so a
+/// reset is visible as 0 in the API/dashboard instead of only in the engine.
+pub const EXECUTIONS_RESET_AT_KEY: &str = "executions_reset_at";
+
+/// Pure helper: the `workflow_state` document AFTER a full executions reset.
+///
+/// Every per-step counter the workflow engine keeps in
+/// `workflow_state.executions` is written back as an explicit ZERO
+/// (`running` -> executor, `testing` -> tester, `review` -> reviewer): a reset
+/// must be observable as 0 in the DB/API, not as a removed key. The reset
+/// baseline (`executions_reset_at`) is recorded alongside, and every other key
+/// of the document is preserved.
+///
+/// A `workflow_state` that is absent (or not a JSON object) yields a document
+/// holding just the zeroed executions + the baseline.
+pub fn cleared_workflow_state(
+    state: Option<&serde_json::Value>,
+    reset_at: &str,
+) -> serde_json::Value {
+    let mut obj = state
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    obj.insert(
+        "executions".to_string(),
+        serde_json::json!({ "running": 0, "testing": 0, "review": 0 }),
+    );
+    obj.insert(
+        EXECUTIONS_RESET_AT_KEY.to_string(),
+        serde_json::Value::String(reset_at.to_string()),
+    );
+    serde_json::Value::Object(obj)
+}
+
+/// Reset ALL workflow execution counters of one kanban task.
+///
+/// The engine's retry budget lives in `workflow_state.executions`
+/// (`fail_thread::execution_count`: limit = `retries + 1` TOTAL executions),
+/// so zeroing it hands the task a FULL retry budget again. Used by:
+///
+/// - `POST /kanban/tasks/{id}/workflow/executions/reset` (the dashboard
+///   "Reset workflow execution" button), and
+/// - the dispatcher, when a task is dispatched FROM `Todo`: a re-queued task
+///   starts a fresh life instead of inheriting the exhausted counters of its
+///   previous one (`kanban_dispatch::dispatch_todo_tasks`).
+///
+/// Returns `Ok(false)` when the task does not exist (nothing written); the
+/// call is idempotent, so a repeated reset is harmless.
+pub async fn reset_workflow_executions(pool: &PgPool, task_id: &str) -> AppResult<bool> {
+    #[derive(sqlx::FromRow)]
+    struct ResetRow {
+        workflow_state: Option<serde_json::Value>,
+        /// DB clock, in the same format as `threads.created_at`, so the
+        /// baseline and the attempt timestamps share one clock. `Option`
+        /// because the driver reports a computed column as nullable.
+        now_utc: Option<String>,
+    }
+
+    let row = sql_forge!(
+        ResetRow,
+        // NOTE: the TO_CHAR format is built with CHR(58) instead of literal
+        // colons: a ':' in the SQL text is read as a bind-parameter marker by
+        // the `sql_forge!` macro (`:MI`, `:SS`). Same trick as the created_at
+        // projections elsewhere in this crate.
+        r#"
+        SELECT
+            workflow_state,
+            TO_CHAR(NOW() AT TIME ZONE 'UTC',
+                    'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"')
+                AS now_utc
+        FROM kanban_tasks
+        WHERE id = :id
+        "#,
+        ( :id = task_id )
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(false);
+    };
+
+    // The baseline must be a REAL timestamp: without it the counters would not
+    // restart (the filter would treat it as "no baseline"). Cannot happen with
+    // `NOW()`, so fail loudly instead of writing a useless reset.
+    let reset_at = match row.now_utc.as_deref() {
+        Some(v) if !v.is_empty() => v.to_string(),
+        _ => {
+            return Err(err_str!(
+                "cannot read the database clock for the executions reset of task '{}'",
+                task_id
+            ))
+        }
+    };
+
+    let cleared = cleared_workflow_state(row.workflow_state.as_ref(), &reset_at);
+
+    sql_forge!(
+        r#"
+        UPDATE kanban_tasks
+        SET workflow_state = :state,
+            updated_at = NOW()
+        WHERE id = :id
+        "#,
+        ( :state = &cleared, :id = task_id )
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(true)
+}
+
+#[cfg(test)]
+mod executions_reset_tests {
+    use super::*;
+
+    #[test]
+    fn cleared_workflow_state_zeroes_every_step_counter() {
+        let state = serde_json::json!({
+            "executions": {"running": 3, "testing": 2, "review": 5},
+            "step_index": 4,
+        });
+        let cleared = cleared_workflow_state(Some(&state), "2026-09-24T15:20:31.123456Z");
+
+        // The three engine counters come back as an EXPLICIT zero: the reset
+        // must be observable in the DB row, not by an absent key.
+        assert_eq!(cleared["executions"]["running"], 0);
+        assert_eq!(cleared["executions"]["testing"], 0);
+        assert_eq!(cleared["executions"]["review"], 0);
+        // The baseline makes the (thread-derived) dashboard counters restart.
+        assert_eq!(
+            cleared[EXECUTIONS_RESET_AT_KEY],
+            serde_json::json!("2026-09-24T15:20:31.123456Z")
+        );
+        // Unrelated workflow state survives.
+        assert_eq!(cleared["step_index"], 4);
+    }
+
+    #[test]
+    fn cleared_workflow_state_handles_absent_state_and_is_idempotent() {
+        // No workflow_state at all (or a non-object one): still a valid reset.
+        let cleared = cleared_workflow_state(None, "2026-09-24T15:20:31.123456Z");
+        assert_eq!(cleared["executions"]["running"], 0);
+        assert_eq!(cleared["executions"]["testing"], 0);
+        assert_eq!(cleared["executions"]["review"], 0);
+
+        let scalar = serde_json::json!("not-an-object");
+        let cleared_scalar = cleared_workflow_state(Some(&scalar), "2026-09-24T15:20:31.123456Z");
+        assert_eq!(cleared_scalar["executions"]["review"], 0);
+
+        // Resetting an already reset document is a no-op (same baseline).
+        let twice = cleared_workflow_state(Some(&cleared), "2026-09-24T15:20:31.123456Z");
+        assert_eq!(cleared, twice);
+    }
+
+    #[test]
+    fn cleared_workflow_state_keeps_other_baselines_in_place() {
+        // A SECOND reset moves the baseline forward and keeps zeroing.
+        let first = cleared_workflow_state(None, "2026-09-24T15:00:00.000000Z");
+        let second = cleared_workflow_state(Some(&first), "2026-09-24T16:00:00.000000Z");
+        assert_eq!(
+            second[EXECUTIONS_RESET_AT_KEY],
+            serde_json::json!("2026-09-24T16:00:00.000000Z")
+        );
+        assert_eq!(second["executions"]["running"], 0);
+    }
+}
