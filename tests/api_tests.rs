@@ -620,3 +620,99 @@ fn test_kanban_tags_and_dependency_history() {
         .send()
         .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// /kanban/tasks/{id}/workflow/executions/reset: the operator "Reset workflow
+// execution" action must be an OBSERVABLE write, never a silent no-op.
+//
+// Operator bug report (2026-09-24): clicking the dashboard button left the
+// execution counters unchanged. Root cause: the endpoint was gated on a
+// resolved workflow id (answering `reset:false` and writing nothing for a task
+// without one) AND it only cleared `workflow_state.executions`, while the
+// counters the UI shows are derived from the task's threads. The reset is now
+// unconditional and records an `executions_reset_at` baseline the counters use.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore]
+fn test_kanban_reset_workflow_executions_is_observable() {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("Failed to build HTTP client");
+
+    // 1. A backlog task with NO workflow id (the exact operator situation).
+    let resp = client
+        .post(format!("{}/kanban/tasks", BASE))
+        .json(&serde_json::json!({
+            "title": format!("reset-executions-{}", std::process::id()),
+            "board": "workstation",
+            "status": "backlog",
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(resp.status(), 200, "POST /kanban/tasks should succeed");
+    let json: serde_json::Value = resp.json().unwrap();
+    let task_id = json["data"]["id"]
+        .as_str()
+        .expect("created task id")
+        .to_string();
+
+    // 2. The reset must answer `reset:true` even without a workflow id:
+    //    gating it on a workflow made the button a silent no-op.
+    let resp = client
+        .post(format!(
+            "{}/kanban/tasks/{}/workflow/executions/reset",
+            BASE, task_id
+        ))
+        .send()
+        .unwrap();
+    assert_eq!(resp.status(), 200, "the reset endpoint should answer 200");
+    let json: serde_json::Value = resp.json().unwrap();
+    assert_eq!(
+        json["data"]["reset"].as_bool(),
+        Some(true),
+        "the manual reset must not be gated on a workflow id, got {json}"
+    );
+
+    // 3. Observable end state: every role counter is 0 after the reset.
+    //    (The `executions_reset_at` baseline is only rendered once a
+    //    post-baseline attempt exists - a thread-less task reports the zeroed
+    //    counters without it, so the counters are the contract asserted here.)
+    let resp = client
+        .get(format!("{}/kanban/tasks/{}", BASE, task_id))
+        .send()
+        .unwrap();
+    assert_eq!(resp.status(), 200, "GET /kanban/tasks/{{id}} should succeed");
+    let json: serde_json::Value = resp.json().unwrap();
+    let counters = &json["data"]["counters"];
+    for role in ["executor", "tester", "reviewer", "executions", "retries"] {
+        assert_eq!(
+            counters[role].as_i64(),
+            Some(0),
+            "{role} must be 0 after the reset, counters={counters}"
+        );
+    }
+
+    // 4. The reset is idempotent: clicking it again must answer reset:true
+    //    instead of erroring out or silently writing nothing.
+    let resp = client
+        .post(format!(
+            "{}/kanban/tasks/{}/workflow/executions/reset",
+            BASE, task_id
+        ))
+        .send()
+        .unwrap();
+    assert_eq!(resp.status(), 200, "a repeated reset should succeed");
+    let json: serde_json::Value = resp.json().unwrap();
+    assert_eq!(
+        json["data"]["reset"].as_bool(),
+        Some(true),
+        "a repeated reset must stay reset:true, got {json}"
+    );
+
+    // 5. Best-effort cleanup (a backlog task is never dispatched).
+    let _ = client
+        .delete(format!("{}/kanban/tasks/{}", BASE, task_id))
+        .send();
+}
