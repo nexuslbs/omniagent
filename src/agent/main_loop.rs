@@ -1883,7 +1883,7 @@ Previous plan:\n{}",
         cumulative_message_tokens = cumulative_message_tokens.saturating_add(message_tokens);
         cumulative_tools_share_tokens =
             cumulative_tools_share_tokens.saturating_add(tools_share_tokens);
-        if eff_model_cfg.token_budget_hard > 0 && billed_prompt > eff_model_cfg.token_budget_hard {
+        if billed_over_hard_budget(billed_prompt, eff_model_cfg.token_budget_hard) {
             if !prev_over_budget {
                 error!(
                     "[context] Thread {}: provider billed {} prompt tokens > hard budget {} and condensation did not reduce it - forcing compaction on the next iteration",
@@ -3191,6 +3191,41 @@ fn truncation_action(
 /// the provider's own default output limit applies.
 fn effective_max_tokens(escalated: Option<u32>, base: Option<u32>) -> Option<u32> {
     escalated.or(base)
+}
+
+/// Is the provider-billed prompt size over the HARD context budget?
+///
+/// This is the ONLY condition that drives the core's compaction escalation
+/// (`prev_over_budget` -> `force_compact` on the next iteration). The SOFT
+/// budget is the reduction TARGET the prompt plugin aims at once compaction
+/// runs; it must never be the condition that decides WHETHER compaction
+/// happens (operator, 2026-09-24, thread 3067). A `hard_budget` of 0 disables
+/// the escalation entirely.
+fn billed_over_hard_budget(billed_prompt_tokens: usize, hard_budget: usize) -> bool {
+    hard_budget > 0 && billed_prompt_tokens > hard_budget
+}
+
+#[cfg(test)]
+mod budget_gate_tests {
+    use super::*;
+
+    /// Compaction is triggered ONLY by the HARD budget: a provider-billed prompt
+    /// between soft and hard must NOT set `prev_over_budget` (so no force), one
+    /// over hard must. Soft stays the reduction target, never a trigger.
+    #[test]
+    fn compaction_escalation_keys_on_the_hard_budget_only() {
+        let soft = 100_000usize;
+        let hard = 400_000usize;
+        assert!(!billed_over_hard_budget(0, hard));
+        assert!(!billed_over_hard_budget(soft, hard));
+        // Strictly between soft and hard: no escalation.
+        assert!(!billed_over_hard_budget(soft + (hard - soft) / 2, hard));
+        assert!(!billed_over_hard_budget(hard, hard));
+        // Over the hard budget: escalate (force compaction next iteration).
+        assert!(billed_over_hard_budget(hard + 1, hard));
+        // A disabled hard budget (0) never escalates.
+        assert!(!billed_over_hard_budget(1_000_000, 0));
+    }
 }
 
 /// Human-readable output budget for LLM-facing messages: the numeric cap,

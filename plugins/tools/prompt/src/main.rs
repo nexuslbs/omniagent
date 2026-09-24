@@ -3353,6 +3353,122 @@ mod token_counting_tests {
         );
     }
 
+    // HARD DESIGN RULE (operator, 2026-09-24, thread 3067): compaction is
+    // triggered ONLY by the HARD budget; the SOFT budget is the reduction
+    // TARGET. A prompt whose size sits between soft and hard must be left
+    // COMPLETELY UNTOUCHED (null contract, no truncation, no dump / no
+    // compaction event), and the deterministic truncation fallback must never
+    // drag content down to the SOFT budget while the array still fits the HARD
+    // one (the v0.3.2 "dumb and slow" regression, thread 2812).
+    #[tokio::test]
+    async fn compaction_trigger_is_the_hard_budget_only() {
+        let cfg = compact_cfg("");
+        // ~250k proxy tokens (chars/4): strictly between soft=100k and hard=400k.
+        let mut msgs = vec![ChatMessage {
+            role: "system".to_string(),
+            content: "SYSTEM PROMPT".to_string(),
+            tool_call_id: None,
+            tool_calls: None,
+            name: None,
+        }];
+        for _ in 0..5 {
+            msgs.push(tool_call_msg("filesystem_read", "{}", "reading"));
+            msgs.push(tool_result("filesystem_read", &"X".repeat(200_000)));
+        }
+        msgs.push(user_msg("CURRENT USER TURN"));
+        let measured = measure_size(&msgs, "");
+        assert!(
+            measured > 100_000 && measured < 400_000,
+            "corpus must sit between soft and hard: {measured}"
+        );
+
+        let dir =
+            std::env::temp_dir().join(format!("omnidev-soft-trigger-guard-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // (1) Between soft and hard with no force: NOTHING may change.
+        let out = run_compact(
+            &msgs,
+            &cfg,
+            3,
+            Some(dir.to_str().unwrap()),
+            400_000,
+            100_000,
+        )
+        .await;
+        assert_eq!(
+            out["was_compacted"], false,
+            "the soft budget must never trigger compaction: {out}"
+        );
+        assert_eq!(
+            out["messages"],
+            serde_json::Value::Null,
+            "null-contract between soft and hard: {out}"
+        );
+        assert_eq!(
+            out["truncated_chars"], 0,
+            "no truncation between soft and hard: {out}"
+        );
+        assert_eq!(out["entries"], 0, "no compaction event: {out}");
+        assert!(
+            out["dump_file"].is_null(),
+            "no context dump between soft and hard: {out}"
+        );
+        assert_eq!(
+            out["effective_target"], 100_000,
+            "the soft budget stays the reduction target: {out}"
+        );
+        assert_eq!(
+            out["truncate_target"], 400_000,
+            "the hard budget is the fit target: {out}"
+        );
+        assert!(
+            std::fs::read_dir(&dir).unwrap().next().is_none(),
+            "no compaction event must leave the thread dir empty"
+        );
+
+        // (2) Same shape OVER the hard budget, with a single non-drainable tool
+        // turn: compaction fires and the deterministic fallback reduces only to
+        // the HARD fit target - never down to the soft budget.
+        let over = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: "SYSTEM PROMPT".to_string(),
+                tool_call_id: None,
+                tool_calls: None,
+                name: None,
+            },
+            tool_call_msg("filesystem_read", "{}", "reading"),
+            tool_result("filesystem_read", &"X".repeat(2_000_000)),
+            user_msg("CURRENT USER TURN"),
+        ];
+        assert!(
+            measure_size(&over, "") > 200_000,
+            "corpus must exceed the hard budget"
+        );
+        let out = run_compact(&over, &cfg, 3, None, 200_000, 100_000).await;
+        assert_eq!(
+            out["was_compacted"], true,
+            "a prompt over the hard budget must compact: {out}"
+        );
+        assert_eq!(out["truncate_target"], 200_000, "{out}");
+        assert!(
+            out["truncated_chars"].as_u64().unwrap() > 0,
+            "the deterministic fallback must fire: {out}"
+        );
+        let after = out["measured_tokens"].as_u64().unwrap();
+        assert!(
+            after <= 200_000,
+            "the result must fit the HARD budget: {after}"
+        );
+        assert!(
+            after > 100_000,
+            "the fallback must NOT drag content down to the SOFT budget: {after}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // (a0) force_compact bypasses the threshold gate (core over-budget
     // escalation, 0-compaction incident threads 1139/1140): even when the
     // locally measured size is BELOW the hard budget, an explicit engine
