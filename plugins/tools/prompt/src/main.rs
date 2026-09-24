@@ -1145,7 +1145,13 @@ fn load_role_template(
     workflow_id: &str,
     role: &str,
 ) -> Result<Option<String>, String> {
-    let path = std::path::Path::new(data_dir).join("workflows.yml");
+    // workflows.yml is a CONFIG file: it lives at `{data_dir}/config/workflows.yml`
+    // (see src/config_path.rs - the single source of truth for the layout; only
+    // docker-compose files stay at the data_dir root). Reading the data_dir root
+    // made every workflow role template fail with 'cannot read workflows.yml'.
+    let path = std::path::Path::new(data_dir)
+        .join("config")
+        .join("workflows.yml");
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("cannot read workflows.yml: {e}"))?;
     let file: WorkflowsYaml =
@@ -2540,13 +2546,14 @@ mod tests {
             .join("omni")
             .join("templates");
         std::fs::create_dir_all(&templates_dir).expect("create templates dir");
+        std::fs::create_dir_all(dir.as_path().join("config")).expect("create config dir");
         std::fs::write(
             templates_dir.join("dev-executor.md"),
             "EXECUTOR CONTENT FROM FILE",
         )
         .expect("write template file");
         std::fs::write(
-            dir.as_path().join("workflows.yml"),
+            dir.as_path().join("config").join("workflows.yml"),
             "workflows:\n  wf:\n    roles:\n      executor:\n        template: dev-executor\n      tester:\n        template: missing-template\n",
         )
         .expect("write workflows.yml");
@@ -2599,9 +2606,10 @@ mod tests {
             .join("templates");
         std::fs::create_dir_all(&other_templates).expect("create other templates dir");
         std::fs::write(other_templates.join("evil.md"), "EVIL").expect("write evil template");
+        std::fs::create_dir_all(dir.as_path().join("config")).expect("create config dir");
         for bad in ["../other/evil", "/abs/path", "sub/evil", "..\\evil"] {
             std::fs::write(
-                dir.as_path().join("workflows.yml"),
+                dir.as_path().join("config").join("workflows.yml"),
                 format!(
                     "workflows:\n  wf:\n    roles:\n      executor:\n        template: {bad}\n"
                 ),
