@@ -1101,6 +1101,17 @@ Previous plan:\n{}",
     // reduce it" overshoots, 279/24h on 2026-09-20).
     let mut last_billed_prompt_tokens: Option<u64> = None;
     let mut last_measured_tokens: Option<u64> = None;
+    // Prompt accounting (observability only): per-block char counts and
+    // token shares of the most recent request, plus cumulative sums for the
+    // final reconciliation against the provider-billed prompt tokens. The
+    // `last_*` values are refreshed every iteration and flow into the final
+    // agent message metadata; cumulative values are the per-iteration sums.
+    let mut last_block_counts: serde_json::Value = serde_json::json!({});
+    let mut last_total_chars: usize = 0;
+    let mut last_message_tokens: usize = 0;
+    let mut last_tools_share_tokens: usize = 0;
+    let mut cumulative_message_tokens: usize = 0;
+    let mut cumulative_tools_share_tokens: usize = 0;
     // One-shot WARN (never the looped ERROR) when the compactor reports it
     // cannot shrink further: the fixed prefix alone does not fit the hard
     // budget, so every iteration compacts - a state, not a per-span error.
@@ -1604,6 +1615,34 @@ Previous plan:\n{}",
             last_prompt_iter,
             last_condense_iteration,
         );
+
+        // ── Prompt accounting (observability only) ──
+        // Per-block char counts + the tools-schema token share of the
+        // request about to be sent. Computed EVERY iteration (not only when
+        // the prompt row is logged) so the final agent message always
+        // carries real numbers. `last_*` hold the most recent call's
+        // accounting; cumulative sums feed the final reconciliation against
+        // the provider-billed prompt tokens (known only post-call). This
+        // never changes what is sent to the model.
+        let (block_counts, total_chars) = prompt_block_accounting(
+            &prompt_parts,
+            template_section.as_deref(),
+            plan_content.as_deref(),
+            &tools_def,
+            &messages,
+        );
+        let message_tokens =
+            helpers::count_tokens(&messages, &cfg_snapshot.tokenizer_encoding, None);
+        let tools_share_tokens = helpers::count_tokens(
+            &messages,
+            &cfg_snapshot.tokenizer_encoding,
+            Some(&tools_def),
+        )
+        .saturating_sub(message_tokens);
+        last_block_counts = block_counts.clone();
+        last_total_chars = total_chars;
+        last_message_tokens = message_tokens;
+        last_tools_share_tokens = tools_share_tokens;
         if should_log_prompt {
             let prompt_seq = {
                 let v = *next_seq;
@@ -1623,6 +1662,15 @@ Previous plan:\n{}",
                     "num_messages": messages.len(),
                     "iteration": current_iter,
                     "condensed": current_iter == last_condense_iteration,
+                    "context": {
+                        "block_counts": block_counts,
+                        "total_chars": total_chars,
+                    },
+                    "prompt_accounting": {
+                        "message_tokens": message_tokens,
+                        "tools_share_tokens": tools_share_tokens,
+                        "previous_billed_prompt_tokens": last_billed_prompt_tokens,
+                    },
                 }),
                 embedding: None,
                 summary_text: None,
@@ -1632,7 +1680,10 @@ Previous plan:\n{}",
                 msg_subtype: Some(prompt_subtype.to_string()),
                 iteration_number: current_iter,
                 duration_ms: 0,
-                token_usage: serde_json::json!({}),
+                token_usage: serde_json::json!({
+                    "message_tokens": message_tokens,
+                    "tools_share_tokens": tools_share_tokens,
+                }),
             };
             if let Err(e) = queries::create_message(&cfg.pool, &prompt_msg).await {
                 warn!(
@@ -1827,6 +1878,13 @@ Previous plan:\n{}",
         if billed_prompt > 0 {
             last_billed_prompt_tokens = Some(billed_prompt as u64);
         }
+        // Cumulative accounting: sum the parts ONLY for calls that actually
+        // happened (a provider-error retry never bills, so its message/tools
+        // estimate must not be double-counted). This keeps the cumulative
+        // parts reconcilable with the cumulative billed prompt tokens.
+        cumulative_message_tokens = cumulative_message_tokens.saturating_add(message_tokens);
+        cumulative_tools_share_tokens =
+            cumulative_tools_share_tokens.saturating_add(tools_share_tokens);
         if eff_model_cfg.token_budget_hard > 0 && billed_prompt > eff_model_cfg.token_budget_hard {
             if !prev_over_budget {
                 error!(
@@ -2927,13 +2985,33 @@ Review the tool results above to see what was attempted and what remains."
 
     // Build evidence metadata from context assembly
     let evidence_metadata = {
+        // Prompt accounting (observability only): per-block char counts and
+        // token shares of the LAST request, plus cumulative sums, so the
+        // logged parts reconcile with the provider-billed prompt tokens and
+        // the tools-schema share is explicitly reported. Absent accounting
+        // (no LLM call made) keeps the historical `{}` / 0 shape: unknown,
+        // never interpreted as zero.
+        let cumulative_billed = cumulative_usage
+            .as_ref()
+            .map(|u| u.prompt_tokens as usize)
+            .unwrap_or(0);
         let meta = serde_json::json!({
             "context": {
                 "selected_message_ids": [],
                 "wiki_files": [],
-                "block_counts": {},
+                "block_counts": last_block_counts,
                 "dropped_blocks": [],
-                "total_chars": 0,
+                "total_chars": last_total_chars,
+            },
+            "prompt_accounting": {
+                "billed_prompt_tokens": last_billed_prompt_tokens,
+                "message_tokens": last_message_tokens,
+                "tools_share_tokens": last_tools_share_tokens,
+                "cumulative_billed_prompt_tokens": cumulative_billed,
+                "cumulative_message_tokens": cumulative_message_tokens,
+                "cumulative_tools_share_tokens": cumulative_tools_share_tokens,
+                "reconciliation_delta_tokens":
+                    cumulative_billed.saturating_sub(cumulative_message_tokens + cumulative_tools_share_tokens),
             },
             "grounding": {
                 "policy_applied": true,
@@ -3434,6 +3512,120 @@ fn is_terminal_loop_status(status: &str) -> bool {
         status,
         "failed" | "completed" | "interrupted" | "skipped" | "system" | "merged"
     )
+}
+
+/// Pure: per-block character accounting for the assembled prompt
+/// (observability only - never changes what is sent to the model).
+///
+/// `block_counts` maps each block label (system / memory / template /
+/// context / plan / tools / messages) to its character count; `total_chars`
+/// is the total assembled character count - the serialized request payload
+/// (messages array + tools array), i.e. what the provider receives. The
+/// block labels follow the historical `metadata.context.block_counts`
+/// convention (schema.rs).
+fn prompt_block_accounting(
+    parts: &PromptParts,
+    template_section: Option<&str>,
+    plan_content: Option<&str>,
+    tools_def: &[serde_json::Value],
+    messages: &[ChatMessage],
+) -> (serde_json::Value, usize) {
+    let messages_chars = serde_json::to_string(messages)
+        .map(|s| s.len())
+        .unwrap_or(0);
+    let tools_chars = serde_json::to_string(tools_def)
+        .map(|s| s.len())
+        .unwrap_or(0);
+    let block_counts = serde_json::json!({
+        "system": parts.system.len(),
+        "memory": parts.memory.len(),
+        "template": template_section.map(|s| s.len()).unwrap_or(0),
+        "context": parts.context.len(),
+        "plan": plan_content.map(|s| s.len()).unwrap_or(0),
+        "tools": tools_chars,
+        "messages": messages_chars,
+    });
+    (block_counts, messages_chars + tools_chars)
+}
+
+#[cfg(test)]
+mod prompt_accounting_tests {
+    use super::*;
+
+    #[test]
+    fn block_counts_cover_all_labels_and_total_chars_is_request_payload() {
+        let parts = PromptParts {
+            system: "sys".to_string(),
+            memory: "mem".to_string(),
+            context: "ctx".to_string(),
+            user: "usr".to_string(),
+            plan: false,
+        };
+        let tools = serde_json::json!([{"type": "function", "name": "t1"}]);
+        let messages = vec![ChatMessage::system("sys"), ChatMessage::user("hi")];
+        let (block_counts, total_chars) = prompt_block_accounting(
+            &parts,
+            Some("template"),
+            Some("plan-text"),
+            tools.as_array().unwrap(),
+            &messages,
+        );
+        // Every required label is present and non-null.
+        for label in [
+            "system", "memory", "template", "context", "plan", "tools", "messages",
+        ] {
+            assert!(
+                block_counts[label].as_u64().is_some(),
+                "label {} missing from block_counts",
+                label
+            );
+        }
+        assert_eq!(block_counts["system"].as_u64().unwrap(), 3);
+        assert_eq!(block_counts["memory"].as_u64().unwrap(), 3);
+        assert_eq!(block_counts["template"].as_u64().unwrap(), 8);
+        assert_eq!(block_counts["context"].as_u64().unwrap(), 3);
+        assert_eq!(block_counts["plan"].as_u64().unwrap(), 9);
+        // total_chars = serialized messages + serialized tools (the request
+        // payload the provider receives).
+        let messages_chars = serde_json::to_string(&messages).unwrap().len();
+        let tools_chars = serde_json::to_string(tools.as_array().unwrap())
+            .unwrap()
+            .len();
+        assert_eq!(total_chars, messages_chars + tools_chars);
+        assert_eq!(
+            block_counts["messages"].as_u64().unwrap() as usize,
+            messages_chars
+        );
+        assert_eq!(
+            block_counts["tools"].as_u64().unwrap() as usize,
+            tools_chars
+        );
+    }
+
+    #[test]
+    fn absent_optional_blocks_count_zero() {
+        let parts = PromptParts {
+            system: "sys".to_string(),
+            memory: String::new(),
+            context: String::new(),
+            user: "usr".to_string(),
+            plan: false,
+        };
+        let (block_counts, total_chars) =
+            prompt_block_accounting(&parts, None, None, &[], &[ChatMessage::user("hi")]);
+        assert_eq!(block_counts["template"].as_u64().unwrap(), 0);
+        assert_eq!(block_counts["plan"].as_u64().unwrap(), 0);
+        // Empty tools array still serializes to "[]" (2 chars).
+        assert_eq!(block_counts["tools"].as_u64().unwrap(), 2);
+        // Empty tools array still serializes to "[]" (2 chars).
+        assert_eq!(
+            total_chars,
+            serde_json::to_string(&[ChatMessage::user("hi")])
+                .unwrap()
+                .len()
+                + 2
+        );
+    }
 }
 
 #[cfg(test)]

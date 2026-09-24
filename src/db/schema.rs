@@ -87,7 +87,21 @@
 //    selected_message_ids  []int    Message IDs selected for the prompt
 //    wiki_files            []string Wiki file paths referenced
 //    block_counts          {}       Char counts per context block label
+//                                  (system / memory / template / context /
+//                                  plan / tools / messages; populated by the
+//                                  executor since v0.3.3 - `{}` = unknown)
 //    dropped_blocks        []string Block labels dropped due to budget
 //    total_chars           int      Total assembled character count
+//                                  (serialized messages + tools payload;
+//                                  0 = unknown)
+//  prompt_accounting  object     Prompt token accounting (observability only)
+//    billed_prompt_tokens      int|null  Provider-billed prompt tokens (last call)
+//    message_tokens            int       Message-only token estimate (tiktoken)
+//    tools_share_tokens        int       Tools-schema share (with-tools minus
+//                                        message-only estimate)
+//    cumulative_billed_prompt_tokens  int  Sum of billed prompt tokens
+//    cumulative_message_tokens        int  Sum of message-only estimates
+//    cumulative_tools_share_tokens    int  Sum of tools-schema shares
+//    reconciliation_delta_tokens      int  billed - (message + tools) residual
 //  grounding        object     Grounding policy metadata
 //    policy_applied  bool     Whether grounding policy was applied

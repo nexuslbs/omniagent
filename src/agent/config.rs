@@ -171,6 +171,14 @@ pub struct AgentConfig {
     /// - "all": insert every prompt before every LLM call
     pub prompt_log_level: String,
 
+    /// Tokenizer encoding name used for prompt-size ACCOUNTING only
+    /// (tiktoken model name, e.g. "gpt-4" -> cl100k_base). Read from the
+    /// settings key `tokenizer_encoding` (default "gpt-4"). Purely
+    /// observational: it feeds the per-block char accounting and the
+    /// tools-schema token share recorded on prompt/agent messages. It never
+    /// changes what is sent to the model and never affects budgets.
+    pub tokenizer_encoding: String,
+
     /// Threshold in seconds for background mode : tools that complete within
     /// this time return normally. Tools that exceed this return a "processing"
     /// result with a task ID and continue executing in the background.
@@ -373,6 +381,8 @@ impl AgentConfig {
 
             prompt_log_level: get("prompt_log_level", "first"),
 
+            tokenizer_encoding: get("tokenizer_encoding", "gpt-4"),
+
             tool_bg_secs: get("tool_bg_secs", "30").parse().unwrap_or(30),
 
             // Bootstrap: infrastructure from env
@@ -497,6 +507,8 @@ impl AgentConfig {
 
             prompt_log_level: get("prompt_log_level", "first"),
 
+            tokenizer_encoding: get("tokenizer_encoding", "gpt-4"),
+
             tool_bg_secs: get("tool_bg_secs", "30").parse().unwrap_or(30),
 
             // Bootstrap settings always from process env
@@ -571,6 +583,7 @@ mod tests {
             token_usage_budget: 0,
             token_usage_telemetry_percent: 0,
             prompt_log_level: "first".to_string(),
+            tokenizer_encoding: "gpt-4".to_string(),
             tool_bg_secs: 30,
             database_url: "postgres://localhost:***@host:5432/db".to_string(),
             database_readonly_url: "postgres://user:***@host:5432/db_ro".to_string(),
@@ -618,7 +631,7 @@ mod tests {
 
     #[test]
     fn test_agent_config_complete_field_count() {
-        // AgentConfig has 41 fields. This test verifies all are present,
+        // AgentConfig has 42 fields. This test verifies all are present,
         // by constructing a minimal config and checking all fields are accessible.
         let cfg = AgentConfig {
             llm_api_key: String::new(),
@@ -645,6 +658,7 @@ mod tests {
             token_usage_budget: 1_000_000,
             token_usage_telemetry_percent: 10,
             prompt_log_level: String::new(),
+            tokenizer_encoding: String::new(),
             tool_bg_secs: 0,
             database_url: "postgres://localhost:5432/omniagent".to_string(),
             database_readonly_url: String::new(),
