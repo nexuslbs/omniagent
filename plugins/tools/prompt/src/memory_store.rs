@@ -9,6 +9,28 @@ pub const ENTRY_DELIMITER: &str = "\n§\n";
 
 // ── Template loader ─────────────────────────────────────────────
 
+/// Validate a template name: must be a plain file name (optionally ending
+/// `.md`) inside the profile templates dir - no path separators, no `..`, no
+/// absolute paths, not empty. Anything else is rejected (operator directive
+/// 2026-09-24: templates must be PROFILE templates).
+pub fn validate_template_name(template_name: &str) -> Result<(), String> {
+    let trimmed = template_name.trim();
+    if trimmed.is_empty() {
+        return Err(
+            "template name is empty: expected a file name in profiles/<profile>/templates/"
+                .to_string(),
+        );
+    }
+    let p = Path::new(trimmed);
+    if p.is_absolute() || trimmed.contains('/') || trimmed.contains('\\') || trimmed.contains("..")
+    {
+        return Err(format!(
+            "template name '{template_name}' must be a plain file name inside profiles/<profile>/templates/ (no path separators, no '..', no absolute paths)"
+        ));
+    }
+    Ok(())
+}
+
 /// Load a template file from `profiles/<name>/templates/<name>.md`.
 pub fn load_template(data_dir: &str, profile_name: &str, template_name: &str) -> Option<String> {
     if template_name.is_empty() {

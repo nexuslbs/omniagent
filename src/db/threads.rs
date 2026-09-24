@@ -1443,9 +1443,12 @@ pub(crate) fn kanban_step_actionable(
     }
 }
 
-/// R8-J: an executor thread must ALWAYS carry a template - the role template
-/// wins; for the running step the fallback chain is task.template ->
-/// channel.template -> profile.template -> "dev-development" (never None).
+/// R8-J: an executor thread carries a template when one is configured - the
+/// role template wins; for the running step the fallback chain is task.template
+/// -> channel.template -> profile.template (None when nothing is set anywhere;
+/// the hardcoded "dev-development" global fallback was REMOVED, operator
+/// directive 2026-09-24: the template field must never fall back to a global
+/// tier - templates are PROFILE templates only).
 /// The one effective template chain is
 /// `workflow_role > workflow > kanban_task > board > channel > profile`:
 /// `role_template` is the ALREADY-RESOLVED value from `Workflow::resolve_role`
@@ -1462,14 +1465,15 @@ fn resolve_kanban_thread_template(
     profile_template: Option<&str>,
 ) -> Option<String> {
     role_template.or_else(|| {
-        is_running.then(|| {
-            task_template
-                .filter(|t| !t.is_empty())
-                .or_else(|| channel_template.filter(|t| !t.is_empty()))
-                .or_else(|| profile_template.filter(|t| !t.is_empty()))
-                .unwrap_or("dev-development")
-                .to_string()
-        })
+        is_running
+            .then(|| {
+                task_template
+                    .filter(|t| !t.is_empty())
+                    .or_else(|| channel_template.filter(|t| !t.is_empty()))
+                    .or_else(|| profile_template.filter(|t| !t.is_empty()))
+                    .map(str::to_string)
+            })
+            .flatten()
     })
 }
 
@@ -2660,7 +2664,8 @@ mod tests {
             ),
             Some("dev-tester".to_string())
         );
-        // Running without a role template: task -> channel -> dev-development.
+        // Running without a role template: task -> channel -> profile (no
+        // global "dev-development" fallback; operator directive 2026-09-24).
         assert_eq!(
             resolve_kanban_thread_template(None, true, Some("task-tpl"), Some("channel-tpl"), None),
             Some("task-tpl".to_string())
@@ -2671,13 +2676,13 @@ mod tests {
         );
         assert_eq!(
             resolve_kanban_thread_template(None, true, Some(""), Some(""), None),
-            Some("dev-development".to_string())
+            None
         );
         assert_eq!(
             resolve_kanban_thread_template(None, true, None, None, None),
-            Some("dev-development".to_string())
+            None
         );
-        // Profile template fills the tier between channel and dev-development.
+        // Profile template fills the tier between channel and None.
         assert_eq!(
             resolve_kanban_thread_template(None, true, None, None, Some("profile-tpl")),
             Some("profile-tpl".to_string())

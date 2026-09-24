@@ -167,6 +167,73 @@ fn template_path(data_dir: &str, profile_name: &str, template: &str) -> std::pat
         .join(file)
 }
 
+/// Human-readable template kind for error messages, derived from the thread
+/// origin: hooks / schedule tasks / kanban tasks / plain channel threads.
+fn template_kind(thread: &Thread, cause_msg: &Message) -> &'static str {
+    if cause_msg.msg_type == "hook" {
+        "hook"
+    } else if thread.schedule_task_id.is_some() || cause_msg.msg_type == "cron" {
+        "schedule task"
+    } else if thread.task_id.is_some() {
+        "kanban task"
+    } else {
+        "channel"
+    }
+}
+
+/// Validate a template name: must be a plain file name (optionally ending
+/// `.md`) inside the profile templates dir - no path separators, no `..`, no
+/// absolute paths, not empty. Anything else is a hard error (operator
+/// directive 2026-09-24: templates must be PROFILE templates).
+fn validate_template_name(kind: &str, profile_name: &str, template: &str) -> AppResult<()> {
+    let trimmed = template.trim();
+    if trimmed.is_empty() {
+        return Err(crate::error::Error::Message(format!(
+            "{kind} template name is empty for profile '{profile_name}': expected a file name in profiles/{profile_name}/templates/"
+        )));
+    }
+    let p = std::path::Path::new(trimmed);
+    if p.is_absolute() || trimmed.contains('/') || trimmed.contains('\\') || trimmed.contains("..")
+    {
+        return Err(crate::error::Error::Message(format!(
+            "{kind} template '{template}' must be a plain file name inside profiles/{profile_name}/templates/ (no path separators, no '..', no absolute paths)"
+        )));
+    }
+    Ok(())
+}
+
+/// Strictly load a PROFILE template: resolves ONLY from
+/// `profiles/<profile>/templates/<name>.md`. A missing file or a name that
+/// escapes the profile templates dir is a hard error (actionable message
+/// naming the kind, the offending value and the expected location) - never a
+/// silent fallback to a global/other-profile template.
+fn load_profile_template(
+    data_dir: &str,
+    profile_name: &str,
+    kind: &str,
+    template: &str,
+) -> AppResult<Option<String>> {
+    validate_template_name(kind, profile_name, template)?;
+    let expected = template_path(data_dir, profile_name, template);
+    if !expected.exists() {
+        let file = expected
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or(template);
+        return Err(crate::error::Error::Message(format!(
+            "{kind} template '{template}' not found for profile '{profile_name}': expected profiles/{profile_name}/templates/{file} - templates must be profile templates"
+        )));
+    }
+    let content = std::fs::read_to_string(&expected).map_err(|e| {
+        crate::error::Error::Message(format!("failed to read {kind} template '{template}': {e}"))
+    })?;
+    let trimmed = content.trim().to_string();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(trimmed))
+}
+
 /// Channel-scoped prompt sections (task 9): `prompt_sections` from the
 /// channel's channels.yml definition. Keyed by channel NAME (the stable
 /// identifier); falls back to channel id for legacy rows where they differ.
@@ -306,25 +373,24 @@ pub(crate) async fn assemble_prompt(
     };
 
     // ── Raw template body (frontmatter-aware) ──
+    // STRICT profile-template loading (operator directive 2026-09-24): a
+    // resolved template name must exist as `profiles/<profile>/templates/
+    // <name>.md`; a missing file or a name escaping that dir (path traversal,
+    // absolute path, other-profile reference) is a hard error - never a
+    // silent fallback to a global/other-profile template.
     let template_raw: Option<String> = match &template_name {
         Some(template) => {
-            let path = template_path(deps.data_dir, profile_name, template);
-            if path.exists() {
-                std::fs::read_to_string(&path)
-                    .ok()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .inspect(|content| {
-                        info!(
-                            "Loaded template '{}' for thread {} ({} chars)",
-                            template,
-                            thread.id,
-                            content.len()
-                        );
-                    })
-            } else {
-                None
+            let kind = template_kind(thread, cause_msg);
+            let loaded = load_profile_template(deps.data_dir, profile_name, kind, template)?;
+            if let Some(content) = &loaded {
+                info!(
+                    "Loaded template '{}' for thread {} ({} chars)",
+                    template,
+                    thread.id,
+                    content.len()
+                );
             }
+            loaded
         }
         None => None,
     };
@@ -413,4 +479,153 @@ pub(crate) async fn build_prompt_context(
 ) -> AppResult<(PromptParts, Option<String>)> {
     let deps = PromptAssemblyDeps::from_agent_context(cfg);
     assemble_prompt(&deps, thread, cause_msg, channel, profile_name, tool_names).await
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_dir() -> tempfile::TempDir {
+        tempfile::tempdir().expect("tempdir")
+    }
+
+    /// Write a template file at profiles/<profile>/templates/<name>.
+    fn write_template(dir: &std::path::Path, profile: &str, name: &str, content: &str) {
+        let tdir = dir.join("profiles").join(profile).join("templates");
+        std::fs::create_dir_all(&tdir).expect("create templates dir");
+        std::fs::write(tdir.join(name), content).expect("write template");
+    }
+
+    fn data_dir(dir: &tempfile::TempDir) -> &str {
+        dir.path().to_str().unwrap()
+    }
+
+    #[test]
+    fn profile_template_present_resolves() {
+        let dir = tmp_dir();
+        write_template(dir.path(), "omni", "main.md", "MAIN CONTENT");
+        let out = load_profile_template(data_dir(&dir), "omni", "kanban task", "main").unwrap();
+        assert_eq!(out.as_deref(), Some("MAIN CONTENT"));
+        // With explicit .md suffix.
+        let out = load_profile_template(data_dir(&dir), "omni", "kanban task", "main.md").unwrap();
+        assert_eq!(out.as_deref(), Some("MAIN CONTENT"));
+    }
+
+    #[test]
+    fn profile_template_absent_is_rejected() {
+        let dir = tmp_dir();
+        write_template(dir.path(), "omni", "main.md", "MAIN");
+        let err = load_profile_template(data_dir(&dir), "omni", "kanban task", "missing")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("kanban task template 'missing' not found"),
+            "{err}"
+        );
+        assert!(err.contains("profiles/omni/templates/missing.md"), "{err}");
+    }
+
+    #[test]
+    fn profile_template_escaping_is_rejected() {
+        let dir = tmp_dir();
+        write_template(dir.path(), "omni", "main.md", "MAIN");
+        // A template that exists in ANOTHER profile must not resolve for omni.
+        write_template(dir.path(), "other", "foo.md", "OTHER");
+        for bad in [
+            "../other/foo",
+            "/abs/path",
+            "sub/foo",
+            "..\\evil",
+            "foo/../main",
+        ] {
+            let err = load_profile_template(data_dir(&dir), "omni", "kanban task", bad)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("must be a plain file name"),
+                "bad name {bad:?} -> {err}"
+            );
+        }
+        // Other-profile name: file exists only under profiles/other/templates.
+        let err = load_profile_template(data_dir(&dir), "omni", "channel", "foo")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("channel template 'foo' not found"), "{err}");
+        assert!(err.contains("profiles/omni/templates/foo.md"), "{err}");
+    }
+
+    #[test]
+    fn profile_template_no_global_fallback() {
+        // A template file at a GLOBAL location (data_dir/templates/) must NOT
+        // satisfy a profile template reference: only
+        // profiles/<profile>/templates/ is valid.
+        let dir = tmp_dir();
+        let global = dir.path().join("templates");
+        std::fs::create_dir_all(&global).expect("global templates dir");
+        std::fs::write(global.join("global.md"), "GLOBAL").expect("global template");
+        let err = load_profile_template(data_dir(&dir), "omni", "kanban task", "global")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("kanban task template 'global' not found"),
+            "{err}"
+        );
+        assert!(err.contains("profiles/omni/templates/global.md"), "{err}");
+    }
+
+    #[test]
+    fn template_kind_derivation() {
+        let mut thread = Thread {
+            id: 1,
+            status: "running".into(),
+            cause: "system".into(),
+            channel_id: "cron".into(),
+            profile: "omni".into(),
+            provider: None,
+            model: None,
+            input_tokens: 0,
+            cached_tokens: 0,
+            output_tokens: 0,
+            duration_ms: 0,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            ended_at: None,
+            terminal: false,
+            task_id: None,
+            schedule_task_id: None,
+            plan: false,
+            parent_id: None,
+            iterations: 0,
+            workflow_step: None,
+            template: None,
+            toolset: None,
+        };
+        let mut msg = Message {
+            id: 1,
+            thread_id: 1,
+            role: "system".into(),
+            content: "c".into(),
+            thread_sequence: 0,
+            external_id: None,
+            metadata: serde_json::json!({}),
+            embedding: None,
+            summary_text: None,
+            is_summary: false,
+            msg_type: "cause".into(),
+            msg_subtype: None,
+            original_thread_id: None,
+            created_at: chrono::Utc::now(),
+            iteration_number: 0,
+            duration_ms: 0,
+            token_usage: serde_json::json!({}),
+        };
+        assert_eq!(template_kind(&thread, &msg), "channel");
+        thread.task_id = Some("t1".into());
+        assert_eq!(template_kind(&thread, &msg), "kanban task");
+        thread.task_id = None;
+        thread.schedule_task_id = Some("s1".into());
+        assert_eq!(template_kind(&thread, &msg), "schedule task");
+        thread.schedule_task_id = None;
+        msg.msg_type = "hook".into();
+        assert_eq!(template_kind(&thread, &msg), "hook");
+    }
 }

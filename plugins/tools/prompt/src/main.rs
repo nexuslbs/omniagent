@@ -1133,40 +1133,44 @@ fn build_role_block(workflow_step: &str) -> Option<String> {
 /// The role's `template` field in workflows.yml is a FILE NAME (e.g.
 /// `dev-development`), NOT the template text itself. The content is loaded
 /// from `<omni_dir>/profiles/<profile>/templates/<name>.md` (with `.md`
-/// appended when the name has no extension) and returned. Returns None when
-/// the workflow/role is absent, the template field is empty, or the template
-/// file is missing - callers decide whether to degrade (executor) or fall
-/// back (tester/reviewer).
+/// appended when the name has no extension). Returns `Ok(None)` when the
+/// workflow/role is absent or the template field is empty (no template
+/// configured); returns an ERROR when the template field IS set but the name
+/// is invalid (path traversal / absolute / other-profile) or the file is
+/// missing - templates must be PROFILE templates (operator directive
+/// 2026-09-24), never a silent fallback.
 fn load_role_template(
     data_dir: &str,
     profile_name: &str,
     workflow_id: &str,
     role: &str,
-) -> Option<String> {
+) -> Result<Option<String>, String> {
     let path = std::path::Path::new(data_dir).join("workflows.yml");
-    let text = std::fs::read_to_string(path).ok()?;
-    let file: WorkflowsYaml = serde_yaml::from_str(&text).ok()?;
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("cannot read workflows.yml: {e}"))?;
+    let file: WorkflowsYaml =
+        serde_yaml::from_str(&text).map_err(|e| format!("invalid workflows.yml: {e}"))?;
     let template_name = file
         .workflows
-        .get(workflow_id)?
-        .roles
-        .get(role)?
-        .template
-        .clone()?;
+        .get(workflow_id)
+        .and_then(|w| w.roles.get(role))
+        .and_then(|r| r.template.clone());
+    let Some(template_name) = template_name else {
+        return Ok(None);
+    };
     if template_name.trim().is_empty() {
-        return None;
+        return Ok(None);
     }
-    let loaded = crate::memory_store::load_template(data_dir, profile_name, &template_name);
-    if loaded.is_none() {
-        tracing::warn!(
-            workflow_id,
-            role,
-            profile_name,
-            template_name,
-            "workflow role template file not found in profiles/<profile>/templates - no template applied"
-        );
+    let name = template_name.trim();
+    crate::memory_store::validate_template_name(name)
+        .map_err(|e| format!("workflow template error: {e}"))?;
+    let loaded = crate::memory_store::load_template(data_dir, profile_name, name);
+    match loaded {
+        Some(content) => Ok(Some(content)),
+        None => Err(format!(
+            "workflow template '{name}' not found for profile '{profile_name}': expected profiles/{profile_name}/templates/{name}.md - templates must be profile templates"
+        )),
     }
-    loaded
 }
 
 /// Inverse prompt mapping for workflow steps (Phase 3b):
@@ -1560,8 +1564,16 @@ async fn handle_generate_full(
         {
             Ok(Some(wf)) => {
                 if let (Some(wf_id), Some(step)) = (&wf.workflow_id, &wf.workflow_step) {
-                    let template = step_to_role(step)
-                        .and_then(|role| load_role_template(data_dir, profile_name, wf_id, role));
+                    let template = match step_to_role(step) {
+                        Some(role) => match load_role_template(data_dir, profile_name, wf_id, role)
+                        {
+                            Ok(t) => t,
+                            Err(e) => {
+                                return Ok((format!("workflow template error: {e}"), true));
+                            }
+                        },
+                        None => None,
+                    };
                     apply_workflow_mapping(
                         &mut system,
                         &mut user,
@@ -2541,18 +2553,67 @@ mod tests {
 
         // File name -> content loaded from the profile templates directory.
         let content = load_role_template(data_dir, "omni", "wf", "executor")
-            .expect("template should load from file");
+            .expect("template should load from file")
+            .expect("template content present");
         assert_eq!(content, "EXECUTOR CONTENT FROM FILE");
 
-        // Missing template file -> None (never the raw name).
+        // Missing template file -> hard error (never the raw name, never a
+        // silent fallback; operator directive 2026-09-24).
+        let err = load_role_template(data_dir, "omni", "wf", "tester")
+            .expect_err("missing template file must be a hard error");
         assert!(
-            load_role_template(data_dir, "omni", "wf", "tester").is_none(),
-            "missing template file must yield None, not the raw name"
+            err.contains("workflow template 'missing-template' not found")
+                && err.contains("profiles/omni/templates/missing-template.md"),
+            "err: {err}"
         );
-        // Unknown role -> None.
-        assert!(load_role_template(data_dir, "omni", "wf", "nope").is_none());
-        // Unknown workflow -> None.
-        assert!(load_role_template(data_dir, "omni", "nope", "executor").is_none());
+        // Unknown role / workflow -> Ok(None) (no template configured).
+        assert_eq!(
+            load_role_template(data_dir, "omni", "wf", "nope").unwrap(),
+            None
+        );
+        assert_eq!(
+            load_role_template(data_dir, "omni", "nope", "executor").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn role_template_escaping_name_is_rejected() {
+        // A path-traversal / absolute / other-profile template reference must
+        // be rejected with an actionable error, never resolved outside the
+        // acting profile's templates dir.
+        let dir = tempdir_uniq("role-template-escape");
+        let data_dir = dir.as_path().to_str().unwrap();
+        let templates_dir = dir
+            .as_path()
+            .join("profiles")
+            .join("omni")
+            .join("templates");
+        std::fs::create_dir_all(&templates_dir).expect("create templates dir");
+        // The escaping target EXISTS on disk (other profile) - must still be
+        // rejected for profile omni.
+        let other_templates = dir
+            .as_path()
+            .join("profiles")
+            .join("other")
+            .join("templates");
+        std::fs::create_dir_all(&other_templates).expect("create other templates dir");
+        std::fs::write(other_templates.join("evil.md"), "EVIL").expect("write evil template");
+        for bad in ["../other/evil", "/abs/path", "sub/evil", "..\\evil"] {
+            std::fs::write(
+                dir.as_path().join("workflows.yml"),
+                format!(
+                    "workflows:\n  wf:\n    roles:\n      executor:\n        template: {bad}\n"
+                ),
+            )
+            .expect("write workflows.yml");
+            let err = load_role_template(data_dir, "omni", "wf", "executor")
+                .expect_err("escaping template name must be rejected");
+            assert!(
+                err.contains("must be a plain file name"),
+                "bad name {bad:?} -> err: {err}"
+            );
+        }
     }
 
     /// Unique temp dir under the system temp dir (no tempfile dev-dep).
