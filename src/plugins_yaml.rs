@@ -3163,45 +3163,39 @@ providers:
         let (d, data_dir) = test_data_dir();
         let platform_dir = d.path().join("plugins/platforms/test-python");
         std::fs::create_dir_all(&platform_dir).unwrap();
-        std::fs::write(platform_dir.join("platform.py"), "print('platform')\n").unwrap();
-        std::fs::write(
-            platform_dir.join("plugin.json"),
-            "{\"name\":\"test-python\",\"version\":\"0.1.0\",\"type\":\"platform\",\
-             \"entrypoint\":{\"command\":\"python3\",\"args\":[\"platform.py\"],\
-             \"transport\":\"stdio\"}}",
-        )
-        .unwrap();
+        let plat_py = platform_dir.join("platform.py");
+        std::fs::write(plat_py, "print('platform')\n").unwrap();
+        let plat_json = "{\"name\":\"test-python\",\"version\":\"0.1.0\",\"type\":\"platform\",\"entrypoint\":{\"command\":\"python3\",\"args\":[\"platform.py\"],\"transport\":\"stdio\"}}";
+        let plat_json_path = platform_dir.join("plugin.json");
+        std::fs::write(plat_json_path, plat_json).unwrap();
         let tool_dir = d.path().join("plugins/tools/test-python");
         std::fs::create_dir_all(&tool_dir).unwrap();
-        std::fs::write(tool_dir.join("server.py"), "print('tool')\n").unwrap();
-        std::fs::write(
-            tool_dir.join("plugin.json"),
-            "{\"name\":\"test-python\",\"version\":\"0.1.0\",\"type\":\"mcp\",\
-             \"entrypoint\":{\"command\":\"python3\",\"args\":[\"server.py\"],\
-             \"transport\":\"stdio\"}}",
-        )
-        .unwrap();
+        let tool_py = tool_dir.join("server.py");
+        std::fs::write(tool_py, "print('tool')\n").unwrap();
+        let tool_json = "{\"name\":\"test-python\",\"version\":\"0.1.0\",\"type\":\"mcp\",\"entrypoint\":{\"command\":\"python3\",\"args\":[\"server.py\"],\"transport\":\"stdio\"}}";
+        let tool_json_path = tool_dir.join("plugin.json");
+        std::fs::write(tool_json_path, tool_json).unwrap();
         let cfg_dir = d.path().join("config");
         std::fs::create_dir_all(&cfg_dir).unwrap();
-        std::fs::write(
-            cfg_dir.join("plugins.yml"),
-            "platforms:\n  test-python:\n    enabled: true\n    source: bundled\n\
-             tools:\n  test-python:\n    enabled: false\n    source: bundled\n",
-        )
-        .unwrap();
+        let cfg = "platforms:\n  test-python:\n    enabled: true\n    source: bundled\ntools:\n  test-python:\n    enabled: false\n    source: bundled\n";
+        let cfg_path = cfg_dir.join("plugins.yml");
+        std::fs::write(cfg_path, cfg).unwrap();
 
         let details = list_plugins(&data_dir).expect("list_plugins");
-        let platform = details
-            .iter()
-            .find(|p| p.name == "test-python" && p.plugin_type == "platform")
-            .expect("platform row for test-python");
-        let tool = details
-            .iter()
-            .find(|p| p.name == "test-python" && p.plugin_type == "tool")
-            .expect("tool row for test-python");
-        assert_eq!(
-            platform.status, "enabled", "platform row must read platforms.*"
-        );
-        assert_eq!(tool.status, "disabled", "tool row must read tools.*");
+        let mut platform_status = None;
+        let mut tool_status = None;
+        for p in &details {
+            if p.name != "test-python" {
+                continue;
+            }
+            if p.plugin_type == "platform" {
+                platform_status = Some(p.status.clone());
+            }
+            if p.plugin_type == "tool" {
+                tool_status = Some(p.status.clone());
+            }
+        }
+        assert_eq!(platform_status.as_deref(), Some("enabled"));
+        assert_eq!(tool_status.as_deref(), Some("disabled"));
     }
 }
