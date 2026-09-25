@@ -1359,8 +1359,20 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
     let tool_entries = load_raw(data_dir, &PluginYamlType::Tool)?;
     let provider_entries = load_raw(data_dir, &PluginYamlType::Provider)?;
 
-    // Group discovered plugins by key (directory name)
-    let mut groups: std::collections::BTreeMap<String, PluginSourceGroup> =
+    // Group discovered plugins by (directory name, plugin type).
+    //
+    // The plugin TYPE must be part of the key: a TOOL and a PLATFORM can share
+    // one name (the `test-python` fixture exists in both plugins/tools/ and
+    // plugins/platforms/). Keyed by name alone, the group carried ONE
+    // yaml_type/yaml_entry taken from whichever source disk discovery visited
+    // FIRST, so the status of EVERY row of that name (and which source was
+    // primary) depended on the filesystem walk order: when the tool source was
+    // visited first, the platform rows fell back to the duplicate default
+    // ("disabled") even though platforms.<name>.enabled was true in
+    // plugins.yml. Observed in CI as GROUP 18/19 "status should be enabled, got:
+    // disabled" for test-python only (its js/rust counterparts are named
+    // test-js-tool/test-rust-tool and never collide).
+    let mut groups: std::collections::BTreeMap<(String, String), PluginSourceGroup> =
         std::collections::BTreeMap::new();
 
     for (manifest, source, base_path) in &discovered {
@@ -1418,8 +1430,9 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
             }
         }
 
+        let group_key = (key.clone(), yaml_type.file_name().to_string());
         let entry = groups
-            .entry(key.clone())
+            .entry(group_key)
             .or_insert_with(|| PluginSourceGroup {
                 key: key.clone(),
                 sources: Vec::new(),
@@ -1429,7 +1442,9 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
         entry
             .sources
             .push((manifest.clone(), source.clone(), base_path.clone()));
-        // Only set YAML info on first insertion (all sources share the same YAML)
+        // Every source in this group has the same plugin type (the type is part
+        // of the key above), so the shared YAML entry always comes from this
+        // plugin's own section whatever order discovery visited the sources in.
         if entry.yaml_type.is_none() {
             entry.yaml_type = Some(yaml_type);
             entry.yaml_entry = yaml_entry.cloned();
@@ -1457,25 +1472,27 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
                     if !std::path::Path::new(&manifest_path).exists() {
                         continue;
                     }
+                    // Source groups are keyed by (name, plugin type).
+                    let gkey = (name.clone(), yaml_type.file_name().to_string());
                     // Check if a remote source is already in this group
-                    if groups.contains_key(name) {
-                        let has_remote = groups[name].sources.iter().any(|(_, s, _)| s == "remote");
+                    if groups.contains_key(&gkey) {
+                        let has_remote =
+                            groups[&gkey].sources.iter().any(|(_, s, _)| s == "remote");
                         if has_remote {
                             continue;
                         }
                     }
                     if let Ok(manifest) = crate::plugin::load_manifest(&manifest_path) {
                         let base_path = manifest_path.to_string();
-                        let key = name.clone();
                         // Add to existing group or create new one
-                        if let Some(group) = groups.get_mut(name) {
+                        if let Some(group) = groups.get_mut(&gkey) {
                             group
                                 .sources
                                 .push((manifest, "remote".to_string(), base_path));
                         } else {
                             let sources = vec![(manifest, "remote".to_string(), base_path)];
                             groups.insert(
-                                key,
+                                gkey,
                                 PluginSourceGroup {
                                     key: name.clone(),
                                     sources,
@@ -1492,7 +1509,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
 
     let mut results: Vec<PluginDetail> = Vec::new();
 
-    for (key, group) in &groups {
+    for (_group_key, group) in &groups {
         let primary_idx = pick_primary_source(group);
 
         let _yaml_type = group.yaml_type.as_ref().unwrap_or(&PluginYamlType::Tool);
@@ -1522,7 +1539,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
                 manifest,
                 source,
                 detail_yaml_entry,
-                Some(key),
+                Some(group.key.as_str()),
                 plugin_dir,
                 data_dir,
                 is_primary.map(|p| !p).unwrap_or(group.sources.len() > 1),
@@ -1545,7 +1562,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
         (PluginYamlType::Provider, &provider_entries),
     ] {
         for (key, yaml_entry) in *entries {
-            if !groups.contains_key(key) {
+            if !groups.contains_key(&(key.clone(), yaml_type.file_name().to_string())) {
                 let is_remote = yaml_entry.source == "remote";
                 let manifest = PluginManifest {
                     tools: Vec::new(),
@@ -1870,7 +1887,7 @@ pub fn get_plugin(
     let provider_entries = load_raw(data_dir, &PluginYamlType::Provider)?;
 
     // Group by key (same logic as list_plugins)
-    let mut groups: std::collections::BTreeMap<String, PluginSourceGroup> =
+    let mut groups: std::collections::BTreeMap<(String, String), PluginSourceGroup> =
         std::collections::BTreeMap::new();
 
     for (manifest, source, base_path) in &discovered {
@@ -1931,7 +1948,7 @@ pub fn get_plugin(
         }
 
         let entry = groups
-            .entry(key.clone())
+            .entry((key.clone(), yaml_type.file_name().to_string()))
             .or_insert_with(|| PluginSourceGroup {
                 key: key.clone(),
                 sources: Vec::new(),
@@ -1951,13 +1968,13 @@ pub fn get_plugin(
     // A plugin name may span multiple groups when remote sources have subpath keys
     // (e.g., "cron" group + "cron-echo" group both match name "cron").
     let mut merged_group: Option<PluginSourceGroup> = None;
-    for (key, group) in &groups {
+    for (_group_key, group) in &groups {
         // Only match groups whose yaml_type matches the requested type
         let type_matches = group.yaml_type.as_ref().map(|gt| gt == pt).unwrap_or(true);
         if !type_matches {
             continue;
         }
-        let matches = key == name || group.sources.iter().any(|(m, _, _)| m.name == name);
+        let matches = group.key == name || group.sources.iter().any(|(m, _, _)| m.name == name);
         if !matches {
             continue;
         }
@@ -3129,6 +3146,62 @@ providers:
         assert_eq!(
             existing_config_or_default(&path, &pt, "telegram")["bot_token"],
             serde_json::json!("12345")
+        );
+    }
+
+    /// A TOOL and a PLATFORM can share one name (`test-python` is such a pair in
+    /// the release fixtures): the source group must be keyed by (name, type) so
+    /// every row's status comes from ITS OWN plugins.yml section, whatever order
+    /// disk discovery visited the sources in. Keyed by name alone, the group
+    /// adopted the first discovered source's section (or none at all), so a
+    /// PLATFORM row could report the TOOL's `enabled: false` - the CI GROUP 18/19
+    /// failure "Platform 'test-python' status should be enabled, got: disabled".
+    #[test]
+    fn test_list_plugins_isolates_same_name_across_types() {
+        let (d, data_dir) = test_data_dir();
+        let platform_dir = d.path().join("plugins/platforms/test-python");
+        std::fs::create_dir_all(&platform_dir).unwrap();
+        std::fs::write(
+            platform_dir.join("plugin.json"),
+            "{\"name\":\"test-python\",\"version\":\"0.1.0\",\"type\":\"platform\",\
+             \"entrypoint\":{\"command\":\"python3\",\"args\":[\"platform.py\"],\
+             \"transport\":\"stdio\"}}",
+        )
+        .unwrap();
+        let tool_dir = d.path().join("plugins/tools/test-python");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(
+            tool_dir.join("plugin.json"),
+            "{\"name\":\"test-python\",\"version\":\"0.1.0\",\"type\":\"mcp\",\
+             \"entrypoint\":{\"command\":\"python3\",\"args\":[\"server.py\"],\
+             \"transport\":\"stdio\"}}",
+        )
+        .unwrap();
+        let cfg_dir = d.path().join("config");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join("plugins.yml"),
+            "platforms:\n  test-python:\n    enabled: true\n    source: bundled\n\
+             tools:\n  test-python:\n    enabled: false\n    source: bundled\n",
+        )
+        .unwrap();
+
+        let details = list_plugins(&data_dir).expect("list_plugins");
+        let platform = details
+            .iter()
+            .find(|p| p.name == "test-python" && p.plugin_type == "platform")
+            .expect("platform row for test-python");
+        let tool = details
+            .iter()
+            .find(|p| p.name == "test-python" && p.plugin_type == "tool")
+            .expect("tool row for test-python");
+        assert_eq!(
+            platform.status, "enabled",
+            "the PLATFORM row must take platforms.test-python.enabled=true"
+        );
+        assert_eq!(
+            tool.status, "disabled",
+            "the TOOL row must take tools.test-python.enabled=false"
         );
     }
 }
