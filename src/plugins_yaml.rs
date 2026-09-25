@@ -1509,7 +1509,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
 
     let mut results: Vec<PluginDetail> = Vec::new();
 
-    for (_group_key, group) in &groups {
+    for group in groups.values() {
         let primary_idx = pick_primary_source(group);
 
         let _yaml_type = group.yaml_type.as_ref().unwrap_or(&PluginYamlType::Tool);
@@ -1970,7 +1970,7 @@ pub fn get_plugin(
     // A plugin name may span multiple groups when remote sources have subpath keys
     // (e.g., "cron" group + "cron-echo" group both match name "cron").
     let mut merged_group: Option<PluginSourceGroup> = None;
-    for (_group_key, group) in &groups {
+    for group in groups.values() {
         // Only match groups whose yaml_type matches the requested type
         let type_matches = group.yaml_type.as_ref().map(|gt| gt == pt).unwrap_or(true);
         if !type_matches {
@@ -3200,12 +3200,8 @@ providers:
             .find(|p| p.name == "test-python" && p.plugin_type == "tool")
             .expect("tool row for test-python");
         assert_eq!(
-            platform.status, "enabled",
-            "the PLATFORM row must take platforms.test-python.enabled=true"
+            platform.status, "enabled", "platform row must read platforms.*"
         );
-        assert_eq!(
-            tool.status, "disabled",
-            "the TOOL row must take tools.test-python.enabled=false"
-        );
+        assert_eq!(tool.status, "disabled", "tool row must read tools.*");
     }
 }
