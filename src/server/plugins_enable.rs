@@ -233,6 +233,22 @@ async fn respond_enabled(
     match plugins_yaml::get_plugin(&state.data_dir, name, yaml_type) {
         Ok(Some(mut detail)) => {
             apply_tool_runtime_status(state, &mut detail).await;
+            // The VERIFIED runtime state wins over a discovery-only phantom:
+            // get_plugin falls back to a synthetic YAML entry (status
+            // "not_found", has_source_code=false) whenever plugin discovery
+            // does not list a source for the key, and answering a 200
+            // "success" with status "not_found" for a plugin that this call
+            // just verified as RUNNING contradicts the call's own contract
+            // (observed in CI 2026-09-25: the platform client was up while the
+            // source was not discovered, and the enable answered not_found).
+            if detail.status == "not_found" {
+                tracing::warn!(
+                    "Plugin '{}' is verified running but discovery lists no source; \
+                     reporting status 'enabled' for this lifecycle answer",
+                    name
+                );
+                detail.status = "enabled".to_string();
+            }
             (
                 StatusCode::OK,
                 Json(serde_json::json!({"success": true, "data": detail})),
@@ -349,7 +365,20 @@ async fn apply_disable(
                 }
             }
             match plugins_yaml::get_plugin(&state.data_dir, &name, &yaml_type) {
-                Ok(Some(detail)) => (StatusCode::OK, Json(serde_json::json!({"success": true, "data": detail}))).into_response(),
+                Ok(Some(mut detail)) => {
+                    // Same contract as respond_enabled: a disable that applied
+                    // its config must answer the state it APPLIED, never the
+                    // discovery-only "not_found" phantom.
+                    if detail.status == "not_found" {
+                        tracing::warn!(
+                            "Plugin '{}' was disabled but discovery lists no source; \
+                             reporting status 'disabled' for this lifecycle answer",
+                            name
+                        );
+                        detail.status = "disabled".to_string();
+                    }
+                    (StatusCode::OK, Json(serde_json::json!({"success": true, "data": detail}))).into_response()
+                }
                 _ => (StatusCode::OK, Json(serde_json::json!({"success": true, "data": {"name": name, "status": "disabled"}}))).into_response(),
             }
         }
