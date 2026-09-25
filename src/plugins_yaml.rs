@@ -1637,7 +1637,9 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
         ] {
             if let Some(entries) = entries {
                 for (key, remote) in entries {
-                    if groups.contains_key(key) || yaml_entries.contains_key(key) {
+                    if groups.contains_key(&(key.clone(), yaml_type.file_name().to_string()))
+                        || yaml_entries.contains_key(key)
+                    {
                         continue;
                     }
                     results.push(build_remote_only_detail(key, &yaml_type, remote));
@@ -3161,6 +3163,7 @@ providers:
         let (d, data_dir) = test_data_dir();
         let platform_dir = d.path().join("plugins/platforms/test-python");
         std::fs::create_dir_all(&platform_dir).unwrap();
+        std::fs::write(platform_dir.join("platform.py"), "print('platform')\n").unwrap();
         std::fs::write(
             platform_dir.join("plugin.json"),
             "{\"name\":\"test-python\",\"version\":\"0.1.0\",\"type\":\"platform\",\
@@ -3170,6 +3173,7 @@ providers:
         .unwrap();
         let tool_dir = d.path().join("plugins/tools/test-python");
         std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(tool_dir.join("server.py"), "print('tool')\n").unwrap();
         std::fs::write(
             tool_dir.join("plugin.json"),
             "{\"name\":\"test-python\",\"version\":\"0.1.0\",\"type\":\"mcp\",\
