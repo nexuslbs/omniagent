@@ -290,7 +290,7 @@ mod tests {
         assert_eq!(r.profiles, 2);
         assert_eq!(r.deduplicated, 1);
         assert_eq!(r.conflicts, 1);
-        assert_eq!(r.moved, 3);
+        assert_eq!(r.moved, 4);
         assert_eq!(
             std::fs::read_to_string(root.join("wiki/shared.md")).unwrap(),
             "same"
