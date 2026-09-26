@@ -2,7 +2,7 @@
 //! (`workflow_role > workflow > kanban_task > board > channel > profile`):
 //! a CHANNEL carrying a `template` value must LOAD and SURVIVE SAVE - the
 //! channels.yml writer must not drop the field (see
-//! `profiles/omni/wiki/Projects/Omniagent/Field-Resolution.md`, section 5).
+//! `wiki/Projects/Omniagent/Field-Resolution.md`, section 5).
 //!
 //! The profile tier round-trip is covered by `src/profiles_yaml.rs` unit tests
 //! and the workflow/role tiers by `src/workflows.rs` round-trip tests; this
