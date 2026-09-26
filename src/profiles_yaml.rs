@@ -38,7 +38,9 @@
 //! directory with no matching entry in `config/profiles.yml` is ignored
 //! (not listed, not resolvable); conversely a YAML entry is considered an
 //! existing profile even with no `profiles/<name>/` directory (the dir only
-//! carries profile *files*: templates, skills, MEMORY.md - the WIKI is shared
+//! carries profile *files*: templates, skills, MEMORY.md - the wiki is a SHARED
+//! instance-level corpus at `<omni_dir>/wiki/` (`crate::wiki::wiki_root`), not
+//! per-profile).
 
 use std::collections::HashMap;
 use std::path::PathBuf;

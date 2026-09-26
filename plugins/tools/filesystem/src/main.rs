@@ -1672,7 +1672,7 @@ mod tests {
         };
         // defaults: all three subdir toggles on
         assert!(restrict_write_path("/opt/omni/data/threads/5/notes.md", &cfg).is_ok());
-        assert!(restrict_write_path("/opt/omni/profiles/omni/wiki/a.md", &cfg).is_ok());
+        assert!(restrict_write_path("/opt/omni/profiles/omni/skills/a.md", &cfg).is_ok());
         assert!(restrict_write_path("/opt/omni/plugins/x/main.rs", &cfg).is_ok());
         // but the omni root itself is NOT allowed without write_omni_all
         assert!(restrict_write_path("/opt/omni/other.txt", &cfg).is_err());
