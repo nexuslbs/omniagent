@@ -58,6 +58,7 @@ impl WikiMigration {
 ///   * different bytes  -> the shared-root file WINS and the incoming file is
 ///     preserved next to it as `<stem>.from-<profile><ext>` so no content is
 ///     lost and no divergence remains.
+///
 /// Empty legacy directories are removed afterwards, so nothing is left in the
 /// old location. Fresh installs (no `profiles/<profile>/wiki/`) are a no-op.
 ///
