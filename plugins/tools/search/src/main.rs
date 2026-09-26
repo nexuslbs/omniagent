@@ -5,7 +5,7 @@
 //!
 //! Tools:
 //! - search_messages: keyword (ILIKE) message search across channels
-//! - search_wiki: keyword search over the active profile's wiki
+//! - search_wiki: keyword search over the shared wiki at the omni-dir root
 //! - search_database: free-form SELECT SQL (read-only)
 //! - search_thread_messages: all messages from a thread
 //! - search_channel_prompts: all seq-0 (prompt) messages from a channel
@@ -262,29 +262,24 @@ async fn handle_search_messages(pool: &PgPool, args: &Value) -> Result<(String, 
 // Tool: search_wiki
 // ---------------------------------------------------------------------------
 
-fn handle_search_wiki(args: &Value, omni_dir: &str, profile_name: &str) -> Result<(String, bool)> {
+fn handle_search_wiki(args: &Value, omni_dir: &str) -> Result<(String, bool)> {
     let query = args["query"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'query'"))?;
     let limit = args["limit"].as_i64().unwrap_or(10).clamp(1, 30) as usize;
-    // Profile comes from the AGENT's runtime context (_meta.profile_name,
-    // injected by the MCP client on every tool call) - NOT from a tool
-    // argument. Only fall back to the active profile when meta is absent
-    // (e.g. manual testing outside the agent).
-    let profile = if profile_name.trim().is_empty() {
-        omniagent::profile::default_profile_name()
-    } else {
-        profile_name.trim().to_string()
-    };
 
-    let wiki_dir = format!("{}/profiles/{}/wiki", omni_dir, profile);
-    let wiki_dir_path = std::path::Path::new(&wiki_dir);
+    // The wiki is SHARED at the omni-dir root (<omni_dir>/wiki), NOT
+    // profile-scoped: resolve it through the single core helper so the path
+    // is defined in exactly one place.
+    let wiki_root_path = omniagent::wiki::wiki_root(omni_dir);
+    let wiki_dir_path = wiki_root_path.as_path();
+    let wiki_dir = wiki_root_path.to_string_lossy().to_string();
 
     if !wiki_dir_path.exists() {
         return Ok((
             format!(
-                "Wiki directory not found: {}. Is the profile correct? (active profile: {})",
-                wiki_dir, profile
+                "Wiki directory not found: {}. Expected the shared wiki at the omni-dir root.",
+                wiki_dir
             ),
             false,
         ));
@@ -637,12 +632,12 @@ mod search_wiki_tests {
                     .unwrap_or(0)
             );
             let root = std::env::temp_dir().join(uniq);
-            fs::create_dir_all(root.join("profiles/test/wiki")).expect("create test wiki dir");
+            fs::create_dir_all(root.join("wiki")).expect("create test wiki dir");
             TestWiki { root }
         }
 
         fn wiki_dir(&self) -> PathBuf {
-            self.root.join("profiles/test/wiki")
+            self.root.join("wiki")
         }
 
         fn write(&self, rel: &str, content: &str) {
@@ -656,7 +651,7 @@ mod search_wiki_tests {
         fn search(&self, query: &str, limit: i64) -> String {
             let args = json!({ "query": query, "limit": limit });
             let omni = self.root.to_str().expect("utf8 temp path").to_string();
-            handle_search_wiki(&args, &omni, "test")
+            handle_search_wiki(&args, &omni)
                 .expect("search_wiki runs")
                 .0
         }
@@ -1377,15 +1372,9 @@ async fn main() -> Result<()> {
     // ── search_wiki ───────────────────────────────────────────────────────
     let c1 = config.clone();
     let d1 = default_omni_dir.clone();
-    let wiki_handler: ToolHandler = Box::new(move |args: Value, meta: Option<McpMeta>| {
+    let wiki_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let c = c1.clone();
         let d = d1.clone();
-        // Agent's profile from _meta (injected by the MCP client) - same
-        // pattern as the skills plugin. Never requires a profile argument.
-        let profile = meta
-            .as_ref()
-            .and_then(|m| m.profile_name.clone())
-            .unwrap_or_default();
         Box::pin(async move {
             let cfg = c.lock();
             let omni_dir = if cfg.omni_dir.is_empty() {
@@ -1393,7 +1382,7 @@ async fn main() -> Result<()> {
             } else {
                 &cfg.omni_dir
             };
-            handle_search_wiki(&args, omni_dir, &profile)
+            handle_search_wiki(&args, omni_dir)
         })
     });
 

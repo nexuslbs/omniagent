@@ -501,9 +501,10 @@ async fn build_prior_attempts_block(pool: &PgPool, thread_id: i64) -> Result<Opt
 }
 // ---------------------------------------------------------------------------
 // R8-K: learned knowledge - read side of the learning loop. Write side:
-// memory_promote-to-memory writes <data_dir>/profiles/<profile>/wiki/Memory/
-// Promoted/*.md; WITHOUT this read-back the loop is write-only and every
-// successor thread re-derives the same knowledge (6 threads died doing that).
+// memory_promote-to-memory writes <data_dir>/wiki/Memory/Promoted/*.md (the
+// wiki is SHARED at the omni-dir root, not profile-scoped); WITHOUT this
+// read-back the loop is write-only and every successor thread re-derives the
+// same knowledge (6 threads died doing that).
 
 const LEARNED_KNOWLEDGE_MAX_ENTRY_CHARS: usize = 600;
 const LEARNED_KNOWLEDGE_MAX_TOTAL_CHARS: usize = 2000;
@@ -529,16 +530,12 @@ fn strip_frontmatter(content: &str) -> &str {
     trimmed
 }
 
-/// Read promoted memories from <data_dir>/profiles/<profile>/wiki/Memory/
-/// Promoted/*.md, newest first by mtime. Missing dir / unreadable files are
-/// skipped silently - the learning loop must never fail the prompt.
-fn load_promoted_memories(data_dir: &str, profile_name: &str) -> Vec<LearnedMemory> {
-    let dir = std::path::Path::new(data_dir)
-        .join("profiles")
-        .join(profile_name)
-        .join("wiki")
-        .join("Memory")
-        .join("Promoted");
+/// Read promoted memories from the SHARED wiki
+/// (<data_dir>/wiki/Memory/Promoted/*.md), newest first by mtime. Missing dir
+/// / unreadable files are skipped silently - the learning loop must never fail
+/// the prompt.
+fn load_promoted_memories(data_dir: &str) -> Vec<LearnedMemory> {
+    let dir = omniagent::wiki::promoted_dir(data_dir);
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
         Err(_) => return Vec::new(),
@@ -590,11 +587,11 @@ fn render_learned_knowledge_block(memories: &[LearnedMemory]) -> String {
     parts.join("\n\n")
 }
 
-/// Build the Learned Knowledge block for this profile. When no promoted
+/// Build the Learned Knowledge block from the SHARED wiki. When no promoted
 /// memories exist yet, emit a short hint that teaches the agent the loop
 /// exists (write side: memory_promote-to-memory). Never fails the prompt.
-fn build_learned_knowledge_block(data_dir: &str, profile_name: &str) -> Option<String> {
-    let memories = load_promoted_memories(data_dir, profile_name);
+fn build_learned_knowledge_block(data_dir: &str) -> Option<String> {
+    let memories = load_promoted_memories(data_dir);
     if memories.is_empty() {
         return Some(
             "=== Learned Knowledge === (none yet - after completing this task, promote what you learned via memory_promote-to-memory so future threads benefit)"
@@ -1482,13 +1479,13 @@ async fn handle_generate_full(
     }
 
     // 2c-ext3. Learned Knowledge (R8-K) - promoted memories written by prior
-    // threads via memory_promote-to-memory live under
-    // <data_dir>/profiles/<profile>/wiki/Memory/Promoted/*.md. Without this
+    // threads via memory_promote-to-memory live under the SHARED wiki root
+    // <data_dir>/wiki/Memory/Promoted/*.md. Without this
     // read-back the learning loop is write-only: facts get promoted but never
     // reach future prompts, so every successor re-derives the same knowledge.
     // Inject newest-first, truncated; when none exist yet, the block itself
     // teaches the agent that the loop exists.
-    if let Some(block) = build_learned_knowledge_block(data_dir, profile_name) {
+    if let Some(block) = build_learned_knowledge_block(data_dir) {
         context_blocks.push(block);
     }
 
@@ -3080,7 +3077,7 @@ mod prior_attempts_tests {
 
     #[test]
     fn learned_knowledge_block_emits_hint_when_no_memories() {
-        let block = build_learned_knowledge_block("/nonexistent/data_dir", "omni")
+        let block = build_learned_knowledge_block("/nonexistent/data_dir")
             .expect("hint block must be emitted even with no memories");
         assert!(block.contains("none yet"));
         assert!(block.contains("memory_promote-to-memory"));

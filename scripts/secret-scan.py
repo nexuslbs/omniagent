@@ -54,11 +54,11 @@ ALLOW_CONTENT = frozenset({
     ".github/workflows/plugins.yml",
     ".github/workflows/publish.yml",
     "scripts/tests.py",
-    "profiles/omni/wiki/Memory/Promoted/git-push-auth-fallback-via-github-app-jwt.md",
-    "profiles/omni/wiki/Memory/Promoted/git-push-workaround-broken-app-key.md",
-    "profiles/omni/wiki/Reference/Omniagent/Git-Plugin-GitHub-App-Key.md",
-    "profiles/omni/wiki/Reference/Omniagent/Redaction.md",
-    "profiles/omni/wiki/log.md",
+    "wiki/Memory/Promoted/git-push-auth-fallback-via-github-app-jwt.md",
+    "wiki/Memory/Promoted/git-push-workaround-broken-app-key.md",
+    "wiki/Reference/Omniagent/Git-Plugin-GitHub-App-Key.md",
+    "wiki/Reference/Omniagent/Redaction.md",
+    "wiki/log.md",
 })
 
 # Documented PUBLIC test vectors / example credentials that are NOT secrets.

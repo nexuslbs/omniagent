@@ -5,6 +5,7 @@ edition = "2021"
 description = "Prompt generation MCP server: generates the full LLM prompt including system prompt, thread context, and message compaction"
 
 [dependencies]
+omniagent = { path = "../../../" }
 mcp-server-util = { path = "../util" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

@@ -168,6 +168,23 @@ async fn run_server() -> AppResult<()> {
     // must start empty = disabled).
     config_path::migrate_legacy_settings(&data_dir);
 
+    // One-time, idempotent migration of the legacy PER-PROFILE wiki
+    // (`<omni_dir>/profiles/<profile>/wiki/`) to the SHARED root wiki
+    // (`<omni_dir>/wiki/`). The wiki is an instance-level corpus: every reader
+    // (search__wiki, the memory tools, the semantic_search indexer, ...)
+    // resolves it through `omniagent::wiki`. Fresh installs are a no-op.
+    let wiki_migration = omniagent::wiki::migrate_profile_wikis(&data_dir);
+    if !wiki_migration.is_noop() {
+        tracing::info!(
+            "Wiki migration: {} profile wiki(s) merged into {} ({} moved, {} deduplicated, {} conflicts)",
+            wiki_migration.profiles,
+            omniagent::wiki::wiki_root(&data_dir).display(),
+            wiki_migration.moved,
+            wiki_migration.deduplicated,
+            wiki_migration.conflicts
+        );
+    }
+
     // Provider/model overrides via config/models.yml: fail loud on a malformed
     // file (absent/empty is fine - zero behavior change).
     if let Err(e) = omniagent::models_yaml::load_models_file(&data_dir) {

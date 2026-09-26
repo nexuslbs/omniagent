@@ -276,9 +276,12 @@ fn promote_to_memory_tool() -> McpTool {
                     .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                     .unwrap_or_default();
                 let expires_in_days = args["expires_in_days"].as_i64().unwrap_or(30).max(1);
-                let profile = resolve_profile(&ctx, &args);
 
-                let wiki_dir = format!("{}/profiles/{}/wiki/Memory/Promoted", ctx.data_dir, profile);
+                // The wiki is SHARED root-level content: promoted memories live
+                // at <omni_dir>/wiki/Memory/Promoted (never under a profile).
+                let wiki_dir = crate::wiki::promoted_dir(&ctx.data_dir)
+                    .to_string_lossy()
+                    .to_string();
                 std::fs::create_dir_all(&wiki_dir).ok();
 
                 let sanitized: String = name.chars()
@@ -371,9 +374,10 @@ fn list_memories_tool() -> McpTool {
         behavior: ToolBehavior::default(),
         handler: Arc::new(|args: Value, ctx: AppContext| {
             Box::pin(async move {
-                let profile = resolve_profile(&ctx, &args);
                 let include_expired = args["include_expired"].as_bool().unwrap_or(false);
-                let wiki_dir = format!("{}/profiles/{}/wiki/Memory/Promoted", ctx.data_dir, profile);
+                let wiki_dir = crate::wiki::promoted_dir(&ctx.data_dir)
+                    .to_string_lossy()
+                    .to_string();
                 let dir_path = std::path::Path::new(&wiki_dir);
 
                 if !dir_path.exists() {
@@ -471,9 +475,10 @@ fn review_memories_tool() -> McpTool {
         behavior: ToolBehavior::default(),
         handler: Arc::new(|args: Value, ctx: AppContext| {
             Box::pin(async move {
-                let profile = resolve_profile(&ctx, &args);
                 let expiring_soon_days = args["expiring_soon_days"].as_i64().unwrap_or(7).max(1);
-                let wiki_dir = format!("{}/profiles/{}/wiki/Memory/Promoted", ctx.data_dir, profile);
+                let wiki_dir = crate::wiki::promoted_dir(&ctx.data_dir)
+                    .to_string_lossy()
+                    .to_string();
                 let dir_path = std::path::Path::new(&wiki_dir);
 
                 if !dir_path.exists() {

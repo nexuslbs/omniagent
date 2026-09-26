@@ -38,7 +38,7 @@
 //! directory with no matching entry in `config/profiles.yml` is ignored
 //! (not listed, not resolvable); conversely a YAML entry is considered an
 //! existing profile even with no `profiles/<name>/` directory (the dir only
-//! carries profile *files*: templates, skills, wiki, MEMORY.md).
+//! carries profile *files*: templates, skills, MEMORY.md - the WIKI is shared
 
 use std::collections::HashMap;
 use std::path::PathBuf;

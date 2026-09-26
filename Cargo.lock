@@ -1397,6 +1397,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "mcp-server-util",
+ "omniagent",
  "serde",
  "serde_json",
  "serde_yaml",

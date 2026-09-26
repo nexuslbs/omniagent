@@ -35,4 +35,5 @@ pub mod subtask;
 pub mod tasks_yaml;
 pub mod toolsets;
 pub mod vectorizer;
+pub mod wiki;
 pub mod workflows;
