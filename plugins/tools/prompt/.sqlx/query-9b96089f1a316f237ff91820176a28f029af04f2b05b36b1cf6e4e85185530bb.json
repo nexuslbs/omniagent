@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE threads SET task_id = NULL WHERE task_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9b96089f1a316f237ff91820176a28f029af04f2b05b36b1cf6e4e85185530bb"
+}

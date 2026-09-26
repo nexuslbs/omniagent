@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO messages\n            (thread_id, role, content, thread_sequence, external_id, metadata,\n             msg_type, msg_subtype, iteration_number, duration_ms, token_usage)\n        VALUES\n            ($1, 'system', $2, 1, $3,\n             $4::jsonb, 'error', $5, 0, 0, '{}'::jsonb)\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Jsonb",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "842e80a717dbec1cf324c16faf2f926454f50d6b2407e360f2adde8b22d19767"
+}

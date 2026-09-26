@@ -1,0 +1,196 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, title, body, status, priority, assignee, profile, template, toolset, archived, position, channel_id, plan,\n               created_at, updated_at\n        FROM kanban_tasks\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "title",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "body",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "body"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "priority",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "priority"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "assignee",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "assignee"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "profile",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "profile"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "template",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "template"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "toolset",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "toolset"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "archived",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "archived"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "position",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "position"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "channel_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "channel_id"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "plan",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "plan"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "updated_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "4b384c33e2f7689288007cb5e5a1bdd5bd684fc57248209dff39ffe10061b86f"
+}

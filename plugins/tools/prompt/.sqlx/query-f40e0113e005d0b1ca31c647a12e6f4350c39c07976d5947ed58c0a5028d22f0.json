@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT COALESCE(metadata->>'is_error', 'false')\n        FROM messages\n        WHERE thread_id = $1 AND msg_type = 'tool-result'\n        ORDER BY id DESC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "coalesce",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "f40e0113e005d0b1ca31c647a12e6f4350c39c07976d5947ed58c0a5028d22f0"
+}

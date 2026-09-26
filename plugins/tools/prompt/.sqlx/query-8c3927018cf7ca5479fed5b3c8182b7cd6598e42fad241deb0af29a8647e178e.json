@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE kanban_tasks SET thread_status = 'scheduled' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8c3927018cf7ca5479fed5b3c8182b7cd6598e42fad241deb0af29a8647e178e"
+}

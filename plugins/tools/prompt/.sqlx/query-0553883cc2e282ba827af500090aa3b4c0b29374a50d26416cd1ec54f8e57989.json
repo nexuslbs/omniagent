@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, previous_values)\n        SELECT\n            CASE WHEN d.task_id = $1 THEN d.depends_on_id ELSE d.task_id END,\n            'dependency_removed', NULL, NULL,\n            jsonb_build_object(\n                'depends_on_id', CAST($2 AS text),\n                'title', COALESCE(NULLIF(del.title, ''), '(deleted task)')\n            )\n        FROM kanban_task_dependencies d\n        LEFT JOIN kanban_tasks del ON del.id = $3\n        WHERE d.task_id = $4 OR d.depends_on_id = $5\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0553883cc2e282ba827af500090aa3b4c0b29374a50d26416cd1ec54f8e57989"
+}

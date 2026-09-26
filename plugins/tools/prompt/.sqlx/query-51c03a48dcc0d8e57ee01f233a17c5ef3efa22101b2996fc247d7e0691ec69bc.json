@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT t.id, t.status\n        FROM kanban_tasks t\n        WHERE t.status IN ('running', 'testing', 'review')\n          AND t.archived = false\n          AND NOT EXISTS (\n              SELECT 1 FROM threads th\n              WHERE th.task_id = t.id AND th.status IN ('pending', 'processing')\n          )\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "status"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "51c03a48dcc0d8e57ee01f233a17c5ef3efa22101b2996fc247d7e0691ec69bc"
+}

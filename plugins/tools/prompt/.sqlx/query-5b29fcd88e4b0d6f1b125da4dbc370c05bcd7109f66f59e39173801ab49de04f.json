@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT t.id, t.status FROM threads t\n                   JOIN messages m ON m.thread_id = t.id AND m.thread_sequence = 0\n                   WHERE t.task_id = $1 AND t.workflow_step = $2\n                     AND m.external_id LIKE $3\n                   ORDER BY t.id LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "status"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "5b29fcd88e4b0d6f1b125da4dbc370c05bcd7109f66f59e39173801ab49de04f"
+}

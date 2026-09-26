@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT m.thread_id\n        FROM messages m\n        JOIN threads t ON t.id = m.thread_id\n        WHERE t.channel_id = $1\n          AND m.external_id = $2\n          AND m.thread_sequence = 0\n        -- A root post maps to exactly one thread in practice; when a second\n        -- row ever shares that seq-0 external id (replayed / synthetic\n        -- message), prefer the LIVE thread (non-terminal, newest) so a\n        -- family stop never resolves to a dead duplicate and stops nothing.\n        ORDER BY t.terminal ASC, t.id DESC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "thread_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "thread_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "047342271ec8f1ff52e1dc74f36241119e5dc14bb38ce9afc1411214b94d4826"
+}

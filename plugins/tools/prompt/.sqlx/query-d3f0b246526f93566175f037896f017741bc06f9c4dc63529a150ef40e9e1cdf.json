@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT kt.name\n        FROM task_tags tt\n        JOIN kanban_tags kt ON kt.id = tt.tag_id\n        WHERE tt.task_id = $1\n        ORDER BY kt.name\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tags",
+            "name": "name"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d3f0b246526f93566175f037896f017741bc06f9c4dc63529a150ef40e9e1cdf"
+}

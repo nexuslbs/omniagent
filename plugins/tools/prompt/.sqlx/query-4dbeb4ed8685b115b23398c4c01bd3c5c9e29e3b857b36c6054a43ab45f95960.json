@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            COALESCE(m.msg_subtype, 'unknown') AS tool,\n            COUNT(*)::bigint AS count\n        FROM messages m\n        WHERE m.msg_type = 'tool-result'\n            AND m.created_at >= NOW() - INTERVAL '7 days'\n        GROUP BY m.msg_subtype\n        ORDER BY count DESC\n        LIMIT 10\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "tool",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "4dbeb4ed8685b115b23398c4c01bd3c5c9e29e3b857b36c6054a43ab45f95960"
+}

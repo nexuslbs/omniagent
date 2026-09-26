@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                        INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)\n                        VALUES ($1, 'cause', $2, 0, 'cause')\n                        RETURNING id\n                        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d94334f370d01c7ed71b956605c429ddfec3bb91f81d5396825632831e580222"
+}

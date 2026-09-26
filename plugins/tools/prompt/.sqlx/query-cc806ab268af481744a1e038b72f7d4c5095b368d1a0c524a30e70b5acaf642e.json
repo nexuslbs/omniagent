@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT depends_on_id\n            FROM kanban_task_dependencies\n            WHERE task_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "depends_on_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_task_dependencies",
+            "name": "depends_on_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "cc806ab268af481744a1e038b72f7d4c5095b368d1a0c524a30e70b5acaf642e"
+}

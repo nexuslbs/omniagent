@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE kanban_tasks SET\n            status = $1,\n            updated_at = NOW()\n        WHERE id = $2\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b6f6d98ac6e919da08f9ae18a3f5363c8d64ca6a4664908f7e5fa9463666576d"
+}

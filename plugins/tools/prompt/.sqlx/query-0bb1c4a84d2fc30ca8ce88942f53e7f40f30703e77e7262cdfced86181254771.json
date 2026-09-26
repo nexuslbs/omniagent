@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO kanban_tags (name) VALUES ($1) ON CONFLICT (name) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0bb1c4a84d2fc30ca8ce88942f53e7f40f30703e77e7262cdfced86181254771"
+}

@@ -60,14 +60,14 @@ fn resolve_omni_dir(cfg_omni: &str) -> String {
     }
 }
 
-/// WS-6: allowed write roots - the workspace dir (always) plus the OMNI_DIR
-/// subdirs enabled by config. `write_omni_all` supersedes the three subdir
-/// toggles.
+/// WS-6: allowed write roots - the workspace dir (always), the shared root wiki
+/// (`<omni_dir>/wiki`, always), plus the OMNI_DIR subdirs enabled by config.
+/// `write_omni_all` supersedes the three subdir toggles.
 fn allowed_write_roots(cfg: &Config) -> Vec<String> {
     let mut roots = vec![resolve_workspace_dir(&cfg.workspace_dir)];
     let omni = resolve_omni_dir(&cfg.omni_dir);
     if cfg.write_omni_all {
-        roots.push(omni);
+        roots.push(omni.clone());
     } else {
         if cfg.write_profiles {
             roots.push(format!("{omni}/profiles"));
@@ -79,12 +79,19 @@ fn allowed_write_roots(cfg: &Config) -> Vec<String> {
             roots.push(format!("{omni}/plugins"));
         }
     }
+    // The SHARED wiki lives at the OMNI_DIR ROOT (`<omni_dir>/wiki`). It is a
+    // first-class content location: the wiki data-source skill records its log
+    // entries through filesystem_write, so the root wiki is always writable -
+    // like the workspace root and independently of the subdir toggles. Without
+    // this, appending a log entry was rejected with "path outside allowed write
+    // roots" after the wiki moved off profiles/<profile>/wiki.
+    roots.push(format!("{omni}/wiki"));
     roots
 }
 
 /// WS-6: replaces the single-root `restrict_to_workspace` for writes. A write
 /// path must normalize INSIDE at least one allowed root (workspace dir always;
-/// OMNI_DIR or its profiles/data/plugins subdirs per config). Relative paths
+/// OMNI_DIR or its wiki/profiles/data/plugins subdirs per config). Relative paths
 /// resolve against the workspace root; `..` traversal that escapes every root
 /// is rejected.
 fn restrict_write_path(path: &str, cfg: &Config) -> Result<String, String> {
@@ -1389,7 +1396,7 @@ async fn main() -> Result<()> {
                 description:
                     "WRITE/CREATE A LOCAL FILE on disk. Use this to save content to a new or existing file. Creates parent directories automatically. This is the ONLY tool for writing file content. \
                     For very large files that exceed your output token limit, split the content across multiple calls: first call with append=false, then subsequent calls with append=true to add the rest. \
-                    SANDBOX: writes are allowed inside the workspace dir (/opt/workspace by default) AND inside OMNI_DIR subdirectories per plugin config: omni_dir/profiles (write_profiles), omni_dir/data (write_data), omni_dir/plugins (write_plugins); write_omni_all=true allows the entire OMNI_DIR. Writes anywhere else are rejected."
+                    SANDBOX: writes are allowed inside the workspace dir (/opt/workspace by default) AND inside the shared root wiki (omni_dir/wiki, always) AND inside OMNI_DIR subdirectories per plugin config: omni_dir/profiles (write_profiles), omni_dir/data (write_data), omni_dir/plugins (write_plugins); write_omni_all=true allows the entire OMNI_DIR. Writes anywhere else are rejected."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -1674,7 +1681,12 @@ mod tests {
         assert!(restrict_write_path("/opt/omni/data/threads/5/notes.md", &cfg).is_ok());
         assert!(restrict_write_path("/opt/omni/profiles/omni/skills/a.md", &cfg).is_ok());
         assert!(restrict_write_path("/opt/omni/plugins/x/main.rs", &cfg).is_ok());
-        // but the omni root itself is NOT allowed without write_omni_all
+        // the SHARED root wiki is always writable (wiki-at-root move)
+        assert!(restrict_write_path("/opt/omni/wiki/Reference/page.md", &cfg).is_ok());
+        assert!(restrict_write_path("/opt/omni/wiki", &cfg).is_ok());
+        // but a sibling dir with a similar name is NOT
+        assert!(restrict_write_path("/opt/omni/wikis/other.txt", &cfg).is_err());
+        // and the omni root itself is NOT allowed without write_omni_all
         assert!(restrict_write_path("/opt/omni/other.txt", &cfg).is_err());
         // write_data off
         let mut c2 = cfg.clone();
@@ -1725,6 +1737,8 @@ mod tests {
         cfg.write_profiles = false;
         cfg.write_plugins = false;
         assert!(restrict_write_path("/opt/workspace/a", &cfg).is_ok());
+        // the shared root wiki stays writable even with every toggle off
+        assert!(restrict_write_path("/opt/omni/wiki/Reference/page.md", &cfg).is_ok());
         let err = restrict_write_path("/opt/omni/data/a", &cfg).unwrap_err();
         assert!(
             err.contains("/opt/workspace"),

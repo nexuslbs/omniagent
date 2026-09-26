@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM threads WHERE task_id = $1 AND workflow_step = $2\n                     AND status = 'created' AND id <> $3\n                     AND NOT EXISTS (SELECT 1 FROM messages WHERE thread_id = threads.id)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f0f2aecc2b4828b53d9c24ce4a7d1bad4f26ad44c17d90f6fde03346a8bece4a"
+}

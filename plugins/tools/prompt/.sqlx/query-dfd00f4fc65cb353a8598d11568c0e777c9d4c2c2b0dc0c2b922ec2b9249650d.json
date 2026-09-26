@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*) FROM thread_subtasks\n           WHERE thread_id = $1 AND status IN ('pending', 'processing', 'in_progress')",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "dfd00f4fc65cb353a8598d11568c0e777c9d4c2c2b0dc0c2b922ec2b9249650d"
+}

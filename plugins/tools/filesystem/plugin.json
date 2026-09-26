@@ -2,7 +2,7 @@
   "id": "filesystem",
   "name": "Filesystem",
   "version": "1.4.0",
-  "description": "Filesystem tools: read, list, search, info are unrestricted; WRITES are sandboxed to the workspace dir (always) plus OMNI_DIR subdirectories enabled by config (profiles/data/plugins toggles, or the whole OMNI_DIR with write_omni_all). Reads: filesystem_read pages large files in chars by default and supports line-numbered output with deterministic line paging (lines=true). Edit tools: filesystem_str_replace, filesystem_insert, filesystem_apply_patch (precise, reviewable file edits under the same sandbox). Content search: filesystem_grep (ripgrep-backed recursive content search with caps + spill to file).",
+  "description": "Filesystem tools: read, list, search, info are unrestricted; WRITES are sandboxed to the workspace dir (always), the shared root wiki (omni_dir/wiki, always) plus OMNI_DIR subdirectories enabled by config (profiles/data/plugins toggles, or the whole OMNI_DIR with write_omni_all). Reads: filesystem_read pages large files in chars by default and supports line-numbered output with deterministic line paging (lines=true). Edit tools: filesystem_str_replace, filesystem_insert, filesystem_apply_patch (precise, reviewable file edits under the same sandbox). Content search: filesystem_grep (ripgrep-backed recursive content search with caps + spill to file).",
   "type": "mcp",
   "entrypoint": {
     "command": "mcp-server-filesystem",
@@ -19,7 +19,7 @@
     },
     {
       "key": "omni_dir",
-      "label": "OMNI_DIR root - subdirectories enabled by the write_* toggles below",
+      "label": "OMNI_DIR root - subdirectories enabled by the write_* toggles below; omni_dir/wiki is ALWAYS writable",
       "type": "string",
       "default": "$env:OMNI_DIR",
       "required": false

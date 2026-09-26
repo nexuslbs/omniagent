@@ -1,0 +1,37 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                COALESCE(SUM(COALESCE((token_usage->>'prompt_tokens')::bigint, 0)), 0)::bigint AS input_tokens,\n                COALESCE(SUM(COALESCE((token_usage->>'cached_tokens')::bigint, 0)), 0)::bigint AS cached_tokens,\n                COALESCE(SUM(COALESCE((token_usage->>'completion_tokens')::bigint, 0)), 0)::bigint AS output_tokens\n            FROM messages\n            WHERE thread_id = $1 AND msg_type <> 'error'\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "input_tokens",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "cached_tokens",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "output_tokens",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "d78d15766f0800ef8d55275d20c66065dc81b014331fb2910a5e08aed4585783"
+}

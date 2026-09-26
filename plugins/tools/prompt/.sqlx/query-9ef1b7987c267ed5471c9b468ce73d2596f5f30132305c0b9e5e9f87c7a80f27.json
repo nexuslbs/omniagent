@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT COUNT(*) AS total\n        FROM threads t\n        WHERE 1=1\n          AND ($1 = '' OR t.status = ANY(string_to_array($2, ',')))\n          AND ($3 = '' OR t.cause = $4)\n          AND ($5 = '' OR t.channel_id = $6)\n          AND ($7 = '' OR t.profile = $8)\n          AND ($9 = 0::bigint OR t.id = $10)\n          AND ($11 = 0::bigint OR t.parent_id = $12)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "9ef1b7987c267ed5471c9b468ce73d2596f5f30132305c0b9e5e9f87c7a80f27"
+}

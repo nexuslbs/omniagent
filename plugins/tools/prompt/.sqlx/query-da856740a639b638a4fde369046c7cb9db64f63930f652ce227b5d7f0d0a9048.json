@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE secrets\n        SET current_value = $1, updated_at = NOW()\n        WHERE id = $2\n        RETURNING field_type, current_value, updated_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "field_type",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "secrets",
+            "name": "field_type"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "current_value",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "secrets",
+            "name": "current_value"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "updated_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "secrets",
+            "name": "updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "da856740a639b638a4fde369046c7cb9db64f63930f652ce227b5d7f0d0a9048"
+}
