@@ -498,10 +498,13 @@ pub(crate) async fn delete_plugin_handler(
         } else {
             info!("Plugin '{}' not found on disk or in YAML", name);
             (
-                StatusCode::OK,
+                StatusCode::NOT_FOUND,
                 Json(serde_json::json!({
-                    "success": true,
-                    "data": {"deleted": true, "note": "not found in YAML"}
+                    "success": false,
+                    "error": format!(
+                        "Nothing to remove: plugin '{}' has no source on disk and no matching config entry.",
+                        name
+                    )
                 })),
             )
                 .into_response()
@@ -519,6 +522,34 @@ pub(crate) async fn handle_remove_by_source(
     p_type: &str,
     state: &Arc<AppState>,
 ) -> impl IntoResponse {
+    // ── Phantom (YAML-only) entries: key the removal on the REAL YAML entry ──
+    // A plugin that has NO source on disk in any variant exists only as a YAML
+    // entry. The removal must purge THAT entry and must not depend on the
+    // `source` string the caller sends: the dashboard used to send a fabricated
+    // "bundled" for an entry declared "built-in", the bundled branch then
+    // matched nothing, and respond_removed() still reported success while the
+    // entry stayed in plugins.yml (the cron/kanban incident - the entry could
+    // never be removed from the UI).
+    //
+    // Plugins that DO exist on disk keep their per-source rules below: this
+    // branch is only reached when there is nothing on disk to delete, and a
+    // genuine on-disk built-in is still refused (it can only be disabled).
+    if !plugins_yaml::plugin_present_on_disk(data_dir, name) {
+        let yaml_type = plugins_yaml::PluginYamlType::from_type_str(p_type);
+        let removed =
+            plugins_yaml::purge_phantom_entry(data_dir, &yaml_type, name).unwrap_or(false);
+        if removed {
+            tracing::info!(
+                "Remove: purged phantom YAML-only entry '{}' (caller sent source='{}')",
+                name,
+                source
+            );
+            state.plugin_manager.remove_client(name);
+            state.plugin_manager.remove_server_tools(name).await;
+        }
+        return respond_removed(name, removed);
+    }
+
     match source {
         "built-in" => {
             // Built-in plugins cannot be removed
@@ -664,12 +695,24 @@ pub(crate) fn respond_removed(name: &str, removed: bool) -> Response<Body> {
         )
             .into_response()
     } else {
-        info!("Plugin '{}' not found on disk or in YAML", name);
+        // NEVER report a false success. `removed == false` means nothing was
+        // deleted: the entry the caller asked to remove is still there (a
+        // genuine on-disk built-in, or a name that exists nowhere). Answering
+        // 200 {"success":true,"deleted":true} here is exactly the lie that made
+        // the dashboard claim a phantom plugin was removed while its plugins.yml
+        // entry stayed in place.
+        tracing::warn!(
+            "Remove: nothing removed for plugin '{}' (no source on disk, no matching YAML entry)",
+            name
+        );
         (
-            StatusCode::OK,
+            StatusCode::NOT_FOUND,
             Json(serde_json::json!({
-                "success": true,
-                "data": {"deleted": true, "note": "not found"}
+                "success": false,
+                "error": format!(
+                    "Nothing to remove: plugin '{}' has no source on disk and no matching config entry.",
+                    name
+                )
             })),
         )
             .into_response()

@@ -401,6 +401,122 @@ pub fn is_plugin_builtin(_data_dir: &str, name: &str, plugin_type: &PluginYamlTy
             .exists()
 }
 
+/// The source label a YAML-only entry must report.
+///
+/// Returns the source DECLARED in `plugins.yml` (`built-in` / `bundled` /
+/// `remote`) - never a fabricated "bundled". The fabrication is a real bug:
+/// the dashboard fed the label straight back into the DELETE call, the bundled
+/// branch only purged entries whose declared source was already "bundled", and
+/// the stale entry (cron/kanban after the tasks-plugin unification) could never
+/// be removed. Only an empty declaration (an entry written before `source` was
+/// mandatory) falls back to "bundled".
+fn declared_source_of(entry: &PluginYamlEntry) -> &str {
+    let declared = entry.source.trim();
+    if declared.is_empty() {
+        "bundled"
+    } else {
+        declared
+    }
+}
+
+/// Explicit status message for a YAML-only entry whose code is not on disk.
+/// Names the DECLARED source so the dashboard/operator can tell "declared as
+/// built-in but no source on disk" from a real built-in plugin.
+fn missing_source_status_message(name: &str, source: &str) -> String {
+    format!(
+        "Missing source: '{}' is declared as source '{}' in config/plugins.yml but no source exists on disk. Remove this stale entry, or install its source.",
+        name, source
+    )
+}
+
+/// True when the named plugin has a source on disk in ANY variant:
+/// - built-in source under `/app/plugins/<type_dir>/<name>`
+/// - a plugin directory under `<data_dir>/plugins/<type_dir>/<name>`
+/// - a cloned remote checkout under `<data_dir>/plugins/<type_dir>/.remote/<name>`
+///
+/// When this is false the plugin exists ONLY as a YAML entry (a "phantom"):
+/// removing it means purging that entry, not deleting files.
+pub fn plugin_present_on_disk(data_dir: &str, name: &str) -> bool {
+    for pt in [
+        PluginYamlType::Platform,
+        PluginYamlType::Tool,
+        PluginYamlType::Provider,
+    ] {
+        if is_plugin_builtin(data_dir, name, &pt) {
+            return true;
+        }
+        let type_dir = pt.type_dir_name();
+        if std::path::Path::new(&format!("{}/plugins/{}/{}", data_dir, type_dir, name)).is_dir() {
+            return true;
+        }
+        if std::path::Path::new(&format!(
+            "{}/plugins/{}/.remote/{}",
+            data_dir, type_dir, name
+        ))
+        .is_dir()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Purge a phantom (YAML-only) plugin entry.
+///
+/// Removes the `plugins.yml` entry across every section and the corresponding
+/// `remote.yml` declaration across every section. The caller-supplied `source`
+/// label is deliberately NOT consulted: the entry that exists is the thing to
+/// remove, so a client sending a stale or fabricated source (the dashboard used
+/// to send `bundled` for an entry declared `built-in`) still removes it.
+/// `preferred_type` is tried first, then the other sections.
+///
+/// Returns true when at least one YAML entry was actually removed.
+pub fn purge_phantom_entry(
+    data_dir: &str,
+    preferred_type: &PluginYamlType,
+    name: &str,
+) -> AppResult<bool> {
+    let mut types = vec![preferred_type.clone()];
+    for pt in [
+        PluginYamlType::Platform,
+        PluginYamlType::Tool,
+        PluginYamlType::Provider,
+    ] {
+        if &pt != preferred_type {
+            types.push(pt);
+        }
+    }
+
+    let mut removed = false;
+    for pt in &types {
+        if remove_entry(data_dir, pt, name)? {
+            tracing::info!(
+                "Remove: purged phantom plugins.yml entry for '{}' (section '{:?}')",
+                name,
+                pt
+            );
+            removed = true;
+        }
+    }
+    for pt in &types {
+        // A phantom may also be declared in remote.yml (the remote source of
+        // truth) without ever having been cloned; drop that declaration too.
+        // Guarded + non-fatal: remote.yml may not exist at all, and a phantom
+        // plugins.yml entry must still be purged when it does not.
+        if has_remote_entry(data_dir, pt, name) {
+            if let Err(e) = remove_remote_plugin(data_dir, pt, name) {
+                tracing::warn!(
+                    "Remove: failed to purge remote.yml entry for '{}': {:?}",
+                    name,
+                    e
+                );
+            }
+            removed = true;
+        }
+    }
+    Ok(removed)
+}
+
 /// Set a plugin entry with an explicit source override.
 /// The `source` is one of "built-in", "bundled", or "remote".
 pub fn set_entry_with_source(
@@ -1564,6 +1680,9 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
         for (key, yaml_entry) in *entries {
             if !groups.contains_key(&(key.clone(), yaml_type.file_name().to_string())) {
                 let is_remote = yaml_entry.source == "remote";
+                // TRUTHFUL source: the source declared in plugins.yml, never a
+                // fabricated "bundled". See declared_source_of().
+                let source = declared_source_of(yaml_entry);
                 let manifest = PluginManifest {
                     tools: Vec::new(),
                     name: key.clone(),
@@ -1576,7 +1695,10 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
                     description: Some(if is_remote {
                         "Remote plugin: not downloaded yet".to_string()
                     } else {
-                        "Plugin source not found on disk".to_string()
+                        format!(
+                            "Plugin declared as source '{}' in plugins.yml but no source is present on disk",
+                            source
+                        )
                     }),
                     entrypoint: None,
                     capabilities: None,
@@ -1587,7 +1709,6 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
                     api_modes: None,
                     binary: None,
                 };
-                let source = if is_remote { "remote" } else { "bundled" };
                 let mut detail = build_plugin_detail(
                     &manifest,
                     source,
@@ -1597,7 +1718,11 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
                     data_dir,
                     false,
                 );
-                detail.status = "not_found".to_string();
+                // A YAML-only entry has its OWN explicit status: the entry is
+                // declared in plugins.yml but no source exists on disk in any
+                // variant (distinct from enabled/disabled/error).
+                detail.status = "missing_source".to_string();
+                detail.status_message = missing_source_status_message(key, source);
                 detail.needs_download = is_remote;
                 detail.has_source_code = false;
                 detail.needs_build = false;
@@ -2068,6 +2193,9 @@ fn build_not_found_from_yaml(
         }
         if let Some(yaml_entry) = entries.get(name) {
             let is_remote = yaml_entry.source == "remote";
+            // TRUTHFUL source: the source declared in plugins.yml, never a
+            // fabricated "bundled". See declared_source_of().
+            let source = declared_source_of(yaml_entry);
             let manifest = PluginManifest {
                 tools: Vec::new(),
                 name: name.to_string(),
@@ -2080,7 +2208,10 @@ fn build_not_found_from_yaml(
                 description: Some(if is_remote {
                     "Remote plugin: not downloaded yet".to_string()
                 } else {
-                    "Plugin source not found on disk".to_string()
+                    format!(
+                        "Plugin declared as source '{}' in plugins.yml but no source is present on disk",
+                        source
+                    )
                 }),
                 entrypoint: None,
                 capabilities: None,
@@ -2091,7 +2222,6 @@ fn build_not_found_from_yaml(
                 api_modes: None,
                 binary: None,
             };
-            let source = if is_remote { "remote" } else { "bundled" };
             let mut detail = build_plugin_detail(
                 &manifest,
                 source,
@@ -2101,7 +2231,10 @@ fn build_not_found_from_yaml(
                 data_dir,
                 false,
             );
-            detail.status = "not_found".to_string();
+            // A YAML-only entry has its OWN explicit status: declared in
+            // plugins.yml, no source on disk in any variant.
+            detail.status = "missing_source".to_string();
+            detail.status_message = missing_source_status_message(name, source);
             detail.needs_download = is_remote;
             detail.has_source_code = false;
             detail.needs_build = false;
@@ -2470,6 +2603,112 @@ mod tests {
         let path = file_path(data_dir, pt);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, content).unwrap();
+    }
+
+    #[test]
+    fn test_phantom_yaml_entry_reports_declared_source_and_missing_source_status() {
+        let (_d, path) = test_data_dir();
+        // cron/kanban situation: the entry is declared in plugins.yml while its
+        // code is gone from disk. The list must report the DECLARED source
+        // (never a fabricated "bundled") plus an explicit missing-source status.
+        write_test_file(
+            &path,
+            &PluginYamlType::Tool,
+            "tools:\n  phantom-built-in:\n    enabled: true\n    source: built-in\n  phantom-bundled:\n    enabled: true\n    source: bundled\n  phantom-remote:\n    enabled: true\n    source: remote\n",
+        );
+
+        let details = list_plugins(&path).unwrap();
+        let find = |n: &str| details.iter().find(|d| d.name == n).cloned();
+
+        let built_in = find("phantom-built-in").expect("YAML-only built-in must be listed");
+        assert_eq!(built_in.source.as_deref(), Some("built-in"));
+        assert_eq!(built_in.status, "missing_source");
+        assert!(
+            built_in.status_message.contains("'built-in'"),
+            "status_message must name the declared source: {:?}",
+            built_in.status_message
+        );
+        assert!(!built_in.has_source_code);
+
+        let bundled = find("phantom-bundled").expect("YAML-only bundled must be listed");
+        assert_eq!(bundled.source.as_deref(), Some("bundled"));
+        assert_eq!(bundled.status, "missing_source");
+
+        let remote = find("phantom-remote").expect("YAML-only remote must be listed");
+        assert_eq!(remote.source.as_deref(), Some("remote"));
+        assert_eq!(remote.status, "missing_source");
+        assert!(remote.needs_download);
+
+        // The DETAIL endpoint must agree with the list.
+        let detail = get_plugin(&path, "phantom-built-in", &PluginYamlType::Tool)
+            .unwrap()
+            .expect("the detail endpoint must resolve a YAML-only entry");
+        assert_eq!(detail.source.as_deref(), Some("built-in"));
+        assert_eq!(detail.status, "missing_source");
+    }
+
+    #[test]
+    fn test_plugin_present_on_disk_detects_every_source_variant() {
+        let (_d, path) = test_data_dir();
+        assert!(!plugin_present_on_disk(&path, "ghost"));
+
+        std::fs::create_dir_all(format!("{path}/plugins/tools/ondisk")).unwrap();
+        std::fs::write(format!("{path}/plugins/tools/ondisk/plugin.json"), "{}").unwrap();
+        assert!(plugin_present_on_disk(&path, "ondisk"));
+
+        std::fs::create_dir_all(format!("{path}/plugins/platforms/.remote/cloned")).unwrap();
+        assert!(plugin_present_on_disk(&path, "cloned"));
+
+        assert!(!plugin_present_on_disk(&path, "ghost"));
+    }
+
+    #[test]
+    fn test_purge_phantom_entry_ignores_caller_source_label_and_section() {
+        let (_d, path) = test_data_dir();
+        set_entry_with_source(
+            &path,
+            &PluginYamlType::Tool,
+            "cron",
+            true,
+            "built-in",
+            serde_json::json!({}),
+        )
+        .unwrap();
+        set_entry_with_source(
+            &path,
+            &PluginYamlType::Tool,
+            "kanban",
+            true,
+            "built-in",
+            serde_json::json!({}),
+        )
+        .unwrap();
+        let remote_yml = remote_plugins_path(&path);
+        std::fs::create_dir_all(remote_yml.parent().unwrap()).unwrap();
+        std::fs::write(
+            &remote_yml,
+            "tools:\n  cron:\n    url: https://example.invalid/cron.git\n",
+        )
+        .unwrap();
+        assert!(has_remote_entry(&path, &PluginYamlType::Tool, "cron"));
+
+        // The dashboard used to send a fabricated "bundled" and the section may
+        // not match where the entry lives: the purge is keyed on the REAL YAML
+        // entry, so neither matters.
+        assert!(purge_phantom_entry(&path, &PluginYamlType::Platform, "cron").unwrap());
+        assert!(get_entry(&path, &PluginYamlType::Tool, "cron")
+            .unwrap()
+            .is_none());
+        assert!(!has_remote_entry(&path, &PluginYamlType::Tool, "cron"));
+
+        assert!(purge_phantom_entry(&path, &PluginYamlType::Tool, "kanban").unwrap());
+        assert!(get_entry(&path, &PluginYamlType::Tool, "kanban")
+            .unwrap()
+            .is_none());
+
+        // Nothing left to remove -> false, so the delete path answers
+        // success:false instead of a false success.
+        assert!(!purge_phantom_entry(&path, &PluginYamlType::Tool, "kanban").unwrap());
     }
 
     #[test]
