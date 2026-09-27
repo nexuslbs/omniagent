@@ -493,7 +493,14 @@ fn test_all_plugin_statuses_are_valid() {
     for p in data {
         let status = p["status"].as_str().unwrap_or("");
         assert!(
-            ["enabled", "disabled", "error", "not_found", "missing_source"].contains(&status),
+            [
+                "enabled",
+                "disabled",
+                "error",
+                "not_found",
+                "missing_source"
+            ]
+            .contains(&status),
             "Plugin '{}' has invalid status: '{}'",
             p["name"].as_str().unwrap_or("?"),
             status

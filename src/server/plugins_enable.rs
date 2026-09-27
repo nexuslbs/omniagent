@@ -235,13 +235,14 @@ async fn respond_enabled(
             apply_tool_runtime_status(state, &mut detail).await;
             // The VERIFIED runtime state wins over a discovery-only phantom:
             // get_plugin falls back to a synthetic YAML entry (status
-            // "not_found", has_source_code=false) whenever plugin discovery
-            // does not list a source for the key, and answering a 200
-            // "success" with status "not_found" for a plugin that this call
-            // just verified as RUNNING contradicts the call's own contract
-            // (observed in CI 2026-09-25: the platform client was up while the
-            // source was not discovered, and the enable answered not_found).
-            if detail.status == "not_found" {
+            // "missing_source", legacy "not_found", has_source_code=false)
+            // whenever plugin discovery does not list a source for the key, and
+            // answering a 200 "success" with a discovery-only status for a
+            // plugin that this call just verified as RUNNING contradicts the
+            // call's own contract (observed in CI 2026-09-25: the platform
+            // client was up while the source was not discovered, and the enable
+            // answered not_found).
+            if plugins_yaml::is_discovery_only_status(&detail.status) {
                 tracing::warn!(
                     "Plugin '{}' is verified running but discovery lists no source; \
                      reporting status 'enabled' for this lifecycle answer",
@@ -368,8 +369,9 @@ async fn apply_disable(
                 Ok(Some(mut detail)) => {
                     // Same contract as respond_enabled: a disable that applied
                     // its config must answer the state it APPLIED, never the
-                    // discovery-only "not_found" phantom.
-                    if detail.status == "not_found" {
+                    // discovery-only phantom (current "missing_source" or
+                    // legacy "not_found").
+                    if plugins_yaml::is_discovery_only_status(&detail.status) {
                         tracing::warn!(
                             "Plugin '{}' was disabled but discovery lists no source; \
                              reporting status 'disabled' for this lifecycle answer",

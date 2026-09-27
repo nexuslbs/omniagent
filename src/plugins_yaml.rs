@@ -429,6 +429,19 @@ fn missing_source_status_message(name: &str, source: &str) -> String {
     )
 }
 
+/// True when a plugin status means "discovery did not list a source for this
+/// YAML entry" rather than a real lifecycle state.
+///
+/// `missing_source` is the CURRENT label for a YAML-only entry (declared in
+/// `plugins.yml`, no source on disk); `not_found` is the LEGACY label kept for
+/// older configs/agents. Lifecycle answers (enable/disable) must never report
+/// either label for a plugin the same call just verified as running/stopped,
+/// so both consumers share this one predicate instead of a literal comparison
+/// on one label (which silently stopped firing when the label was renamed).
+pub fn is_discovery_only_status(status: &str) -> bool {
+    status == "missing_source" || status == "not_found"
+}
+
 /// True when the named plugin has a source on disk in ANY variant:
 /// - built-in source under `/app/plugins/<type_dir>/<name>`
 /// - a plugin directory under `<data_dir>/plugins/<type_dir>/<name>`
@@ -2645,6 +2658,22 @@ mod tests {
             .expect("the detail endpoint must resolve a YAML-only entry");
         assert_eq!(detail.source.as_deref(), Some("built-in"));
         assert_eq!(detail.status, "missing_source");
+    }
+
+    #[test]
+    fn test_is_discovery_only_status_covers_current_and_legacy_labels() {
+        // The enable/disable lifecycle guard MUST fire for both labels: the
+        // current "missing_source" and the legacy "not_found" (which the YAML
+        // list used before the phantom-entry fix). A real lifecycle state must
+        // never be treated as discovery-only.
+        assert!(is_discovery_only_status("missing_source"));
+        assert!(is_discovery_only_status("not_found"));
+        for real in ["enabled", "disabled", "error", "not_installed", "no_code"] {
+            assert!(
+                !is_discovery_only_status(real),
+                "'{real}' is a real lifecycle status, not discovery-only"
+            );
+        }
     }
 
     #[test]
