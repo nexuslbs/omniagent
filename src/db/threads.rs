@@ -3790,42 +3790,42 @@ mod status_move_skip_tests {
             .await
             .expect("cleanup threads");
     }
-/// Regression for the operator's defect A (telegram thread 3387, 2026-09-27):
-/// moving a task whose old-status thread is still `processing` to a status with
-/// NO workflow role (`todo`) must stop the old thread(s), CLEAR the task's
-/// `thread_status` marker and create NOTHING. Before the fix the marker kept
-/// pointing at the terminated thread, and the live handler of the processing
-/// thread was never cancelled (a processing thread could coexist with a fresh
-/// pending one). Runs only with DATABASE_URL set (dev/test DB).
-#[cfg(test)]
-mod status_dispatch_no_role_tests {
-    use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    /// Regression for the operator's defect A (telegram thread 3387, 2026-09-27):
+    /// moving a task whose old-status thread is still `processing` to a status with
+    /// NO workflow role (`todo`) must stop the old thread(s), CLEAR the task's
+    /// `thread_status` marker and create NOTHING. Before the fix the marker kept
+    /// pointing at the terminated thread, and the live handler of the processing
+    /// thread was never cancelled (a processing thread could coexist with a fresh
+    /// pending one). Runs only with DATABASE_URL set (dev/test DB).
+    #[cfg(test)]
+    mod status_dispatch_no_role_tests {
+        use super::*;
+        use std::sync::atomic::{AtomicU64, Ordering};
 
-    #[tokio::test]
-    async fn dispatch_to_todo_stops_old_threads_and_clears_the_marker() {
-        let Ok(db_url) = std::env::var("DATABASE_URL") else {
-            return;
-        };
-        let _db_guard = crate::db::DB_TEST_LOCK.lock().await;
-        let pool = sqlx::PgPool::connect(&db_url)
-            .await
-            .expect("connect dev db");
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let task_id = format!(
-            "task-dispatch-todo-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        );
-        let channel = format!("test-channel-dispatch-todo-{}", std::process::id());
-        // Board/workflow resolution runs before the role gate; it uses the
-        // install data dir (`OMNI_DIR/data`). A missing boards.yml falls back
-        // to the built-in default board set, which always contains 'main'.
-        let data_dir = std::env::var("OMNI_DIR")
-            .map(|d| format!("{d}/data"))
-            .unwrap_or_else(|_| "/opt/omni/data".to_string());
+        #[tokio::test]
+        async fn dispatch_to_todo_stops_old_threads_and_clears_the_marker() {
+            let Ok(db_url) = std::env::var("DATABASE_URL") else {
+                return;
+            };
+            let _db_guard = crate::db::DB_TEST_LOCK.lock().await;
+            let pool = sqlx::PgPool::connect(&db_url)
+                .await
+                .expect("connect dev db");
+            static SEQ: AtomicU64 = AtomicU64::new(0);
+            let task_id = format!(
+                "task-dispatch-todo-{}-{}",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            );
+            let channel = format!("test-channel-dispatch-todo-{}", std::process::id());
+            // Board/workflow resolution runs before the role gate; it uses the
+            // install data dir (`OMNI_DIR/data`). A missing boards.yml falls back
+            // to the built-in default board set, which always contains 'main'.
+            let data_dir = std::env::var("OMNI_DIR")
+                .map(|d| format!("{d}/data"))
+                .unwrap_or_else(|_| "/opt/omni/data".to_string());
 
-        sqlx::query(
+            sqlx::query(
             "INSERT INTO kanban_tasks (id, title, status, board, channel_id, profile, thread_status, created_at, updated_at)
              VALUES ($1, 'tester dispatch to todo', 'running', 'main', $2, 'test-profile', 'scheduled', NOW(), NOW())",
         )
@@ -3835,118 +3835,120 @@ mod status_dispatch_no_role_tests {
         .await
         .expect("insert task");
 
-        // The old-status threads of the task: one live executor (processing) and
-        // one still queued - both serve the 'running' step the task leaves.
-        let live: i64 = sqlx::query_scalar(
-            "INSERT INTO threads (status, cause, channel_id, profile, task_id, workflow_step)
+            // The old-status threads of the task: one live executor (processing) and
+            // one still queued - both serve the 'running' step the task leaves.
+            let live: i64 = sqlx::query_scalar(
+                "INSERT INTO threads (status, cause, channel_id, profile, task_id, workflow_step)
              VALUES ('processing', 'user', $1, 'test-profile', $2, 'running')
              RETURNING id",
-        )
-        .bind(&channel)
-        .bind(&task_id)
-        .fetch_one(&pool)
-        .await
-        .expect("insert processing thread");
-        let queued: i64 = sqlx::query_scalar(
-            "INSERT INTO threads (status, cause, channel_id, profile, task_id, workflow_step)
+            )
+            .bind(&channel)
+            .bind(&task_id)
+            .fetch_one(&pool)
+            .await
+            .expect("insert processing thread");
+            let queued: i64 = sqlx::query_scalar(
+                "INSERT INTO threads (status, cause, channel_id, profile, task_id, workflow_step)
              VALUES ('pending', 'user', $1, 'test-profile', $2, 'running')
              RETURNING id",
-        )
-        .bind(&channel)
-        .bind(&task_id)
-        .fetch_one(&pool)
-        .await
-        .expect("insert pending thread");
+            )
+            .bind(&channel)
+            .bind(&task_id)
+            .fetch_one(&pool)
+            .await
+            .expect("insert pending thread");
 
-        // The PATCH status-change handler moves the task's status first and
-        // dispatches for the new status afterwards (same order as the API path).
-        sqlx::query("UPDATE kanban_tasks SET status = 'todo', updated_at = NOW() WHERE id = $1")
+            // The PATCH status-change handler moves the task's status first and
+            // dispatches for the new status afterwards (same order as the API path).
+            sqlx::query(
+                "UPDATE kanban_tasks SET status = 'todo', updated_at = NOW() WHERE id = $1",
+            )
             .bind(&task_id)
             .execute(&pool)
             .await
             .expect("move task to todo");
 
-        let created = dispatch_task_for_status(&pool, &data_dir, &task_id, "todo", None)
-            .await
-            .expect("dispatch to todo must not error");
-        assert!(
-            created.is_none(),
-            "'todo' has no workflow role: nothing is dispatched"
-        );
+            let created = dispatch_task_for_status(&pool, &data_dir, &task_id, "todo", None)
+                .await
+                .expect("dispatch to todo must not error");
+            assert!(
+                created.is_none(),
+                "'todo' has no workflow role: nothing is dispatched"
+            );
 
-        for id in [live, queued] {
-            let row: (String, bool) =
-                sqlx::query_as("SELECT status, terminal FROM threads WHERE id = $1")
-                    .bind(id)
+            for id in [live, queued] {
+                let row: (String, bool) =
+                    sqlx::query_as("SELECT status, terminal FROM threads WHERE id = $1")
+                        .bind(id)
+                        .fetch_one(&pool)
+                        .await
+                        .expect("fetch old-status thread");
+                assert_eq!(row.0, "skipped", "old-status thread {id} is terminal");
+                assert!(row.1, "old-status thread {id} is flagged terminal");
+            }
+
+            let task: (String, Option<String>) =
+                sqlx::query_as("SELECT status, thread_status FROM kanban_tasks WHERE id = $1")
+                    .bind(&task_id)
                     .fetch_one(&pool)
                     .await
-                    .expect("fetch old-status thread");
-            assert_eq!(row.0, "skipped", "old-status thread {id} is terminal");
-            assert!(row.1, "old-status thread {id} is flagged terminal");
-        }
+                    .expect("fetch task");
+            assert_eq!(task.0, "todo", "the task ends in the requested status");
+            assert!(
+                task.1.is_none(),
+                "thread_status must be cleared (it pointed at the terminated old thread)"
+            );
 
-        let task: (String, Option<String>) =
-            sqlx::query_as("SELECT status, thread_status FROM kanban_tasks WHERE id = $1")
-                .bind(&task_id)
-                .fetch_one(&pool)
+            let (active, total): (i64, i64) = sqlx::query_as(
+                "SELECT count(*) FILTER (WHERE status IN ('pending', 'processing')), count(*)
+             FROM threads WHERE task_id = $1",
+            )
+            .bind(&task_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count task threads");
+            assert_eq!(
+                active, 0,
+                "no processing/pending thread may coexist after the move"
+            );
+            assert_eq!(
+                total, 2,
+                "exactly one dispatch decision: no extra thread exists for the task"
+            );
+
+            // Idempotent: a repeated transition changes nothing and does not error.
+            let again = dispatch_task_for_status(&pool, &data_dir, &task_id, "todo", None)
                 .await
-                .expect("fetch task");
-        assert_eq!(task.0, "todo", "the task ends in the requested status");
-        assert!(
-            task.1.is_none(),
-            "thread_status must be cleared (it pointed at the terminated old thread)"
-        );
-
-        let (active, total): (i64, i64) = sqlx::query_as(
-            "SELECT count(*) FILTER (WHERE status IN ('pending', 'processing')), count(*)
+                .expect("repeated dispatch to todo must not error");
+            assert!(again.is_none(), "a repeated move creates no thread either");
+            let (active, total): (i64, i64) = sqlx::query_as(
+                "SELECT count(*) FILTER (WHERE status IN ('pending', 'processing')), count(*)
              FROM threads WHERE task_id = $1",
-        )
-        .bind(&task_id)
-        .fetch_one(&pool)
-        .await
-        .expect("count task threads");
-        assert_eq!(
-            active, 0,
-            "no processing/pending thread may coexist after the move"
-        );
-        assert_eq!(
-            total, 2,
-            "exactly one dispatch decision: no extra thread exists for the task"
-        );
-
-        // Idempotent: a repeated transition changes nothing and does not error.
-        let again = dispatch_task_for_status(&pool, &data_dir, &task_id, "todo", None)
-            .await
-            .expect("repeated dispatch to todo must not error");
-        assert!(again.is_none(), "a repeated move creates no thread either");
-        let (active, total): (i64, i64) = sqlx::query_as(
-            "SELECT count(*) FILTER (WHERE status IN ('pending', 'processing')), count(*)
-             FROM threads WHERE task_id = $1",
-        )
-        .bind(&task_id)
-        .fetch_one(&pool)
-        .await
-        .expect("count task threads after repeat");
-        assert_eq!((active, total), (0, 2), "the repeated move is a no-op");
-
-        sqlx::query("DELETE FROM kanban_history WHERE kanban_task_id = $1")
+            )
             .bind(&task_id)
-            .execute(&pool)
+            .fetch_one(&pool)
             .await
-            .ok();
-        sqlx::query("DELETE FROM threads WHERE id = $1 OR id = $2")
-            .bind(live)
-            .bind(queued)
-            .execute(&pool)
-            .await
-            .expect("cleanup threads");
-        sqlx::query("DELETE FROM kanban_tasks WHERE id = $1")
-            .bind(&task_id)
-            .execute(&pool)
-            .await
-            .expect("cleanup task");
+            .expect("count task threads after repeat");
+            assert_eq!((active, total), (0, 2), "the repeated move is a no-op");
+
+            sqlx::query("DELETE FROM kanban_history WHERE kanban_task_id = $1")
+                .bind(&task_id)
+                .execute(&pool)
+                .await
+                .ok();
+            sqlx::query("DELETE FROM threads WHERE id = $1 OR id = $2")
+                .bind(live)
+                .bind(queued)
+                .execute(&pool)
+                .await
+                .expect("cleanup threads");
+            sqlx::query("DELETE FROM kanban_tasks WHERE id = $1")
+                .bind(&task_id)
+                .execute(&pool)
+                .await
+                .expect("cleanup task");
+        }
     }
-}
 }
 #[cfg(test)]
 mod sub_prompt_appendable_tests {
