@@ -12,6 +12,7 @@
 //! threads, processes them via the LLM, and respects cancellation
 //! requests from the `/stop` HTTP endpoint.
 
+pub mod background_dispatch;
 pub mod config;
 pub(crate) mod context_builder;
 pub mod efficiency;

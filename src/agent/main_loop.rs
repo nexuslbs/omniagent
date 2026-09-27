@@ -2702,139 +2702,81 @@ Previous plan:\n{}",
                     bg_mcp_snapshot.execute(&bg_mcp_call, tool_ctx).await
                 });
 
-                let is_core_task_tool = is_core_task_tool(&tool_name);
+                // Dispatch decision comes from the ONE shared policy (see
+                // crate::agent::background_dispatch): core control-plane tools
+                // stay SYNCHRONOUS, long-running tools are backgrounded on the
+                // FIRST call, every other tool keeps the fast path + background
+                // switch. There is no per-tool ad-hoc handling here.
+                let dispatch_mode = crate::agent::background_dispatch::dispatch_mode(&tool_name);
+                let registry = crate::agent::task_registry::TASK_REGISTRY
+                    .get()
+                    .cloned()
+                    .expect("TASK_REGISTRY not initialized");
 
-                let result = if is_core_task_tool {
-                    // Run synchronously with the tool's own declared timeout
-                    // (wait-task declares 310s; poll/cancel/read-task-logs are
-                    // fast). If the tool declares NO timeout, await it directly
-                    // - the tool decides when it's done.
-                    match timeout_dur {
-                        Some(dur) => {
-                            match tokio::time::timeout(dur, tool_future.as_mut()).await {
-                                Ok(result) => result,
-                                Err(_) => Ok(McpToolResult {
+                let result = match dispatch_mode {
+                    crate::agent::background_dispatch::DispatchMode::Sync => {
+                        // Run synchronously with the tool's own declared timeout
+                        // (wait-task declares 310s; poll/cancel/read-task-logs are
+                        // fast). If the tool declares NO timeout, await it directly
+                        // - the tool decides when it's done.
+                        match timeout_dur {
+                            Some(dur) => {
+                                match tokio::time::timeout(dur, tool_future.as_mut()).await {
+                                    Ok(result) => result,
+                                    Err(_) => Ok(McpToolResult {
+                                        call_id: tc_id.clone(),
+                                        content: format!(
+                                            "Tool '{}' timed out after {}s",
+                                            tool_name,
+                                            dur.as_secs()
+                                        ),
+                                        is_error: true,
+                                    }),
+                                }
+                            }
+                            None => tool_future.as_mut().await,
+                        }
+                    }
+                    crate::agent::background_dispatch::DispatchMode::Immediate => {
+                        // Long-running tool: the agent must never wait on it.
+                        // Register the in-flight call in the shared task
+                        // registry and answer immediately with
+                        // status=processing + the task id.
+                        let req = BackgroundDispatchRequest {
+                            registry: registry.clone(),
+                            thread_id: tid,
+                            tool_name: tool_name.clone(),
+                            qualified_name: qualified_name.clone(),
+                            timeout_dur,
+                            max_inline_chars,
+                            threshold_secs: bg_threshold_secs,
+                            immediate: true,
+                            call_id: tc_id.clone(),
+                        };
+                        dispatch_background_tool(req, tool_future).await
+                    }
+                    crate::agent::background_dispatch::DispatchMode::Threshold => {
+                        // Fast path: run inline for at most `tool_bg_secs`. If it
+                        // is still running, hand the SAME in-flight future to the
+                        // background task - never re-execute it.
+                        match tokio::time::timeout(bg_threshold, tool_future.as_mut()).await {
+                            Ok(result) => result,
+                            Err(_elapsed) => {
+                                let req = BackgroundDispatchRequest {
+                                    registry: registry.clone(),
+                                    thread_id: tid,
+                                    tool_name: tool_name.clone(),
+                                    qualified_name: qualified_name.clone(),
+                                    timeout_dur,
+                                    max_inline_chars,
+                                    threshold_secs: bg_threshold_secs,
+                                    immediate: false,
                                     call_id: tc_id.clone(),
-                                    content: format!(
-                                        "Tool '{}' timed out after {}s",
-                                        tool_name,
-                                        dur.as_secs()
-                                    ),
-                                    is_error: true,
-                                }),
+                                };
+                                dispatch_background_tool(req, tool_future).await
                             }
                         }
-                        None => tool_future.as_mut().await,
                     }
-                } else {
-                match tokio::time::timeout(bg_threshold, tool_future.as_mut()).await {
-                    Ok(result) => result,
-                    Err(_elapsed) => {
-                        // Short timeout exceeded : switch to background mode.
-                        // Register the tool in the task registry for polling.
-                        let registry = crate::agent::task_registry::TASK_REGISTRY
-                            .get()
-                            .cloned()
-                            .expect("TASK_REGISTRY not initialized");
-                        let (task_id, abort_rx, _log_buffer) = registry
-                            .register(tid, &tool_name)
-                            .await;
-                        let task_id_bg = task_id.clone();
-
-                        // Spawn a background task that CONTINUES awaiting the
-                        // same in-flight future. The tool's declared timeout
-                        // (if any) still bounds it; with NO declared timeout
-                        // (`None`) the task runs until it completes, errors,
-                        // or the agent cancels it via cancel-task.
-                        // Do NOT execute the call again - the request was
-                        // already sent to the plugin; a serial plugin would
-                        // run the command twice (and each agent re-dispatch
-                        // would queue another duplicate behind it).
-                        let bg_timeout = timeout_dur;
-                        let bg_tool_name = tool_name.clone();
-                        let bg_registry = registry.clone();
-                        let mut bg_future = tool_future;
-
-                        tokio::spawn(async move {
-                            tokio::select! {
-                                _ = abort_rx => {
-                                    bg_registry.set_status(&task_id_bg,
-                                        crate::agent::task_registry::TaskStatus::Cancelled).await;
-                                    bg_registry.append_log(&task_id_bg,
-                                        &format!("Tool '{}' was cancelled", bg_tool_name)).await;
-                                }
-                                result = async {
-                                    match bg_timeout {
-                                        Some(dur) => {
-                                            tokio::time::timeout(dur, bg_future.as_mut()).await
-                                        }
-                                        None => Ok(bg_future.as_mut().await),
-                                    }
-                                } => {
-                                    match result {
-                                        Ok(Ok(res)) => {
-                                            // Tool-output cap: apply the configured per-result cap
-                                            // (settings `max_inline_chars`) to backgrounded results
-                                            // too. 0/off disables the cap: keep the full content.
-                                            let truncated = if max_inline_chars == 0 {
-                                                res.content.clone()
-                                            } else if res.content.len() > max_inline_chars {
-                                                tracing::info!(
-                                                    thread_id = tid,
-                                                    knob = "max_inline_chars",
-                                                    value = max_inline_chars,
-                                                    source = crate::agent::config::setting_source_label(
-                                                        "max_inline_chars"
-                                                    ),
-                                                    tool = %bg_tool_name,
-                                                    content_chars = res.content.len(),
-                                                    "tool-output cap fired: truncating backgrounded tool result"
-                                                );
-                                                truncate_content(&res.content, max_inline_chars)
-                                            } else {
-                                                res.content.clone()
-                                            };
-                                            bg_registry.set_status(&task_id_bg,
-                                                crate::agent::task_registry::TaskStatus::Completed(
-                                                    truncated)).await;
-                                        }
-                                        Ok(Err(e)) => {
-                                            let err = format!("Error: {}", e);
-                                            bg_registry.set_status(&task_id_bg,
-                                                crate::agent::task_registry::TaskStatus::Failed(
-                                                    err)).await;
-                                        }
-                                        Err(_) => {
-                                            let err = format!(
-                                                "Tool '{}' exceeded long timeout ({}s)",
-                                                bg_tool_name, bg_timeout.map(|d| d.as_secs()).unwrap_or(0));
-                                            bg_registry.set_status(&task_id_bg,
-                                                crate::agent::task_registry::TaskStatus::Failed(
-                                                    err)).await;
-                                        }
-                                    }
-                                }
-                            };
-                        });
-
-                        // Return a McpToolResult containing processing status
-                        let processing_json = serde_json::json!({
-                            "status": "processing",
-                            "task_id": task_id,
-                            "tool": qualified_name,
-                            "timeout_secs": bg_threshold.as_secs(),
-                            "message": format!(
-                                "Tool '{}' started. Use poll_task, wait_task, or read_task_logs to check progress.",
-                                tool_name
-                            ),
-                        });
-                        Ok(McpToolResult {
-                            call_id: tc_id.clone(),
-                            content: processing_json.to_string(),
-                            is_error: false,
-                        })
-                    }
-                }
                 };
 
                 let (output, is_error) = match &result {
@@ -4092,27 +4034,182 @@ mod iteration_budget_tests {
     }
 }
 
-/// True for the core background-task interface tools. They must never be
-/// backgrounded by the executor: a backgrounded `wait_task` would return a NEW
-/// task_id instead of the awaited result, so the agent would loop forever
-/// waiting on a task that never resolves (deploy Groups 13/14 regression).
+/// A boxed in-flight tool-call future handed to a background task.
+type BoxedToolFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<McpToolResult>> + Send>>;
+
+/// Everything one background dispatch needs, grouped so the helper signature
+/// stays reviewable.
+struct BackgroundDispatchRequest {
+    registry: std::sync::Arc<crate::agent::task_registry::TaskRegistry>,
+    thread_id: i64,
+    tool_name: String,
+    qualified_name: String,
+    /// The tool's OWN declared timeout (`None` = no timeout: the call runs
+    /// until it finishes, errors, or the agent cancels it).
+    timeout_dur: Option<Duration>,
+    max_inline_chars: usize,
+    /// The configured fast-path threshold (`tool_bg_secs`), reported to the
+    /// agent in the processing envelope.
+    threshold_secs: u64,
+    /// True when the tool was backgrounded on the FIRST call (long-running
+    /// tool), false when the fast path expired first.
+    immediate: bool,
+    call_id: String,
+}
+
+/// Hand an in-flight tool call to the shared background-task registry: register
+/// it, spawn the task that CONTINUES awaiting the SAME future, and answer the
+/// agent immediately with `status=processing` + the task id, so it can follow
+/// the work with `core__wait_task` / `core__poll_task`, read progress with
+/// `core__read_task_logs` and abort it with `core__cancel_task`.
 ///
-/// The names are the EXPOSED names produced by `tool_qualify(crate::mcp::CORE_PLUGIN_NAME, <short
-/// name>)` under the `{plugin}__{tool}` grammar (never the dashed legacy
-/// spelling), so they must be kept in sync with the tool definitions in
-/// `src/mcp/mod.rs`. The unit tests below assert each one against
-/// `tool_qualify`, so a future rename cannot silently drop a tool from this
-/// guard.
-fn is_core_task_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "core__wait_task"
-            | "core__poll_task"
-            | "core__cancel_task"
-            | "core__read_task_logs"
-            | "core__read_attached_file"
-            | "core__wait_for_status"
-    )
+/// The call is NEVER executed twice: `tool_future` is the single in-flight
+/// request, moved into the background task (re-sending it made a serial plugin
+/// like docker_compose execute the command twice).
+///
+/// Cancellation is REAL, not a flag: the registry's abort signal selects
+/// against the in-flight future and DROPS it mid-await when the agent calls
+/// `core__cancel_task`. Dropping the MCP call future makes the client send
+/// `notifications/cancelled` to the plugin, which drops its handler and so
+/// tears down the underlying HTTP request / kills a kill-on-drop subprocess.
+/// The task then ends `cancelled`.
+async fn dispatch_background_tool(
+    req: BackgroundDispatchRequest,
+    mut tool_future: BoxedToolFuture,
+) -> AppResult<McpToolResult> {
+    let (task_id, abort_rx, _log_buffer) =
+        req.registry.register(req.thread_id, &req.tool_name).await;
+    let tool_timeout_label = match req.timeout_dur {
+        Some(d) => d.as_secs().to_string(),
+        None => "none".to_string(),
+    };
+    req.registry
+        .append_log(
+            &task_id,
+            &format!(
+                "tool '{}' started in background (dispatch={}, tool_timeout_secs={})",
+                req.qualified_name,
+                if req.immediate {
+                    "immediate"
+                } else {
+                    "threshold"
+                },
+                tool_timeout_label
+            ),
+        )
+        .await;
+
+    let task_id_bg = task_id.clone();
+    let bg_timeout = req.timeout_dur;
+    let bg_tool_name = req.tool_name.clone();
+    let bg_registry = req.registry.clone();
+    let thread_id = req.thread_id;
+    let max_inline_chars = req.max_inline_chars;
+    let started = std::time::Instant::now();
+
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = abort_rx => {
+                // Cancel wins: dropping the other branch drops the in-flight
+                // future, which is what propagates the abort into the plugin
+                // (the MCP request is cancelled, a kill-on-drop subprocess
+                // dies). The task ends `cancelled`, never `completed`.
+                let elapsed = started.elapsed().as_secs_f64();
+                bg_registry.set_status(&task_id_bg,
+                    crate::agent::task_registry::TaskStatus::Cancelled).await;
+                bg_registry.append_log(&task_id_bg,
+                    &format!("tool '{}' cancelled after {:.1}s (in-flight call torn down)",
+                        bg_tool_name, elapsed)).await;
+            }
+            result = async {
+                match bg_timeout {
+                    Some(dur) => {
+                        tokio::time::timeout(dur, tool_future.as_mut()).await
+                    }
+                    None => Ok(tool_future.as_mut().await),
+                }
+            } => {
+                let elapsed = started.elapsed().as_secs_f64();
+                match result {
+                    Ok(Ok(res)) => {
+                        // Tool-output cap: apply the configured per-result cap
+                        // (settings `max_inline_chars`) to backgrounded results
+                        // too. 0/off disables the cap: keep the full content.
+                        let truncated = if max_inline_chars == 0 {
+                            res.content.clone()
+                        } else if res.content.len() > max_inline_chars {
+                            tracing::info!(
+                                thread_id = thread_id,
+                                knob = "max_inline_chars",
+                                value = max_inline_chars,
+                                source = crate::agent::config::setting_source_label(
+                                    "max_inline_chars"
+                                ),
+                                tool = %bg_tool_name,
+                                content_chars = res.content.len(),
+                                "tool-output cap fired: truncating backgrounded tool result"
+                            );
+                            truncate_content(&res.content, max_inline_chars)
+                        } else {
+                            res.content.clone()
+                        };
+                        bg_registry.append_log(&task_id_bg,
+                            &format!("tool '{}' completed after {:.1}s ({} chars)",
+                                bg_tool_name, elapsed, truncated.len())).await;
+                        bg_registry.set_status(&task_id_bg,
+                            crate::agent::task_registry::TaskStatus::Completed(
+                                truncated)).await;
+                    }
+                    Ok(Err(e)) => {
+                        let err = format!("Error: {}", e);
+                        bg_registry.append_log(&task_id_bg,
+                            &format!("tool '{}' failed after {:.1}s: {}", bg_tool_name, elapsed, err)).await;
+                        bg_registry.set_status(&task_id_bg,
+                            crate::agent::task_registry::TaskStatus::Failed(
+                                err)).await;
+                    }
+                    Err(_) => {
+                        let err = format!(
+                            "Tool '{}' exceeded long timeout ({}s)",
+                            bg_tool_name, bg_timeout.map(|d| d.as_secs()).unwrap_or(0));
+                        bg_registry.append_log(&task_id_bg,
+                            &format!("tool '{}' timed out after {:.1}s: {}", bg_tool_name, elapsed, err)).await;
+                        bg_registry.set_status(&task_id_bg,
+                            crate::agent::task_registry::TaskStatus::Failed(
+                                err)).await;
+                    }
+                }
+            }
+        };
+    });
+
+    // The agent gets the handle immediately: status=processing + task id.
+    let message = if req.immediate {
+        format!(
+            "Tool '{}' started as a background task. Use poll_task, wait_task, or read_task_logs to check progress; cancel_task to abort it.",
+            req.tool_name
+        )
+    } else {
+        format!(
+            "Tool '{}' ran longer than {}s and was moved to a background task. Use poll_task, wait_task, or read_task_logs to check progress; cancel_task to abort it.",
+            req.tool_name, req.threshold_secs
+        )
+    };
+    let processing_json = serde_json::json!({
+        "status": "processing",
+        "task_id": task_id,
+        "tool": req.qualified_name,
+        "dispatch": if req.immediate { "immediate" } else { "threshold" },
+        "timeout_secs": req.threshold_secs,
+        "tool_timeout_secs": req.timeout_dur.map(|d| d.as_secs()),
+        "message": message,
+    });
+    Ok(McpToolResult {
+        call_id: req.call_id,
+        content: processing_json.to_string(),
+        is_error: false,
+    })
 }
 
 #[cfg(test)]
@@ -4161,46 +4258,4 @@ mod cap_observability_tests {
 }
 
 #[cfg(test)]
-mod core_task_tool_guard_tests {
-    use super::is_core_task_tool;
-    use crate::mcp::tool_qualify;
-
-    /// The guard list must match the real exposed names built by
-    /// `tool_qualify`. Four of these were once spelled with a dash
-    /// (`core__wait-task`), which can never match the `__` grammar and
-    /// silently backgrounded `wait_task` (regression, deploy Groups 13/14).
-    #[test]
-    fn guard_covers_every_core_task_tool() {
-        for short in [
-            "wait_task",
-            "poll_task",
-            "cancel_task",
-            "read_task_logs",
-            "read_attached_file",
-            "wait_for_status",
-        ] {
-            let exposed = tool_qualify(crate::mcp::CORE_PLUGIN_NAME, short);
-            assert!(
-                is_core_task_tool(&exposed),
-                "background-task guard must know the real exposed name {exposed}"
-            );
-        }
-        assert!(!is_core_task_tool("core__wait-task"));
-        assert!(!is_core_task_tool("docker__compose"));
-        // HARD CUTOVER: the retired `core__*` namespace is not a core
-        // task tool name any more (built via format! on purpose).
-        let retired = format!("{}__{}", "builtin", "wait_task");
-        assert!(
-            !is_core_task_tool(&retired),
-            "the retired core namespace must not be recognised"
-        );
-    }
-
-    /// `wait_task` / `wait_for_status` must stay synchronous (no bg switch),
-    /// because they return the awaited RESULT, not a task handle.
-    #[test]
-    fn guard_covers_the_long_waiting_tools() {
-        assert!(is_core_task_tool("core__wait_task"));
-        assert!(is_core_task_tool("core__wait_for_status"));
-    }
-}
+mod cap_observability_tests_tail_marker {}

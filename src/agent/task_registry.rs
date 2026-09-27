@@ -26,12 +26,24 @@ pub struct TaskInfo {
     pub status: TaskStatus,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskStatus {
     Running,
     Completed(String),
     Failed(String),
     Cancelled,
+}
+
+/// The honest outcome of a cancel request (requirement: reports an
+/// honest non-cancellable result when the underlying task is already done).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelOutcome {
+    /// The task was running and its abort signal was fired.
+    Cancelled,
+    /// The task already reached a terminal state; nothing to cancel.
+    AlreadyFinished,
+    /// No such task id.
+    NotFound,
 }
 
 pub struct TaskEntry {
@@ -96,17 +108,24 @@ impl TaskRegistry {
         }
     }
 
-    pub async fn cancel(&self, id: &str) -> bool {
+    pub async fn cancel(&self, id: &str) -> CancelOutcome {
         let mut guard = self.tasks.write().await;
-        if let Some(entry) = guard.get_mut(id) {
-            if let Some(tx) = entry.abort_tx.take() {
-                let _ = tx.send(()); // oneshot: ok if receiver dropped
-            }
-            entry.info.status = TaskStatus::Cancelled;
-            true
-        } else {
-            false
+        let Some(entry) = guard.get_mut(id) else {
+            return CancelOutcome::NotFound;
+        };
+        // Honest cancellation: only a task that is STILL RUNNING can be
+        // cancelled. A task that already reached a terminal state
+        // (completed/failed/cancelled) is reported as such instead of being
+        // relabelled `cancelled` - the agent must never be told it stopped
+        // work that had already finished.
+        if !matches!(entry.info.status, TaskStatus::Running) {
+            return CancelOutcome::AlreadyFinished;
         }
+        if let Some(tx) = entry.abort_tx.take() {
+            let _ = tx.send(()); // oneshot: ok if receiver dropped
+        }
+        entry.info.status = TaskStatus::Cancelled;
+        CancelOutcome::Cancelled
     }
 
     pub async fn cancel_all_for_thread(&self, thread_id: i64) -> usize {
@@ -123,7 +142,7 @@ impl TaskRegistry {
 
         let mut count = 0;
         for id in &ids {
-            if self.cancel(id).await {
+            if matches!(self.cancel(id).await, CancelOutcome::Cancelled) {
                 count += 1;
             }
         }
@@ -225,7 +244,7 @@ mod tests {
         let registry = TaskRegistry::new();
         let (task_id, rx, _log) = registry.register(42, "tool").await;
         let result = registry.cancel(&task_id).await;
-        assert!(result);
+        assert_eq!(result, CancelOutcome::Cancelled);
         let info = registry.get_info(&task_id).await.unwrap();
         assert!(matches!(info.status, TaskStatus::Cancelled));
         // abort_tx was fired, so rx should be resolved
@@ -237,7 +256,7 @@ mod tests {
     async fn test_cancel_non_existent() {
         let registry = TaskRegistry::new();
         let result = registry.cancel("nonexistent").await;
-        assert!(!result);
+        assert_eq!(result, CancelOutcome::NotFound);
     }
 
     #[tokio::test]
@@ -428,8 +447,37 @@ mod tests {
         let registry = TaskRegistry::new();
         let (task_id, _rx, _log) = registry.register(42, "tool").await;
 
-        assert!(registry.cancel(&task_id).await);
-        // Second cancel should still return true (task exists, set to Cancelled again)
-        assert!(registry.cancel(&task_id).await);
+        assert_eq!(registry.cancel(&task_id).await, CancelOutcome::Cancelled);
+        // A second cancel finds an already-finished (cancelled) task: honest
+        // AlreadyFinished, never a second "cancelled" claim.
+        assert_eq!(
+            registry.cancel(&task_id).await,
+            CancelOutcome::AlreadyFinished
+        );
+    }
+
+    /// Cancelling a task that already COMPLETED must not relabel it as
+    /// cancelled: the registry reports AlreadyFinished and keeps the real
+    /// (completed) result.
+    #[tokio::test]
+    async fn test_cancel_after_completion_reports_already_finished() {
+        let registry = TaskRegistry::new();
+        let (task_id, _rx, _log) = registry.register(42, "tool").await;
+        registry
+            .set_status(
+                &task_id,
+                TaskStatus::Completed("the real result".to_string()),
+            )
+            .await;
+
+        assert_eq!(
+            registry.cancel(&task_id).await,
+            CancelOutcome::AlreadyFinished
+        );
+        let info = registry.get_info(&task_id).await.unwrap();
+        assert_eq!(
+            info.status,
+            TaskStatus::Completed("the real result".to_string())
+        );
     }
 }

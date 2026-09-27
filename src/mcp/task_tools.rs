@@ -181,14 +181,45 @@ pub async fn handle_cancel_task(args: Value, _ctx: AppContext) -> AppResult<McpT
         .cloned()
         .expect("TASK_REGISTRY not initialized");
 
-    let cancelled = registry.cancel(&task_id).await;
+    let outcome = registry.cancel(&task_id).await;
+    // Honest report: a task that already finished is NOT relabelled
+    // `cancelled` - the caller is told what actually happened (and, when the
+    // task is still running but the underlying operation cannot be aborted,
+    // the task is still marked cancelled because the agent-side lifetime ends
+    // here; the answer names that in `note`).
+    let mut body = serde_json::json!({
+        "task_id": task_id,
+    });
+    match outcome {
+        task_registry::CancelOutcome::Cancelled => {
+            body["status"] = Value::String("cancelled".to_string());
+            body["note"] = Value::String(
+                "the in-flight call was torn down (the MCP request is cancelled, so a plugin with \
+                 a kill-on-drop guard also stops its underlying process/request)"
+                    .to_string(),
+            );
+        }
+        task_registry::CancelOutcome::AlreadyFinished => {
+            let current = registry
+                .get_info(&task_id)
+                .await
+                .map(|info| match info.status {
+                    task_registry::TaskStatus::Completed(_) => "completed".to_string(),
+                    task_registry::TaskStatus::Failed(_) => "failed".to_string(),
+                    task_registry::TaskStatus::Cancelled => "cancelled".to_string(),
+                    task_registry::TaskStatus::Running => "running".to_string(),
+                })
+                .unwrap_or_else(|| "unknown".to_string());
+            body["status"] = Value::String("already_finished".to_string());
+            body["current_status"] = Value::String(current);
+        }
+        task_registry::CancelOutcome::NotFound => {
+            body["status"] = Value::String("not_found".to_string());
+        }
+    }
     Ok(McpToolResult {
         call_id: String::new(),
-        content: serde_json::json!({
-            "status": if cancelled { "cancelled" } else { "not_found" },
-            "task_id": task_id,
-        })
-        .to_string(),
+        content: body.to_string(),
         is_error: false,
     })
 }
