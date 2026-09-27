@@ -59,6 +59,26 @@ const IGNORE_INT: i64 = -999_999;
 /// printable sentinel that users are extremely unlikely to type.
 const IGNORE_STR: &str = "\u{10FFFF}__NO_UPDATE__\u{10FFFF}";
 
+/// PATCH bind value for a clearable string column.
+///
+/// `None` (field omitted from the request) keeps the current value: the value
+/// IS the `IGNORE_STR` sentinel, so the column's
+/// `CASE WHEN :x = :ign_str THEN x ELSE NULLIF(:x, '')::text END` branch is a
+/// no-op. `Some("")` (explicit empty string) is NOT the sentinel, so
+/// `NULLIF('')` stores NULL and the board fallback applies again. `Some(v)`
+/// sets `v`.
+///
+/// Every clearable column (channel_id, profile, template, toolset, workflow)
+/// must use this helper: binding an omitted field as `""` is the
+/// "PATCH cannot clear" defect (a missing field and an explicit `""` became
+/// indistinguishable, so `PATCH {"profile":""}` was silently a no-op).
+fn patch_string_bind(v: Option<&str>) -> &str {
+    match v {
+        Some(s) => s,
+        None => IGNORE_STR,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -1877,12 +1897,12 @@ async fn update_task_handler(
             body = CASE WHEN :body = :ign_str THEN body ELSE :body END,
             assignee = CASE WHEN :assignee = '' THEN assignee ELSE NULLIF(:assignee, '')::text END,
             channel_id = CASE WHEN :channel_id = :ign_channel THEN channel_id ELSE NULLIF(:channel_id, '')::text END,
-            profile = CASE WHEN :profile = '' THEN profile ELSE NULLIF(:profile, '')::text END,
+            profile = CASE WHEN :profile = :ign_str THEN profile ELSE NULLIF(:profile, '')::text END,
             priority = CASE WHEN :priority = -999999::bigint THEN priority::bigint ELSE :priority END,
             status = CASE WHEN :status = '' THEN status ELSE :status END,
             archived = :archived,
-            template = CASE WHEN :template = '' THEN template ELSE NULLIF(:template, '')::text END,
-            toolset = CASE WHEN :toolset = '' THEN toolset ELSE NULLIF(:toolset, '')::text END,
+            template = CASE WHEN :template = :ign_str THEN template ELSE NULLIF(:template, '')::text END,
+            toolset = CASE WHEN :toolset = :ign_str THEN toolset ELSE NULLIF(:toolset, '')::text END,
             plan = :plan,
             workflow_id = CASE WHEN :workflow_id = :ign_wf THEN workflow_id ELSE NULLIF(:workflow_id, '')::text END,
             board = CASE WHEN :board = '' THEN board ELSE NULLIF(:board, '')::text END,
@@ -1902,12 +1922,12 @@ async fn update_task_handler(
           :ign_channel = IGNORE_STR,
           :ign_wf = IGNORE_STR,
           :channel_id = body.channel.as_deref().unwrap_or(IGNORE_STR),
-          :profile = body.profile.as_deref().unwrap_or(""),
+          :profile = patch_string_bind(body.profile.as_deref()),
           :priority = body.priority.map(|v| v as i64).unwrap_or(IGNORE_INT),
           :status = body.status.as_deref().unwrap_or(""),
           :archived = body.archived.unwrap_or(before.archived.unwrap_or(false)),
-          :template = body.template.as_deref().unwrap_or(""),
-          :toolset = body.toolset.as_deref().unwrap_or(""),
+          :template = patch_string_bind(body.template.as_deref()),
+          :toolset = patch_string_bind(body.toolset.as_deref()),
           :plan = body.plan.or(before.plan).unwrap_or(false),
           :workflow_id = body.workflow.as_ref().map(|wf| wf.as_deref().unwrap_or("")).unwrap_or(IGNORE_STR),
           :board = body.board.as_deref().unwrap_or(""),
@@ -3924,5 +3944,46 @@ mod history_payload_tests {
 
         let blank = dep_previous_values("task_b", Some("   "));
         assert_eq!(blank["title"], "(deleted task)");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PATCH bind semantics for clearable string columns (thread 3363): `None`
+// (field omitted) keeps the current value, `Some("")` clears it to NULL.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod patch_clear_tests {
+    use super::*;
+
+    /// An omitted field must use the IGNORE sentinel, so the CASE branch is a
+    /// no-op and the current (possibly explicit) value survives.
+    #[test]
+    fn omitted_field_keeps_current_value() {
+        assert_eq!(
+            patch_string_bind(None),
+            IGNORE_STR,
+            "an omitted field must bind the IGNORE sentinel, not an empty string"
+        );
+    }
+
+    /// An explicit empty string must NOT bind the sentinel: the SQL then runs
+    /// `NULLIF('', '')::text` -> NULL, so the task field is cleared and the
+    /// board (boards.yml) fallback applies again.
+    #[test]
+    fn empty_string_clears_to_null() {
+        assert_eq!(patch_string_bind(Some("")), "");
+        assert_ne!(
+            patch_string_bind(Some("")),
+            IGNORE_STR,
+            "a PATCH with an explicit empty string must clear the column, not be mistaken for 'unchanged'"
+        );
+    }
+
+    /// An explicit value is forwarded verbatim.
+    #[test]
+    fn explicit_value_is_forwarded() {
+        assert_eq!(patch_string_bind(Some("omni")), "omni");
+        assert_eq!(patch_string_bind(Some("kanban")), "kanban");
     }
 }

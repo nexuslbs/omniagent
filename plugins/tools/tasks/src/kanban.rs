@@ -105,10 +105,29 @@ fn board_query_suffix(board: &str) -> String {
     }
 }
 
+/// Caller-supplied channel/profile for a NEW task.
+///
+/// The calling thread's context is deliberately NOT consulted (operator
+/// 2026-09-27): an omitted channel/profile must stay empty so the task stores
+/// NULL and the BOARD (boards.yml) supplies the effective values at dispatch
+/// (`resolve_task_defaults`). Inheriting the caller's channel/profile SHADOWED
+/// the board fallback - a task created by the main agent from a telegram
+/// thread was stored with `channel_id='telegram'` + `profile='omni'`, and the
+/// board's own channel/profile were then ignored. An explicitly requested
+/// channel/profile still wins (it is forwarded verbatim).
+fn create_context_fields(args: &Value) -> (&str, &str) {
+    let channel = args["channel_id"]
+        .as_str()
+        .or_else(|| args["channel"].as_str())
+        .unwrap_or("");
+    let profile = args["profile"].as_str().unwrap_or("");
+    (channel, profile)
+}
+
 async fn handle_create(
     _pool: &PgPool,
     args: &Value,
-    meta: Option<&McpMeta>,
+    _meta: Option<&McpMeta>,
 ) -> Result<(String, bool)> {
     let title = args["title"]
         .as_str()
@@ -141,23 +160,13 @@ async fn handle_create(
     if let Some(tags) = args["tags"].as_array() {
         req["tags"] = serde_json::json!(tags);
     }
-    let channel_id = args["channel_id"]
-        .as_str()
-        .or_else(|| args["channel"].as_str())
-        .map(String::from)
-        .or_else(|| meta.and_then(|m| m.channel_id.clone()));
-    if let Some(cid) = channel_id {
-        // The HTTP API field is `channel` (there is no `channel_id` field), so
-        // the old name silently dropped the value.
-        req["channel"] = serde_json::json!(cid);
-    }
-    let profile = args["profile"]
-        .as_str()
-        .map(String::from)
-        .or_else(|| meta.and_then(|m| m.profile_name.clone()));
-    if let Some(p) = profile {
-        req["profile"] = serde_json::json!(p);
-    }
+    // Explicit channel/profile win; omitted stays EMPTY (NULL in the task) so
+    // the board supplies them. See `create_context_fields`.
+    let (channel, profile) = create_context_fields(args);
+    // The HTTP API field is `channel` (there is no `channel_id` field), so the
+    // old name silently dropped the value.
+    req["channel"] = serde_json::json!(channel);
+    req["profile"] = serde_json::json!(profile);
     let resp = api_call(reqwest::Method::POST, "/kanban/tasks", Some(&req)).await?;
     let id = resp["data"]["id"]
         .as_str()
@@ -542,11 +551,11 @@ pub fn build_tools(pool: &Arc<RwLock<Option<PgPool>>>) -> Vec<McpToolEntry> {
                             "type": "string",
                             "description": "Optional assignee name"
                         },
-                        "channel_id": { "type": "string", "description": "Optional channel name for thread/cause creation (default: current channel). Legacy alias of `channel`" },
-                        "channel": { "type": "string", "description": "Optional channel name for thread/cause creation (default: current channel)" },
+                        "channel_id": { "type": "string", "description": "Optional explicit channel name for thread/cause creation. Leave unset (recommended) so the BOARD's channel applies (boards.yml fallback); the calling thread's channel is never inherited. Legacy alias of `channel`" },
+                        "channel": { "type": "string", "description": "Optional explicit channel name for thread/cause creation. Leave unset (recommended) so the BOARD's channel applies (boards.yml fallback); the calling thread's channel is never inherited." },
                         "profile": {
                             "type": "string",
-                            "description": "Optional profile name for the task (default: current profile)"
+                            "description": "Optional explicit profile name for the task. Leave unset (recommended) so the BOARD's profile applies (boards.yml fallback); the calling thread's profile is never inherited."
                         },
                         "template": {
                             "type": "string",
@@ -639,15 +648,15 @@ pub fn build_tools(pool: &Arc<RwLock<Option<PgPool>>>) -> Vec<McpToolEntry> {
                             "type": "string",
                             "description": "New assignee"
                         },
-                        "channel_id": { "type": "string", "description": "New channel name (legacy alias of `channel`)" },
-                        "channel": { "type": "string", "description": "New channel name" },
-                        "template": { "type": "string", "description": "New template file name (without .md)" },
-                        "toolset": { "type": "string", "description": "New toolset name" },
+                        "channel_id": { "type": "string", "description": "New channel name, or empty string to clear it so the BOARD's channel applies (boards.yml fallback). Legacy alias of `channel`" },
+                        "channel": { "type": "string", "description": "New channel name, or empty string to clear it so the BOARD's channel applies (boards.yml fallback)" },
+                        "template": { "type": "string", "description": "New template file name (without .md), or empty string to clear it" },
+                        "toolset": { "type": "string", "description": "New toolset name, or empty string to clear it" },
                         "plan": { "type": "boolean", "description": "New plan-mode flag" },
                         "board": { "type": "string", "description": "Move the task to another board. Only sent when non-empty; empty/null means unchanged (the API rejects an explicit clear: boards are always enabled)" },
                         "profile": {
                             "type": "string",
-                            "description": "New profile name"
+                            "description": "New profile name, or empty string to clear it so the BOARD's profile applies (boards.yml fallback)"
                         },
                         "archived": {
                             "type": "boolean",
@@ -863,5 +872,57 @@ mod tests {
         assert_eq!(board_query_suffix("   "), "");
         assert_eq!(board_query_suffix("omnidev"), "&board=omnidev");
         assert_eq!(board_query_suffix(" v0.3.0 beta "), "&board=v0.3.0%20beta");
+    }
+
+    /// create: the calling thread's channel/profile are NEVER inherited. An
+    /// omitted channel/profile stays EMPTY (the task stores NULL and the board
+    /// supplies the effective values), while an explicit value is forwarded
+    /// verbatim. `create_context_fields` takes no caller-context input at all,
+    /// so a telegram/omni caller cannot leak into the created task.
+    #[test]
+    fn create_never_inherits_caller_context() {
+        let empty = serde_json::json!({});
+        let (channel, profile) = create_context_fields(&empty);
+        assert_eq!(
+            channel, "",
+            "omitted channel must stay empty so the board fallback applies"
+        );
+        assert_eq!(
+            profile, "",
+            "omitted profile must stay empty so the board fallback applies"
+        );
+
+        // Explicit values still win; `channel_id` stays a working legacy alias.
+        let explicit = serde_json::json!({"channel": "kanban", "profile": "custom"});
+        let (channel, profile) = create_context_fields(&explicit);
+        assert_eq!(channel, "kanban");
+        assert_eq!(profile, "custom");
+        let legacy = serde_json::json!({"channel_id": "legacy"});
+        let (channel, _) = create_context_fields(&legacy);
+        assert_eq!(channel, "legacy", "channel_id stays a working alias");
+    }
+
+    /// The create tool schema must document the BOARD fallback and must not
+    /// promise caller-context inheritance ("default: current channel/profile").
+    #[test]
+    fn create_schema_documents_board_fallback() {
+        let pool: Arc<RwLock<Option<PgPool>>> = Arc::new(RwLock::new(None));
+        let tools = build_tools(&pool);
+        let create = tools
+            .iter()
+            .find(|t| t.def.name == "create_kanban_task")
+            .expect("create_kanban_task present");
+        let props = &create.def.input_schema["properties"];
+        for key in ["channel_id", "channel", "profile"] {
+            let desc = props[key]["description"].as_str().unwrap_or("");
+            assert!(
+                !desc.contains("default: current"),
+                "{key} must not promise caller-context inheritance: {desc}"
+            );
+            assert!(
+                desc.contains("BOARD"),
+                "{key} must state the board fallback: {desc}"
+            );
+        }
     }
 }

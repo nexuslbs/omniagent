@@ -720,3 +720,95 @@ fn test_kanban_reset_workflow_executions_is_observable() {
         .delete(format!("{}/kanban/tasks/{}", BASE, task_id))
         .send();
 }
+
+// ---------------------------------------------------------------------------
+// /kanban/tasks PATCH clearable channel/profile (thread 3363): a PATCH that
+// OMITS the field keeps the current (explicit) value, while an explicit ""
+// clears it so the board (boards.yml) fallback applies again. Live-server test:
+// run against a real stack with `cargo test --test api_tests -- --ignored
+// test_kanban_patch_clears_profile_and_channel`.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore]
+fn test_kanban_patch_clears_profile_and_channel() {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("Failed to build HTTP client");
+    let suffix = std::process::id();
+
+    let detail = |id: &str| -> serde_json::Value {
+        client
+            .get(format!("{}/kanban/tasks/{}", BASE, id))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap()
+    };
+
+    // 1. Create with an EXPLICIT channel/profile: they must win over the board.
+    let resp = client
+        .post(format!("{}/kanban/tasks", BASE))
+        .json(&serde_json::json!({
+            "title": format!("patch-clear-{}", suffix),
+            "board": "plain",
+            "channel": "patch-clear-channel",
+            "profile": "patch-clear-profile",
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(resp.status(), 200, "POST /kanban/tasks should succeed");
+    let json: serde_json::Value = resp.json().unwrap();
+    let task_id = json["data"]["id"].as_str().expect("task id").to_string();
+
+    let d = detail(&task_id);
+    assert_eq!(
+        d["data"]["profile"], "patch-clear-profile",
+        "an explicit profile must win at create: {d}"
+    );
+    assert_eq!(
+        d["data"]["channel_id"], "patch-clear-channel",
+        "an explicit channel must win at create: {d}"
+    );
+
+    // 2. A PATCH that OMITS profile/channel keeps the current values.
+    let resp = client
+        .patch(format!("{}/kanban/tasks/{}", BASE, task_id))
+        .json(&serde_json::json!({ "priority": 1 }))
+        .send()
+        .unwrap();
+    assert_eq!(resp.status(), 200, "PATCH should succeed");
+    let d = detail(&task_id);
+    assert_eq!(
+        d["data"]["profile"], "patch-clear-profile",
+        "an omitted profile must keep its value: {d}"
+    );
+    assert_eq!(
+        d["data"]["channel_id"], "patch-clear-channel",
+        "an omitted channel must keep its value: {d}"
+    );
+
+    // 3. An explicit "" CLEARS them: the resolved values must no longer be the
+    //    explicit ones (the board/channel fallback chain applies again).
+    let resp = client
+        .patch(format!("{}/kanban/tasks/{}", BASE, task_id))
+        .json(&serde_json::json!({ "profile": "", "channel": "" }))
+        .send()
+        .unwrap();
+    assert_eq!(resp.status(), 200, "PATCH clear should succeed");
+    let d = detail(&task_id);
+    assert_ne!(
+        d["data"]["profile"], "patch-clear-profile",
+        "PATCH {{\"profile\":\"\"}} must clear the task profile: {d}"
+    );
+    assert_ne!(
+        d["data"]["channel_id"], "patch-clear-channel",
+        "PATCH {{\"channel\":\"\"}} must clear the task channel: {d}"
+    );
+
+    // 4. Best-effort cleanup.
+    let _ = client
+        .delete(format!("{}/kanban/tasks/{}", BASE, task_id))
+        .send();
+}
