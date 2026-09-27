@@ -728,3 +728,43 @@ pub(crate) fn respond_removed(name: &str, removed: bool) -> Response<Body> {
             .into_response()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    /// task_omnidev_phantom_plugin_entries_cannot_be: a removal that removed
+    /// nothing must NEVER answer 200 {"success":true,"deleted":true}. That lie
+    /// is what made the dashboard report a phantom plugin as removed while its
+    /// plugins.yml entry stayed in place and could never be deleted again.
+    #[tokio::test]
+    async fn respond_removed_never_reports_a_false_success() {
+        let resp = respond_removed("phantom-probe", false);
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["success"], serde_json::json!(false));
+        assert_ne!(v["data"]["deleted"], serde_json::json!(true));
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Nothing to remove"),
+            "the error must name the reason: {}",
+            v["error"]
+        );
+    }
+
+    /// A removal that really removed the entry still answers the success the
+    /// caller (dashboard) expects.
+    #[tokio::test]
+    async fn respond_removed_reports_the_real_success() {
+        let resp = respond_removed("phantom-probe", true);
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["success"], serde_json::json!(true));
+        assert_eq!(v["data"]["deleted"], serde_json::json!(true));
+    }
+}
