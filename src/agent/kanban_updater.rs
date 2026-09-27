@@ -681,6 +681,11 @@ pub(crate) fn history_status_pair<'a>(
 
 /// Move the task to `to` and record a workflow history entry with `comment`
 /// (D3: transitions persist a comment).
+///
+/// Also stops the task's old-status threads (step-scoped skip) when the status
+/// actually changed - the workflow transition semantics. The EXPLICIT OPERATOR
+/// STOP path must NOT use this wrapper: stopping ONE thread may never terminate
+/// a sibling thread of the same task (see [`transition_task_status`]).
 pub(crate) async fn transition_with_comment(
     pool: &sqlx::PgPool,
     task_id: &str,
@@ -688,6 +693,47 @@ pub(crate) async fn transition_with_comment(
     thread_status: Option<&str>,
     comment: &str,
 ) -> Result<(), String> {
+    let (_from, changed) =
+        transition_task_status(pool, task_id, to, thread_status, comment).await?;
+
+    // Stop the task's old-status threads when the status actually changed
+    // (workflow-driven transition). The thread that triggered this
+    // transition is already terminal; any other pending/processing thread
+    // tied to a status the task left is skipped (step-scoped, same choke
+    // point as status-change dispatch) so it cannot race the new step.
+    if changed {
+        if let Err(e) =
+            crate::db::threads::skip_stale_threads_for_status(pool, task_id, to, None).await
+        {
+            tracing::warn!(
+                "[workflow] failed to skip stale threads after moving task {} to {}: {:?}",
+                task_id,
+                to,
+                e
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Move the task to `to` and record the workflow history entry with `comment`,
+/// WITHOUT touching any thread of the task.
+///
+/// Split out of [`transition_with_comment`] because the workflow-wide
+/// stale-thread skip is not always wanted: the EXPLICIT OPERATOR STOP
+/// (`apply_stop_recovery`) moves a task to `blocked` when ONE of its threads is
+/// stopped and must never terminate a sibling thread of the same task (operator
+/// bug 2026-09-27: "clicking Stop on one thread stopped both").
+///
+/// Returns the previous task status and whether the status actually changed.
+pub(crate) async fn transition_task_status(
+    pool: &sqlx::PgPool,
+    task_id: &str,
+    to: &str,
+    thread_status: Option<&str>,
+    comment: &str,
+) -> Result<(String, bool), String> {
     let from: Option<String> = sql_forge!(
         scalar String,
         "SELECT status FROM kanban_tasks WHERE id = :task_id",
@@ -697,6 +743,7 @@ pub(crate) async fn transition_with_comment(
     .await
     .map_err(|e| format!("fetch task status: {e}"))?;
     let from = from.unwrap_or_else(|| to.to_string());
+    let changed = from != to;
 
     sql_forge!(
         "UPDATE kanban_tasks SET status = :to, position = CASE WHEN status <> :to THEN (SELECT COALESCE(MAX(position), -1) + 1 FROM kanban_tasks WHERE status = :to) ELSE position END, thread_status = NULLIF(:thread_status, '')::text WHERE id = :task_id",
@@ -720,25 +767,7 @@ pub(crate) async fn transition_with_comment(
     .await
     .map_err(|e| e.to_string())?;
 
-    // Stop the task's old-status threads when the status actually changed
-    // (workflow-driven transition). The thread that triggered this
-    // transition is already terminal; any other pending/processing thread
-    // tied to a status the task left is skipped (step-scoped, same choke
-    // point as status-change dispatch) so it cannot race the new step.
-    if from != to {
-        if let Err(e) =
-            crate::db::threads::skip_stale_threads_for_status(pool, task_id, to, None).await
-        {
-            tracing::warn!(
-                "[workflow] failed to skip stale threads after moving task {} to {}: {:?}",
-                task_id,
-                to,
-                e
-            );
-        }
-    }
-
-    Ok(())
+    Ok((from, changed))
 }
 
 /// Outcome of creating a workflow step thread (testing/review).

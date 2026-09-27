@@ -71,7 +71,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::agent::config::AgentConfig;
-use crate::agent::kanban_updater::transition_with_comment;
+use crate::agent::kanban_updater::transition_task_status;
 use crate::agent::plugin_manager::PluginManager;
 use crate::db::types as queries;
 use crate::mcp::AppContext;
@@ -478,7 +478,7 @@ async fn apply_stop_recovery(
                 },
                 task.thread_status.as_deref(),
             );
-            transition_with_comment(
+            transition_task_status(
                 pool,
                 task_id,
                 new_status,
@@ -523,6 +523,25 @@ static CANCEL_TOKENS: OnceLock<Arc<Mutex<HashMap<String, CancellationToken>>>> =
 /// The process-wide channel cancellation-token registry.
 pub fn cancel_registry() -> &'static Arc<Mutex<HashMap<String, CancellationToken>>> {
     CANCEL_TOKENS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
+
+/// Cancel the live channel handler that owns `channel_id`.
+///
+/// The registry holds ONE token per channel (the supervisor runs one handler
+/// per channel, processing one thread at a time), so this cancels exactly the
+/// handler running the channel's in-flight thread - never an unrelated one.
+/// Shared by the explicit stop paths and by the status-change dispatch: a
+/// thread that was `processing` must actually STOP, not merely be marked
+/// terminal in the DB. Returns true when a live handler token was cancelled.
+pub async fn cancel_channel_handler(channel_id: &str) -> bool {
+    let mut tokens = cancel_registry().lock().await;
+    match tokens.remove(channel_id) {
+        Some(token) => {
+            token.cancel();
+            true
+        }
+        None => false,
+    }
 }
 
 /// What an explicit stop targets.
