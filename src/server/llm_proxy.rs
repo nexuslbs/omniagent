@@ -104,9 +104,27 @@ pub(crate) async fn llm_chat_handler(
     // Single shared resolver: models.yml api_key ($env:/$secret: expanded by
     // core at request time) first, else the provider plugin config (same
     // expansion path as every other plugin config value).
-    let api_key =
-        crate::models_yaml::resolve_provider_api_key(&state.data_dir, provider_name, &state.pool)
-            .await;
+    //
+    // STRICT variant: an api_key reference that is DECLARED but does not
+    // resolve (missing secret/env var) is reported as an explicit configuration
+    // error naming the provider and the reference, instead of an empty bearer
+    // that the upstream provider answers with a bare 401.
+    let api_key = match crate::models_yaml::resolve_provider_api_key_checked(
+        &state.data_dir,
+        provider_name,
+        &state.pool,
+    )
+    .await
+    {
+        Ok(key) => key,
+        Err(msg) => {
+            tracing::error!("[/api/llm/chat] provider '{}': {}", provider_name, msg);
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": msg })),
+            );
+        }
+    };
 
     let api_mode = ApiMode::resolve(provider_name, model_name);
     let resolved_provider = crate::llm::ProviderId::new(provider_name);

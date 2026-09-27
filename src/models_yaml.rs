@@ -528,6 +528,139 @@ pub async fn resolve_provider_api_key(
     }
 }
 
+/// A provider api_key reference (`$secret:NAME` / `$env:VAR`) that is DECLARED
+/// in models.yml or the provider plugin config but does NOT resolve.
+///
+/// This is a configuration error, not a provider error: the request would go
+/// out with an empty bearer token and the upstream provider would answer with a
+/// bare 401 ("Authentication Fails (auth header format should be Bearer
+/// sk-...)"), hiding the real cause (dev-stack incident 2026-09-27/28). The
+/// call sites refuse such a request and report this struct's message instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedProviderKey {
+    /// Provider whose request would go out without a credential.
+    pub provider: String,
+    /// The raw declared reference, e.g. `$secret:DEEPSEEK_API_KEY`.
+    pub reference: String,
+    /// Referenced secret name for a `$secret:` reference.
+    pub secret_name: Option<String>,
+    /// Referenced env var for a `$env:` reference.
+    pub env_name: Option<String>,
+    /// Where the reference is declared: `models.yml` or `plugins.yml`.
+    pub source: &'static str,
+}
+
+impl UnresolvedProviderKey {
+    /// Actionable message naming the provider and the missing reference.
+    pub fn message(&self) -> String {
+        if let Some(secret) = &self.secret_name {
+            format!(
+                "Provider '{}' has an unresolved API key reference {} (declared in {}): \
+                 secret '{}' is not in the secrets table. Refusing the LLM request before it \
+                 is sent, because the upstream provider would answer with a bare 401 that \
+                 hides this configuration error. Create the secret (secrets API), or add \
+                 {} to omni-deployer/secrets.env and re-run the stack setup.",
+                self.provider, self.reference, self.source, secret, secret
+            )
+        } else if let Some(var) = &self.env_name {
+            format!(
+                "Provider '{}' has an unresolved API key reference {} (declared in {}): \
+                 environment variable '{}' is not set. Refusing the LLM request before it is \
+                 sent, because the upstream provider would answer with a bare 401 that hides \
+                 this configuration error.",
+                self.provider, self.reference, self.source, var
+            )
+        } else {
+            format!(
+                "Provider '{}' api_key reference {} (declared in {}) did not resolve. \
+                 Refusing the LLM request before it is sent.",
+                self.provider, self.reference, self.source
+            )
+        }
+    }
+}
+
+/// Classify a DECLARED api_key value.
+///
+/// `Some((secret_name, env_name))` when the value is a `$secret:NAME` /
+/// `$env:VAR` reference, `None` for a literal value (or an absent one): only a
+/// reference can be "unresolved", so a no-auth provider (noop, local gateways)
+/// must never be flagged by the guard.
+pub fn classify_provider_key_ref(raw: &str) -> Option<(Option<String>, Option<String>)> {
+    if let Some(name) = raw.strip_prefix("$secret:") {
+        return Some((Some(name.to_string()), None));
+    }
+    raw.strip_prefix("$env:")
+        .map(|name| (None, Some(name.to_string())))
+}
+
+/// The DECLARED-but-unresolved api_key reference of `provider`, if any.
+///
+/// `None` means either the provider declares no `$secret:`/`$env:` reference at
+/// all (a no-auth provider such as the noop provider stays fully supported) or
+/// every declared reference resolves. The raw (unexpanded) reference is read
+/// from models.yml first and then from the provider plugin config, because the
+/// resolved form can no longer tell "missing secret" from "empty value".
+pub async fn unresolved_provider_api_key(
+    data_dir: &str,
+    provider: &str,
+    pool: &sqlx::PgPool,
+) -> Option<UnresolvedProviderKey> {
+    let mut declared: Vec<(&'static str, String)> = Vec::new();
+    if let Some(raw) = models_api_key_raw(data_dir, provider) {
+        declared.push(("models.yml", raw));
+    }
+    if let Ok(Some(detail)) = crate::plugins_yaml::get_plugin(
+        data_dir,
+        provider,
+        &crate::plugins_yaml::PluginYamlType::Provider,
+    ) {
+        if let Some(raw) = detail.config.get("api_key").and_then(|v| v.as_str()) {
+            if !declared.iter().any(|(_, d)| d == raw) {
+                declared.push(("plugins.yml", raw.to_string()));
+            }
+        }
+    }
+
+    for (source, raw) in declared {
+        let (secret_name, env_name) = match classify_provider_key_ref(&raw) {
+            Some(parts) => parts,
+            // A literal api_key (or an absent one) is never "unresolved": the
+            // guard must not invent a credential requirement for no-auth
+            // providers.
+            None => continue,
+        };
+        let resolved = crate::plugins_yaml::resolve_config_ref_value(&raw, pool).await;
+        if resolved.is_empty() {
+            return Some(UnresolvedProviderKey {
+                provider: provider.to_string(),
+                reference: raw,
+                secret_name,
+                env_name,
+                source,
+            });
+        }
+    }
+    None
+}
+
+/// STRICT api_key resolution for LLM REQUEST paths.
+///
+/// Identical to [`resolve_provider_api_key`] except that a declared reference
+/// which does not resolve is an explicit `Err` naming the provider and the
+/// missing secret/env var, instead of an empty key that turns into a bare,
+/// unexplained upstream 401.
+pub async fn resolve_provider_api_key_checked(
+    data_dir: &str,
+    provider: &str,
+    pool: &sqlx::PgPool,
+) -> Result<String, String> {
+    if let Some(unresolved) = unresolved_provider_api_key(data_dir, provider, pool).await {
+        return Err(unresolved.message());
+    }
+    Ok(resolve_provider_api_key(data_dir, provider, pool).await)
+}
+
 /// Upsert the `models` list for a provider in models.yml (refresh-flow contract):
 /// - entry ABSENT  -> create with `plugin: true` + `models: [fetched]`;
 /// - entry PRESENT -> update ONLY `models`, every other field byte-identical.
@@ -1915,5 +2048,66 @@ providers:
                 e.message
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod provider_key_ref_tests {
+    use super::*;
+
+    #[test]
+    fn secret_reference_is_classified() {
+        assert_eq!(
+            classify_provider_key_ref("$secret:DEEPSEEK_API_KEY"),
+            Some((Some("DEEPSEEK_API_KEY".to_string()), None))
+        );
+    }
+
+    #[test]
+    fn env_reference_is_classified() {
+        assert_eq!(
+            classify_provider_key_ref("$env:MY_PROVIDER_KEY"),
+            Some((None, Some("MY_PROVIDER_KEY".to_string())))
+        );
+    }
+
+    #[test]
+    fn literal_or_absent_key_is_never_flagged() {
+        // A no-auth provider (noop, local gateway) declares no reference and
+        // must never be turned into a credential error by the new guard.
+        assert_eq!(classify_provider_key_ref("sk-literal-value"), None);
+        assert_eq!(classify_provider_key_ref(""), None);
+    }
+
+    #[test]
+    fn message_names_provider_and_missing_secret() {
+        let key = UnresolvedProviderKey {
+            provider: "deepseek".to_string(),
+            reference: "$secret:DEEPSEEK_API_KEY".to_string(),
+            secret_name: Some("DEEPSEEK_API_KEY".to_string()),
+            env_name: None,
+            source: "models.yml",
+        };
+        let msg = key.message();
+        assert!(msg.contains("deepseek"), "{msg}");
+        assert!(msg.contains("$secret:DEEPSEEK_API_KEY"), "{msg}");
+        assert!(msg.contains("not in the secrets table"), "{msg}");
+        // The whole point of the guard: the request is refused, so the
+        // provider's own bare 401 can never be the only diagnosis.
+        assert!(msg.contains("Refusing the LLM request"), "{msg}");
+    }
+
+    #[test]
+    fn message_names_missing_env_var() {
+        let key = UnresolvedProviderKey {
+            provider: "custom".to_string(),
+            reference: "$env:CUSTOM_KEY".to_string(),
+            secret_name: None,
+            env_name: Some("CUSTOM_KEY".to_string()),
+            source: "plugins.yml",
+        };
+        let msg = key.message();
+        assert!(msg.contains("custom"), "{msg}");
+        assert!(msg.contains("CUSTOM_KEY"), "{msg}");
     }
 }

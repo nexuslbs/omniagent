@@ -138,12 +138,30 @@ pub async fn process_thread(
         // Single shared resolver: models.yml api_key ($env:/$secret: expanded
         // by core at request time) first, else the provider plugin config
         // (identical expansion semantics - one resolver, no duplicate logic).
-        let api_key = crate::models_yaml::resolve_provider_api_key(
+        // STRICT variant: a DECLARED but unresolved reference is an explicit
+        // configuration failure naming the provider and the secret, never an
+        // empty key that turns into a bare upstream 401.
+        let api_key = match crate::models_yaml::resolve_provider_api_key_checked(
             &cfg.ctx.data_dir,
             &provider_name_val,
             &cfg.pool,
         )
-        .await;
+        .await
+        {
+            Ok(key) => key,
+            Err(msg) => {
+                tracing::error!("[executor] thread {}: {}", thread.id, msg);
+                return fail_thread(
+                    cfg,
+                    thread,
+                    cause_msg,
+                    &mut next_seq,
+                    msg,
+                    "missing-provider-secret",
+                )
+                .await;
+            }
+        };
 
         // Custom per-provider HTTP headers - one shared, provider-agnostic
         // resolver (provider plugin config `headers` as the base layer, then

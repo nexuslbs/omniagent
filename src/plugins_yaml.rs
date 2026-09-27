@@ -2517,7 +2517,12 @@ pub async fn refresh_plugin_models(
     // plugin's resolved api_key (same expansion path as plugins.yml).
     // Same shared resolver as every other LLM call site: models.yml api_key
     // ($env:/$secret: expanded here, at use time) then the plugin config.
-    let resolved_key = crate::models_yaml::resolve_provider_api_key(data_dir, name, pool).await;
+    // Strict resolution: a declared-but-unresolved api_key reference is
+    // reported by name (provider + secret/env var) instead of being silently
+    // sent as an empty credential (which the provider answers with a bare 401).
+    let resolved_key = crate::models_yaml::resolve_provider_api_key_checked(data_dir, name, pool)
+        .await
+        .map_err(Error::Message)?;
     let api_key = if resolved_key.is_empty() {
         None
     } else {
