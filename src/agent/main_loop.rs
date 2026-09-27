@@ -189,6 +189,137 @@ mod plan_extract_tests {
         assert_eq!(steps, vec!["same", "other"]);
     }
 }
+/// Fill every result slot of a round that no tool task produced, so the
+/// provider always receives exactly one result per tool call.
+///
+/// A slot that is ALREADY filled is never overwritten - neither by a joined
+/// task result nor by the duplicate-invocation guard's stub. The blocked
+/// duplicate writes its stub into the round's pre-allocated vector in the
+/// dispatch loop (before the join loop runs), so overwriting it here would hand
+/// the model "no tool result was produced" exactly when the guard fired: the
+/// model retries, the guard blocks again, and the block becomes an invisible
+/// retry loop (incident 2026-09-27, thread 3277).
+///
+/// Returns the loss messages that were produced (one per genuinely missing
+/// slot), so the caller can log each one.
+pub(crate) fn fill_missing_tool_results<'a>(
+    tool_results: &mut [Option<(String, String, String)>],
+    tool_calls: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Vec<String> {
+    let mut losses = Vec::new();
+    for (idx, (tc_id, tool_name)) in tool_calls.into_iter().enumerate() {
+        let Some(slot) = tool_results.get_mut(idx) else {
+            continue;
+        };
+        if slot.is_some() {
+            continue;
+        }
+        let output = format!(
+            "Error executing tool '{}': no tool result was produced. Retry the tool or handle this error.",
+            tool_name
+        );
+        *slot = Some((tc_id.to_string(), tool_name.to_string(), output.clone()));
+        losses.push(output);
+    }
+    losses
+}
+
+/// Round-result plumbing regression tests (incident 2026-09-27, thread 3277).
+#[cfg(test)]
+mod round_result_tests {
+    use super::*;
+    use crate::agent::efficiency::duplicate_stub;
+
+    fn slot(v: &[Option<(String, String, String)>], i: usize) -> &(String, String, String) {
+        v[i].as_ref().expect("slot must be filled")
+    }
+
+    /// Gate 1: a blocked duplicate's stub reaches the provider untouched, and no
+    /// loss error is produced for it (the guard must never look like a
+    /// transport failure, which tells the model to retry the blocked call).
+    #[test]
+    fn blocked_duplicate_stub_is_never_replaced_by_the_loss_error() {
+        let mut round: Vec<Option<(String, String, String)>> = vec![None; 2];
+        // Dispatch loop: the duplicate guard blocks slot 0 and writes its stub.
+        round[0] = Some((
+            "call_0".to_string(),
+            "git__run_command".to_string(),
+            duplicate_stub("git__run_command", 26),
+        ));
+        // Join loop: the genuinely executed second call writes its output.
+        round[1] = Some((
+            "call_1".to_string(),
+            "filesystem__read".to_string(),
+            "file contents".to_string(),
+        ));
+
+        let losses = fill_missing_tool_results(
+            &mut round,
+            [
+                ("call_0", "git__run_command"),
+                ("call_1", "filesystem__read"),
+            ],
+        );
+
+        assert!(losses.is_empty(), "no slot was missing: {losses:?}");
+        let stub = slot(&round, 0);
+        assert!(
+            stub.2.contains("[duplicate call"),
+            "the duplicate stub must survive the fill, got: {}",
+            stub.2
+        );
+        assert!(
+            !stub.2.contains("no tool result was produced"),
+            "the guard must never surface as a loss error: {}",
+            stub.2
+        );
+        assert_eq!(slot(&round, 1).2, "file contents");
+    }
+
+    /// Gate 2: a genuinely missing slot (a cancelled / failed-to-join tool task)
+    /// still yields the loss error, exactly once, for that slot only.
+    #[test]
+    fn genuinely_missing_slot_still_yields_the_loss_error() {
+        let mut round: Vec<Option<(String, String, String)>> = vec![None; 2];
+        round[0] = Some((
+            "call_0".to_string(),
+            "git__run_command".to_string(),
+            duplicate_stub("git__run_command", 4),
+        ));
+
+        let losses = fill_missing_tool_results(
+            &mut round,
+            [
+                ("call_0", "git__run_command"),
+                ("call_1", "docker__compose"),
+            ],
+        );
+
+        assert_eq!(losses.len(), 1, "only the empty slot may report a loss");
+        assert!(losses[0].contains("docker__compose"));
+        assert!(losses[0].contains("no tool result was produced"));
+        assert!(slot(&round, 0).2.contains("[duplicate call"));
+        assert_eq!(slot(&round, 1).0, "call_1");
+    }
+
+    /// Gate 3 (source shape): the round's result vector is pre-allocated ONCE.
+    /// A second declaration in the same round shadows the blocked-duplicate
+    /// stubs, which is exactly how this bug reached production.
+    #[test]
+    fn round_result_vector_is_declared_once() {
+        let src: &str = include_str!("main_loop.rs");
+        let needle = concat!(
+            "let mut tool_results: Vec<Option<(String, ",
+            "String, String)>>"
+        );
+        assert_eq!(
+            src.matches(needle).count(),
+            1,
+            "the round result vector must be declared exactly once; a second \
+             declaration shadows the duplicate guard's stubs"
+        );
+    }
+}
 
 // ── Phase 1.5: Self-restart guard (P2 #6) ─────────────────────────────────
 // An agent must never tear down the container it runs inside: a
@@ -2829,7 +2960,13 @@ Previous plan:\n{}",
         // Every tool call MUST produce a result for the LLM, including a panic
         // result. Handle the panic at the omniagent boundary rather than
         // requiring every plugin to catch its own panics.
-        let mut tool_results: Vec<Option<(String, String, String)>> = vec![None; tool_count];
+        // Reuse the round vector pre-allocated above: it already holds the
+        // duplicate-invocation stubs written on the blocked-duplicate path
+        // (`tool_results[idx] = ...; continue;`). Re-declaring it here would
+        // shadow those stubs, so the defensive fill below would hand the model
+        // "no tool result was produced" exactly when the guard fired - the
+        // model then retries, the guard blocks again, and the block becomes an
+        // invisible retry loop (incident 2026-09-27, thread 3277).
         // Structured per-invocation outcome (from the MCP result, never parsed
         // out of text): default `true` = treat a missing result as a failure, so
         // its record is dropped and the invocation stays retryable.
@@ -2853,16 +2990,17 @@ Previous plan:\n{}",
         // Defensive last line: every provider tool call must have a result,
         // even if a task was cancelled or failed to join for a reason other
         // than a caught plugin panic.
-        for (idx, tc) in response.tool_calls.iter().enumerate() {
-            if tool_results[idx].is_none() {
-                let tool_name = tc.function.name.clone();
-                let output = format!(
-                    "Error executing tool '{}': no tool result was produced. Retry the tool or handle this error.",
-                    tool_name
-                );
-                error!("{}", output);
-                tool_results[idx] = Some((tc.id.clone(), tool_name, output));
-            }
+        // Only slots that are STILL empty are filled here: the blocked
+        // duplicate wrote its stub into this same vector during dispatch.
+        let losses = fill_missing_tool_results(
+            &mut tool_results,
+            response
+                .tool_calls
+                .iter()
+                .map(|tc| (tc.id.as_str(), tc.function.name.as_str())),
+        );
+        for loss in &losses {
+            error!("{}", loss);
         }
 
         // EFF: settle the duplicate-invocation ledger for this round.
