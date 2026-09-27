@@ -1403,4 +1403,129 @@ mod tests {
             None
         );
     }
+    /// Regression (operator 2026-09-27, telegram thread 3387: "clicking Stop on
+    /// one thread stopped both"): the explicit per-thread stop recovery moves the
+    /// stopped thread's kanban task to `blocked` and must NEVER terminate a
+    /// SIBLING thread of that task. `apply_stop_recovery` used to go through
+    /// `transition_with_comment`, whose workflow-wide stale-thread skip marked
+    /// every pending/processing sibling of the task terminal 'skipped'.
+    /// Runs only with DATABASE_URL set (dev/test DB).
+    #[tokio::test]
+    async fn per_thread_stop_recovery_never_touches_sibling_threads() {
+        let Ok(db_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let _db_guard = crate::db::DB_TEST_LOCK.lock().await;
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect dev db");
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let task_id = format!(
+            "task-stop-isolation-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let channel = format!("test-channel-stop-isolation-{}", std::process::id());
+
+        sqlx::query(
+            "INSERT INTO kanban_tasks (id, title, status, board, channel_id, profile, thread_status, created_at, updated_at)
+             VALUES ($1, 'tester per-thread stop isolation', 'running', 'main', $2, 'test-profile', 'scheduled', NOW(), NOW())",
+        )
+        .bind(&task_id)
+        .bind(&channel)
+        .execute(&pool)
+        .await
+        .expect("insert task");
+
+        // The thread the operator stops, and its sibling (same task, same
+        // channel) that must survive untouched.
+        let stopped: i64 = sqlx::query_scalar(
+            "INSERT INTO threads (status, cause, channel_id, profile, task_id, workflow_step)
+             VALUES ('processing', 'user', $1, 'test-profile', $2, 'running')
+             RETURNING id",
+        )
+        .bind(&channel)
+        .bind(&task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert stopped thread");
+        let sibling: i64 = sqlx::query_scalar(
+            "INSERT INTO threads (status, cause, channel_id, profile, task_id, workflow_step)
+             VALUES ('pending', 'user', $1, 'test-profile', $2, 'running')
+             RETURNING id",
+        )
+        .bind(&channel)
+        .bind(&task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert sibling thread");
+
+        let sibling_before: String =
+            sqlx::query_scalar("SELECT to_jsonb(t)::text FROM threads t WHERE t.id = $1")
+                .bind(sibling)
+                .fetch_one(&pool)
+                .await
+                .expect("snapshot sibling");
+
+        let blocked = apply_stop_recovery(&pool, stopped, Some(task_id.as_str()), "stop-thread")
+            .await
+            .expect("apply stop recovery");
+        assert!(
+            blocked,
+            "a running task whose thread was stopped explicitly is moved to blocked"
+        );
+
+        let sibling_after: String =
+            sqlx::query_scalar("SELECT to_jsonb(t)::text FROM threads t WHERE t.id = $1")
+                .bind(sibling)
+                .fetch_one(&pool)
+                .await
+                .expect("re-read sibling");
+        assert_eq!(
+            sibling_before, sibling_after,
+            "the sibling thread row must be byte-identical: no skip, no field touched"
+        );
+
+        let task: (String, Option<String>) =
+            sqlx::query_as("SELECT status, thread_status FROM kanban_tasks WHERE id = $1")
+                .bind(&task_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch task");
+        assert_eq!(task.0, "blocked", "only the stopped thread's task moves");
+        assert!(
+            task.1.is_none(),
+            "the task's thread_status marker is cleared for the stopped thread"
+        );
+
+        let sibling_skips: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM kanban_history
+             WHERE kanban_task_id = $1 AND comment LIKE '%skipped%'",
+        )
+        .bind(&task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count sibling skips");
+        assert_eq!(
+            sibling_skips, 0,
+            "an explicit per-thread stop records no sibling stale-skip"
+        );
+
+        sqlx::query("DELETE FROM kanban_history WHERE kanban_task_id = $1")
+            .bind(&task_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM threads WHERE id = $1 OR id = $2")
+            .bind(stopped)
+            .bind(sibling)
+            .execute(&pool)
+            .await
+            .expect("cleanup threads");
+        sqlx::query("DELETE FROM kanban_tasks WHERE id = $1")
+            .bind(&task_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup task");
+    }
 }
