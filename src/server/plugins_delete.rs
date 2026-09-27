@@ -31,8 +31,18 @@ pub(crate) async fn delete_plugin_handler(
     if let Err(e) = validate_source(&source) {
         return e.into_response();
     }
-    if let Err(e) = reject_builtin_operation(&source, "delete", &name) {
-        return e.into_response();
+    // A phantom (YAML-only) entry may carry source 'built-in' even though no
+    // built-in code exists on disk (cron/kanban after the tasks-plugin
+    // unification). There is nothing to protect in that case and it MUST be
+    // removable, so the blanket built-in guard must not block it;
+    // handle_remove_by_source() then purges the real YAML entry. A genuine
+    // on-disk built-in keeps the guard (enable/disable only).
+    let phantom_builtin =
+        source == "built-in" && !plugins_yaml::plugin_present_on_disk(data_dir, &name);
+    if !phantom_builtin {
+        if let Err(e) = reject_builtin_operation(&source, "delete", &name) {
+            return e.into_response();
+        }
     }
 
     let is_uninstall_mode = params
