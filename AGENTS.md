@@ -531,9 +531,20 @@ Remote plugin info is persisted in `{data_dir}/remote.yml` (root-level, replaces
 
 ### "Not Found" Status
 
-When a plugin exists in `plugins.yml` but has no source on disk, a synthetic "not found" entry is added:
-- `status: "not_found"`: red badge in dashboard
+When a plugin exists in `plugins.yml` but has no source on disk in ANY source
+variant, a synthetic entry is added:
+- `status: "missing_source"`: neutral "No source" badge in the dashboard
+  (legacy `"not_found"` is still emitted for remote.yml-only entries)
+- `source`: the source DECLARED in `plugins.yml` (`built-in` / `bundled` /
+  `remote`) - never a fabricated `bundled`
+- `status_message`: names the missing source, e.g. "Missing source: 'cron' is
+  declared as source 'built-in' in config/plugins.yml but no source exists on
+  disk"
 - `needs_download: true`: for remote plugins not yet cloned
+- such an entry is removable with `DELETE /api/plugins/{type}/{source}/{name}`
+  with ANY source label: `purge_phantom_entry()` deletes the real YAML entry
+  (plugins.yml + remote.yml). A plugin whose source DOES exist on disk keeps its
+  per-source rules - a built-in with code on disk can only be disabled.
 
 ### API Type Change
 
