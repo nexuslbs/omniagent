@@ -260,6 +260,37 @@ async fn run_server() -> AppResult<()> {
     // Create AppContext and MCP registry
     let readonly_pool = db::connect(&cfg.database_readonly_url).await?;
     let external_clients = Arc::new(crate::mcp::external::client::ExternalMcpClients::new());
+
+    // Supervised MCP restarts (2026-09-27): the child watchdog detects a dead
+    // external MCP server (pid + exit status + stderr tail, all logged loudly)
+    // and asks this hook to bring it back with bounded backoff. The hook runs
+    // OUTSIDE the watchdog future (a dyn boundary) so the recursive respawn
+    // chain stays provably Send.
+    {
+        let clients = external_clients.clone();
+        crate::mcp::external::supervisor::set_restart_hook(std::sync::Arc::new(
+            move |name: String| {
+                let clients = clients.clone();
+                tokio::spawn(async move {
+                    let Some(client) = clients.get(&name) else {
+                        tracing::error!(
+                            "MCP server '{}' crashed but has no registered client - cannot restart it",
+                            name
+                        );
+                        return;
+                    };
+                    match client.restart_after_crash().await {
+                        Ok(true) => {}
+                        Ok(false) => tracing::warn!(
+                            "MCP server '{}' crash handling stopped (client torn down)",
+                            name
+                        ),
+                        Err(e) => tracing::error!("{}", e),
+                    }
+                });
+            },
+        ));
+    }
     let mut ctx = mcp::AppContext::new(
         pool.clone(),
         readonly_pool,
@@ -275,6 +306,52 @@ async fn run_server() -> AppResult<()> {
             external_clients.clone(),
             Some(pool.clone()), // resolves $secret:NAME refs in MCP plugin configs
         ));
+
+    // Supervised MCP liveness (2026-09-27): an external MCP server that dies at
+    // runtime is detected by its client's child watchdog, logged with pid, exit
+    // status and stderr tail, and auto-restarted. This hook makes sure a
+    // respawned server is ALSO back in the tool registry: a reload that ran
+    // while the child was dead could otherwise leave a plugin permanently
+    // exposing nothing, and every thread would see a bare
+    // `Unknown tool: <plugin>__<tool>` (production incident thread 3356,
+    // `workstation__tool`).
+    {
+        let pm = plugin_manager.clone();
+        let dd = data_dir.clone();
+        crate::mcp::external::supervisor::set_revive_hook(std::sync::Arc::new(
+            move |name: String| {
+                let pm = pm.clone();
+                let dd = dd.clone();
+                tokio::spawn(async move {
+                    let registry = pm.snapshot_registry().await;
+                    let present = registry
+                        .all()
+                        .iter()
+                        .any(|t| t.server_name.as_deref() == Some(name.as_str()));
+                    if present {
+                        return; // tools survived the outage: nothing to do
+                    }
+                    match pm.initialize_single_server(&dd, &name).await {
+                        Ok(tools) => {
+                            let n = tools.len();
+                            pm.remove_server_tools(&name).await;
+                            pm.register_tools(tools).await;
+                            tracing::info!(
+                                "revived {} tool(s) of respawned MCP server '{}'",
+                                n,
+                                name
+                            );
+                        }
+                        Err(e) => tracing::error!(
+                            "MCP server '{}' respawned but its tools could not be re-registered: {}",
+                            name,
+                            e
+                        ),
+                    }
+                });
+            },
+        ));
+    }
 
     // Register the kanban action-mode runtime: workflow roles with
     // mode: action execute actions.yml tools via the plugin manager

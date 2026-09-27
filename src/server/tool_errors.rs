@@ -139,15 +139,38 @@ pub(crate) fn classify(
                         "Enable the '{plugin}' plugin (Dashboard > Plugins, or config/plugins.yml) and retry. {CORE_DB_API_HINT}"
                     ),
                 ),
-                "enabled" => (
-                    CODE_PLUGIN_UNAVAILABLE,
-                    format!(
-                        "the plugin '{plugin}' is enabled but its tool server is not running (tool '{tool}' not registered)"
-                    ),
-                    format!(
-                        "Restart/reinstall the '{plugin}' plugin and check its logs (bundle may not be compiled). {CORE_DB_API_HINT}"
-                    ),
-                ),
+                "enabled" => {
+                    // The runtime liveness record knows WHY: a child that ran and
+                    // then died (exit status + stderr tail), a supervised restart
+                    // in progress, a handshake that never completed, or a give-up
+                    // after N attempts (2026-09-27).
+                    let status = crate::mcp::external::supervisor::runtime_status(plugin);
+                    let reason = match &status {
+                        Some(s)
+                            if s.state
+                                != crate::mcp::external::supervisor::LivenessState::Running =>
+                        {
+                            format!(
+                                "the plugin '{plugin}' is enabled but its tool server is not serving tools: {} (tool '{tool}' not registered)",
+                                s.message
+                            )
+                        }
+                        _ => format!(
+                            "the plugin '{plugin}' is enabled but its tool server is not running (tool '{tool}' not registered)"
+                        ),
+                    };
+                    let remediation = match &status {
+                        Some(_) => crate::mcp::external::supervisor::remediation(plugin),
+                        None => format!(
+                            "Restart/reinstall the '{plugin}' plugin and check its logs (bundle may not be compiled)."
+                        ),
+                    };
+                    (
+                        CODE_PLUGIN_UNAVAILABLE,
+                        reason,
+                        format!("{remediation} {CORE_DB_API_HINT}"),
+                    )
+                }
                 other => (
                     CODE_PLUGIN_UNAVAILABLE,
                     format!(

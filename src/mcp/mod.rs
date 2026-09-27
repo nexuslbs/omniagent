@@ -1052,15 +1052,24 @@ impl McpRegistry {
                 return (tool.handler)(args, ctx).await;
             }
         }
-        // No match found
+        // No match found. A bare name is useless to the agent (production
+        // incident 2026-09-27: three threads got `Unknown tool:
+        // workstation__tool` with no reason at all): explain WHY the name is
+        // unresolvable (plugin disabled / child crashed / restarting / never
+        // started) and what to do about it.
         let suggestion_msg = if let Some(s) = suggestion {
             format!(". Did you mean '{}'?", s)
         } else {
             String::new()
         };
+        let diagnosis = crate::mcp::external::supervisor::unknown_tool_diagnosis(
+            &call.name,
+            &ctx.data_dir,
+            &ctx.external_clients.server_names(),
+        );
         Err(Error::Message(format!(
-            "Unknown tool: {}{}",
-            call.name, suggestion_msg
+            "Unknown tool: {}{}{}",
+            call.name, suggestion_msg, diagnosis
         )))
     }
 

@@ -351,6 +351,21 @@ pub(crate) async fn platform_plugin_running(state: &Arc<AppState>, name: &str) -
 /// hardcoded guess that was also shown for Python/JS script plugins whose
 /// source was simply not installed yet. Check what is actually on disk.
 pub(crate) async fn mcp_start_failure_reason(data_dir: &str, name: &str) -> String {
+    // A runtime liveness record is the strongest evidence: it knows whether the
+    // child ever started, ran and then DIED (with exit status + stderr tail),
+    // is being restarted, or gave up after N attempts. Reading it first is what
+    // makes the plugin status tell the truth instead of a generic
+    // "did not initialize" (2026-09-27).
+    if let Some(status) = crate::mcp::external::supervisor::runtime_status(name) {
+        if status.state != crate::mcp::external::supervisor::LivenessState::Running {
+            return format!(
+                "{} - {}",
+                status.message,
+                crate::mcp::external::supervisor::remediation(name)
+            );
+        }
+    }
+
     let dir = data_dir.to_string();
     let plugin = name.to_string();
     let has_config = tokio::task::spawn_blocking(move || {
@@ -409,7 +424,7 @@ pub(crate) async fn apply_tool_runtime_status_all(
             detail.status = "error".to_string();
             detail.tool_names.clear();
             detail.status_message = format!(
-                "MCP server failed to start: {}",
+                "MCP server not serving tools: {}",
                 mcp_start_failure_reason(&state.data_dir, &detail.name).await
             );
         }
@@ -550,6 +565,38 @@ pub(crate) async fn ensure_plugin_running(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression (2026-09-27): an enabled tool plugin whose child RAN and then
+    /// died must report the crash (exit status + stderr tail) and the
+    /// remediation, never the vague "did not initialize".
+    #[tokio::test]
+    async fn runtime_crash_reason_reports_exit_and_remediation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().to_string_lossy().to_string();
+        let server = "crashed-supervisor-test-server";
+
+        crate::mcp::external::supervisor::record_starting(server, Some(99));
+        crate::mcp::external::supervisor::push_stderr_line(server, "fatal: cannot reach backend");
+        let tail = crate::mcp::external::supervisor::stderr_tail(server);
+        crate::mcp::external::supervisor::record_crashed(server, Some(99), "exit code 1", &tail);
+
+        let reason = mcp_start_failure_reason(&data_dir, server).await;
+        assert!(reason.contains("DIED"), "got: {reason}");
+        assert!(reason.contains("exit code 1"), "got: {reason}");
+        assert!(
+            reason.contains("fatal: cannot reach backend"),
+            "got: {reason}"
+        );
+        assert!(
+            reason.contains("POST /api/plugins/tools/remote/"),
+            "the reason must carry the remediation, got: {reason}"
+        );
+        assert!(
+            !reason.contains("did not initialize"),
+            "the vague reason must be gone once a crash is known, got: {reason}"
+        );
+        crate::mcp::external::supervisor::clear(server);
+    }
 
     /// Regression (task_omnidev_memory_plugin_remote_python_fix_the, 2026-09-18):
     /// the reason reported for an enabled tool plugin that registered no tools

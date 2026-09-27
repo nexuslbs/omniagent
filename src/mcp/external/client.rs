@@ -11,12 +11,13 @@ use crate::err_str;
 use crate::error::{AppResult, ErrorContext};
 use crate::mcp::external::config::McpServerConfig;
 use crate::mcp::external::protocol::*;
+use crate::mcp::external::supervisor;
 use crate::mcp::{McpTool, McpToolResult};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -161,6 +162,21 @@ pub trait McpServerClient: Send + Sync {
         None
     }
 
+    /// Stop supervising the child process of this client.
+    ///
+    /// Called when a client is REPLACED or REMOVED (plugin disable, reload, a
+    /// fresh client for the same server): a superseded client must never
+    /// restart a child behind the registry's back. Default: no-op (HTTP clients
+    /// and test doubles have no child).
+    fn stop_supervision(&self) {}
+
+    /// Restart this client's child after a crash, with bounded backoff.
+    /// `Ok(true)` = serving again, `Ok(false)` = intentionally stopped,
+    /// `Err(reason)` = gave up (loud). Default: this client is not supervised.
+    async fn restart_after_crash(&self) -> Result<bool, String> {
+        Err("this MCP client is not supervised for restarts".to_string())
+    }
+
     /// Per-tool behaviour declared by the plugin manifest (audit V-2).
     /// The default is EMPTY: an undeclared tool stays behaviour-neutral
     /// (fail closed) - core never guesses read-only-ness from a name.
@@ -297,15 +313,34 @@ impl ExternalMcpClients {
     }
 
     /// Register an MCP client for a server.
+    ///
+    /// A replaced client stops supervising its child first, so one plugin can
+    /// never end up with two live MCP children (the old client must not restart
+    /// a child behind the registry's back).
     pub fn register(&self, name: &str, client: Arc<dyn McpServerClient>) {
-        let mut registry = self.clients.write();
-        registry.insert(name.to_string(), client);
+        let replaced = {
+            let mut registry = self.clients.write();
+            registry.insert(name.to_string(), client)
+        };
+        if let Some(old) = replaced {
+            old.stop_supervision();
+        }
     }
 
     /// Remove an MCP client (e.g. on disable).
     pub fn remove(&self, name: &str) {
-        let mut registry = self.clients.write();
-        registry.remove(name);
+        let removed = {
+            let mut registry = self.clients.write();
+            registry.remove(name)
+        };
+        if let Some(old) = removed {
+            old.stop_supervision();
+        }
+    }
+
+    /// Names of the servers that currently hold a client in this process.
+    pub fn server_names(&self) -> Vec<String> {
+        self.clients.read().keys().cloned().collect()
     }
 
     /// Get a client by server name.
@@ -332,7 +367,14 @@ impl ExternalMcpClients {
                 server_name
             )
         })?;
-        client.call_tool(tool_name, args, meta).await
+        match client.call_tool(tool_name, args, meta).await {
+            Ok(r) => Ok(r),
+            Err(e) => Err(err_str!(
+                "{} [liveness: {}]",
+                e,
+                supervisor::summary_line(server_name)
+            )),
+        }
     }
 }
 
@@ -396,6 +438,52 @@ pub struct StdioMcpClient {
     consecutive_timeouts: AtomicU64,
     connected: Mutex<bool>,
     last_error: Mutex<Option<String>>,
+    /// Weak self handle for the child-liveness watchdog. Armed right after
+    /// construction (while the client is still an `Arc`); unset means no
+    /// watchdog (directly constructed clients in unit tests).
+    self_weak: parking_lot::RwLock<Option<Weak<StdioMcpClient>>>,
+    /// Child generation: bumped whenever the current child is superseded
+    /// (respawn / shutdown / replaced client), so the watchdog of a child that
+    /// was killed ON PURPOSE exits silently instead of reporting a crash.
+    generation: AtomicU64,
+    /// Set when this client is torn down on purpose.
+    shutting_down: AtomicBool,
+    /// Serializes spawn/respawn/supervised restart: one plugin can never end
+    /// up with two live MCP children.
+    lifecycle_gate: Mutex<()>,
+    /// Background task: captures the child's stderr into the bounded tail.
+    stderr_task: Mutex<Option<JoinHandle<()>>>,
+    /// Background task: child-liveness watchdog (exit detection + restart).
+    watchdog: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// How often the child-liveness watchdog checks the child's exit status.
+const WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Outcome of a supervised restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestartOutcome {
+    Restarted,
+    GaveUp,
+    Stopped,
+}
+
+/// Human text for an exit status: exit code or terminating signal.
+fn exit_status_text(status: std::process::ExitStatus) -> String {
+    match status.code() {
+        Some(code) => format!("exit code {code}"),
+        None => format!("{status}"),
+    }
+}
+
+/// Last few captured stderr lines as a single line, for embedding in a message.
+fn stderr_tail_one_line(server: &str) -> String {
+    let tail = supervisor::stderr_tail(server);
+    if tail.is_empty() {
+        return "no stderr output captured".to_string();
+    }
+    let start = tail.len().saturating_sub(3);
+    tail[start..].join(" | ")
 }
 
 /// Drop guard for an in-flight `tools/call` request (stdio transport).
@@ -507,6 +595,54 @@ impl StdioMcpClient {
             tools: Mutex::new(Vec::new()),
             connected: Mutex::new(false),
             last_error: Mutex::new(None),
+            self_weak: parking_lot::RwLock::new(None),
+            generation: AtomicU64::new(0),
+            shutting_down: AtomicBool::new(false),
+            lifecycle_gate: Mutex::new(()),
+            stderr_task: Mutex::new(None),
+            watchdog: Mutex::new(None),
+        }
+    }
+
+    /// Arm liveness supervision. Must be called ONCE, right after construction,
+    /// while the client is still an `Arc` (the watchdog needs a weak handle).
+    pub fn arm_supervision(self: &Arc<Self>) {
+        *self.self_weak.write() = Some(Arc::downgrade(self));
+        supervisor::clear(&self.config.name);
+    }
+
+    /// Supersede the current child's watchdog. Call BEFORE killing a child on
+    /// purpose: the watchdog then exits without reporting a crash.
+    fn supersede(&self) -> u64 {
+        self.generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Current pid of the live child (None when there is no child).
+    async fn child_pid(&self) -> Option<u32> {
+        self.child.lock().await.as_ref().and_then(|c| c.id())
+    }
+
+    /// True when a live child exists AND both transport tasks are running.
+    async fn connection_healthy(&self) -> bool {
+        if !*self.connected.lock().await {
+            return false;
+        }
+        {
+            let wt = self.write_task.lock().await;
+            if wt.as_ref().map(|h| h.is_finished()).unwrap_or(true) {
+                return false;
+            }
+        }
+        {
+            let rt = self.read_task.lock().await;
+            if rt.as_ref().map(|h| h.is_finished()).unwrap_or(true) {
+                return false;
+            }
+        }
+        let mut guard = self.child.lock().await;
+        match guard.as_mut() {
+            None => false,
+            Some(child) => matches!(child.try_wait(), Ok(None)),
         }
     }
 
@@ -532,7 +668,11 @@ impl StdioMcpClient {
             .args(&self.config.args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit());
+            // CAPTURED, not inherited: the child's stderr feeds a bounded tail
+            // buffer so a crash can be reported WITH the child's own error
+            // output (every line is mirrored to the process log as
+            // `[mcp:<plugin>] ...`, so nothing becomes invisible).
+            .stderr(std::process::Stdio::piped());
         // Platform-level env isolation (2026-09-01): never inherit the agent's
         // ambient environment. Empty env, then only the explicitly configured
         // env below plus an explicit minimal PATH for the child's own spawns.
@@ -565,6 +705,9 @@ impl StdioMcpClient {
             .spawn()
             .ctx(format!("Failed to spawn MCP server '{}'", self.config.name))?;
 
+        // The child exists: the recorded liveness becomes "starting".
+        supervisor::record_starting(&self.config.name, child.id());
+
         let child_stdin = child.stdin.take().ok_or_else(|| {
             err_str!("Failed to open stdin for MCP server '{}'", self.config.name)
         })?;
@@ -574,6 +717,37 @@ impl StdioMcpClient {
                 self.config.name
             )
         })?;
+        let child_stderr = child.stderr.take().ok_or_else(|| {
+            err_str!(
+                "Failed to open stderr for MCP server '{}'",
+                self.config.name
+            )
+        })?;
+
+        // Stderr capture task: mirrors every child stderr line to the process
+        // log (`[mcp:<plugin>] ...`) and keeps the last N in a bounded ring
+        // buffer, so a later crash or a failed handshake can report the child's
+        // OWN error text instead of a generic "did not initialize".
+        let stderr_name = self.config.name.clone();
+        let stderr_handle = tokio::spawn(async move {
+            let mut lines = BufReader::new(child_stderr);
+            let mut buf = String::new();
+            loop {
+                buf.clear();
+                match lines.read_line(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(_) => supervisor::push_stderr_line(&stderr_name, &buf),
+                    Err(_) => break,
+                }
+            }
+        });
+        {
+            let mut st = self.stderr_task.lock().await;
+            if let Some(old) = st.take() {
+                old.abort();
+            }
+            *st = Some(stderr_handle);
+        }
 
         // Create mpsc channel for writing requests
         let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<String>();
@@ -699,7 +873,144 @@ impl StdioMcpClient {
         *self.child.lock().await = Some(child);
         *self.stdin_tx.lock().await = Some(stdin_tx.clone());
 
+        // Child-liveness watchdog: the ONLY place that notices a child died,
+        // with a real exit status. Before this a dead child was invisible (its
+        // tools silently stopped working and every thread saw a bare
+        // `Unknown tool`).
+        self.start_watchdog().await;
+
         Ok(stdin_tx)
+    }
+
+    /// Start the liveness watchdog for the CURRENT child generation.
+    ///
+    /// The watchdog polls the child's exit status every
+    /// [`WATCHDOG_POLL_INTERVAL`]; on an UNEXPECTED exit it
+    ///  1. logs ERROR with plugin, pid, exit code/signal and the stderr tail,
+    ///  2. records the crash in the supervision registry, and
+    ///  3. performs the supervised restart (bounded backoff, loud give-up).
+    ///
+    /// A child killed ON PURPOSE bumps the generation first, so its watchdog
+    /// exits silently and a deliberate kill is never reported as a crash.
+    async fn start_watchdog(&self) {
+        let Some(weak) = self.self_weak.read().clone() else {
+            tracing::debug!(
+                "MCP server '{}' has no supervision handle armed - child liveness is not watched",
+                self.config.name
+            );
+            return;
+        };
+        let generation = self.generation.load(Ordering::SeqCst);
+        let name = self.config.name.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(WATCHDOG_POLL_INTERVAL).await;
+                let Some(client) = weak.upgrade() else {
+                    return; // client dropped: nobody left to serve
+                };
+                if client.generation.load(Ordering::SeqCst) != generation {
+                    return; // superseded on purpose
+                }
+                let exit = {
+                    let mut guard = client.child.lock().await;
+                    match guard.as_mut() {
+                        None => None,
+                        Some(child) => {
+                            let pid = child.id();
+                            match child.try_wait() {
+                                Ok(Some(status)) => Some((pid, exit_status_text(status))),
+                                Ok(None) => None,
+                                Err(e) => Some((pid, format!("wait error: {e}"))),
+                            }
+                        }
+                    }
+                };
+                let Some((pid, status)) = exit else { continue };
+                // Reap the handle: this child is gone for good.
+                {
+                    let mut guard = client.child.lock().await;
+                    guard.take();
+                }
+                if client.shutting_down.load(Ordering::SeqCst) {
+                    return; // deliberate teardown, not a crash
+                }
+                let tail = supervisor::stderr_tail(&name);
+                let msg = supervisor::record_crashed(&name, pid, &status, &tail);
+                tracing::error!("{}", msg);
+                // Hand the restart to the installed hook: a `dyn` boundary, so
+                // this future never awaits the restart chain that spawns the
+                // NEXT watchdog (such a recursive future cannot be proven
+                // `Send`). The restarted child gets its own watchdog.
+                supervisor::request_restart(&name);
+                return;
+            }
+        });
+        {
+            let mut wd = self.watchdog.lock().await;
+            if let Some(old) = wd.take() {
+                old.abort();
+            }
+            *wd = Some(handle);
+        }
+    }
+
+    /// Restart a crashed child with bounded backoff. Never spawns a second
+    /// child (the lifecycle gate + `respawn_if_needed` reuse a healthy child).
+    async fn supervise_restart(&self, name: &str) -> RestartOutcome {
+        let mut last_error = "unknown failure".to_string();
+        for attempt in 1..=supervisor::MAX_RESTART_ATTEMPTS {
+            let delay = supervisor::backoff_for_attempt(attempt);
+            supervisor::record_restarting(name, attempt, delay);
+            tracing::warn!(
+                "MCP server '{}' crashed - supervised restart attempt {}/{} in {}s",
+                name,
+                attempt,
+                supervisor::MAX_RESTART_ATTEMPTS,
+                delay.as_secs()
+            );
+            tokio::time::sleep(delay).await;
+            if self.shutting_down.load(Ordering::SeqCst) {
+                return RestartOutcome::Stopped;
+            }
+            match self.respawn_if_needed().await {
+                Ok(true) => {
+                    let pid = self.child_pid().await;
+                    let tools = self.tools.lock().await.len();
+                    supervisor::record_restarted(name, pid, tools);
+                    tracing::info!(
+                        "MCP server '{}' auto-restarted after a crash (attempt {}, {} tool(s))",
+                        name,
+                        attempt,
+                        tools
+                    );
+                    // A reload that ran while the child was dead may have
+                    // dropped its tools from the registry: ask the server layer
+                    // to put them back (no-op when they are still registered).
+                    supervisor::notify_tools_revived(name);
+                    return RestartOutcome::Restarted;
+                }
+                Ok(false) => {
+                    // Another caller already revived a healthy child.
+                    let pid = self.child_pid().await;
+                    let tools = self.tools.lock().await.len();
+                    supervisor::record_running(name, pid, tools);
+                    return RestartOutcome::Restarted;
+                }
+                Err(e) => {
+                    last_error = e.to_string();
+                    tracing::error!(
+                        "MCP server '{}' supervised restart attempt {}/{} failed: {}",
+                        name,
+                        attempt,
+                        supervisor::MAX_RESTART_ATTEMPTS,
+                        last_error
+                    );
+                }
+            }
+        }
+        let msg = supervisor::record_give_up(name, supervisor::MAX_RESTART_ATTEMPTS, &last_error);
+        tracing::error!("{}", msg);
+        RestartOutcome::GaveUp
     }
 
     /// Send a JSON-RPC request via the multiplexed channel and await the response.
@@ -842,8 +1153,29 @@ impl StdioMcpClient {
     /// handshake (configure → initialize → tools/list). On success the client
     /// is ready for the next tool call. The current (failed) call still
     /// returns an error to the agent - the respawn benefits the NEXT call.
-    async fn respawn(&self) -> AppResult<()> {
+    async fn respawn(&self) -> AppResult<bool> {
+        self.respawn_if_needed().await
+    }
+
+    /// Gated respawn: holds the lifecycle gate and REUSES a healthy child, so
+    /// the watchdog's supervised restart and a concurrently failing `call_tool`
+    /// can never spawn two children for one plugin.
+    async fn respawn_if_needed(&self) -> AppResult<bool> {
+        let _gate = self.lifecycle_gate.lock().await;
+        if self.connection_healthy().await {
+            return Ok(false);
+        }
+        self.respawn_locked().await?;
+        Ok(true)
+    }
+
+    /// The respawn body. Callers must hold `lifecycle_gate`.
+    async fn respawn_locked(&self) -> AppResult<()> {
         let server_name = self.config.name.clone();
+
+        // This child is replaced ON PURPOSE: supersede its watchdog BEFORE the
+        // kill, so a deliberate kill is never reported as a crash.
+        self.supersede();
 
         // Kill the old child process if still around.
         {
@@ -879,6 +1211,7 @@ impl StdioMcpClient {
         *self.tools.lock().await = result.tools.clone();
         *self.connected.lock().await = true;
 
+        supervisor::record_running(&server_name, self.child_pid().await, result.tools.len());
         tracing::info!(
             "MCP server '{}' respawned successfully ({} tools)",
             server_name,
@@ -906,10 +1239,33 @@ impl McpServerClient for StdioMcpClient {
 
         // Build config_env from the server config's env map
         let config_env: HashMap<String, String> = self.config.env.clone();
-        let result = self.initialize_handshake(&config_env).await?;
+        let result = match self.initialize_handshake(&config_env).await {
+            Ok(r) => r,
+            Err(e) => {
+                // A handshake that never completes must be recorded TRUTHFULLY,
+                // with the child's own stderr - never reduced to a generic
+                // "did not initialize" (which hid the cause for hours).
+                let reason = format!(
+                    "{} (stderr: {})",
+                    e,
+                    stderr_tail_one_line(&self.config.name)
+                );
+                supervisor::record_start_failed(&self.config.name, &reason);
+                return Err(err_str!(
+                    "MCP server '{}' failed to initialize: {}",
+                    self.config.name,
+                    reason
+                ));
+            }
+        };
 
         *self.tools.lock().await = result.tools.clone();
         *self.connected.lock().await = true;
+        supervisor::record_running(
+            &self.config.name,
+            self.child_pid().await,
+            result.tools.len(),
+        );
         Ok(result.tools)
     }
 
@@ -942,7 +1298,7 @@ impl McpServerClient for StdioMcpClient {
                 drop(wt);
                 drop(rt);
                 match self.respawn().await {
-                    Ok(()) => {
+                    Ok(_) => {
                         return Err(err_str!(
                             "MCP server '{}' connection lost (background {} stopped); \
                              plugin respawned - retry the call",
@@ -1108,6 +1464,10 @@ impl McpServerClient for StdioMcpClient {
     }
 
     async fn shutdown(&self) -> AppResult<()> {
+        // Deliberate teardown: the watchdog must never report this as a crash.
+        self.shutting_down.store(true, Ordering::SeqCst);
+        self.supersede();
+
         // Close stdin by dropping the sender (the writer task will stop on rx closed)
         *self.stdin_tx.lock().await = None;
 
@@ -1132,6 +1492,20 @@ impl McpServerClient for StdioMcpClient {
             child.wait().await.ok();
         }
 
+        // Stop the stderr capture + watchdog tasks of this child.
+        {
+            let mut st = self.stderr_task.lock().await;
+            if let Some(h) = st.take() {
+                h.abort();
+            }
+        }
+        {
+            let mut wd = self.watchdog.lock().await;
+            if let Some(h) = wd.take() {
+                h.abort();
+            }
+        }
+
         // Cancel all pending requests
         {
             let mut pending = self.pending.lock();
@@ -1139,6 +1513,7 @@ impl McpServerClient for StdioMcpClient {
         }
 
         *self.connected.lock().await = false;
+        supervisor::record_stopped(&self.config.name, "shutdown requested");
         Ok(())
     }
 
@@ -1155,6 +1530,18 @@ impl McpServerClient for StdioMcpClient {
         }
     }
 
+    async fn restart_after_crash(&self) -> Result<bool, String> {
+        match self.supervise_restart(&self.config.name).await {
+            RestartOutcome::Restarted => Ok(true),
+            RestartOutcome::Stopped => Ok(false),
+            RestartOutcome::GaveUp => Err(format!(
+                "MCP server '{}' stayed down after {} supervised restart attempt(s)",
+                self.config.name,
+                supervisor::MAX_RESTART_ATTEMPTS
+            )),
+        }
+    }
+
     fn timeout_secs(&self) -> Option<u64> {
         self.config.timeout_secs
     }
@@ -1162,6 +1549,10 @@ impl McpServerClient for StdioMcpClient {
 
 impl Drop for StdioMcpClient {
     fn drop(&mut self) {
+        // The client is gone: no watchdog may restart its child afterwards.
+        self.shutting_down.store(true, Ordering::SeqCst);
+        self.supersede();
+
         // Best-effort: shut down the background writer + reader and kill the child.
         if let Ok(mut wt) = self.write_task.try_lock() {
             if let Some(handle) = wt.take() {
@@ -1173,8 +1564,21 @@ impl Drop for StdioMcpClient {
                 handle.abort();
             }
         }
+        if let Ok(mut st) = self.stderr_task.try_lock() {
+            if let Some(handle) = st.take() {
+                handle.abort();
+            }
+        }
+        if let Ok(mut wd) = self.watchdog.try_lock() {
+            if let Some(handle) = wd.take() {
+                handle.abort();
+            }
+        }
         if let Ok(mut guard) = self.child.try_lock() {
             if let Some(mut child) = guard.take() {
+                // Kill it: a dropped client owns no child any more, and an MCP
+                // child must never outlive the registry entry that spawned it.
+                let _ = child.start_kill();
                 let _ = child.try_wait();
             }
         }
@@ -1441,11 +1845,28 @@ pub async fn initialize_external_tools(
         }
 
         let client: Arc<dyn McpServerClient> = match cfg.transport {
-            crate::mcp::external::config::McpTransport::Stdio => Arc::new(StdioMcpClient::new(cfg)),
+            crate::mcp::external::config::McpTransport::Stdio => {
+                let c = Arc::new(StdioMcpClient::new(cfg));
+                c.arm_supervision();
+                c as Arc<dyn McpServerClient>
+            }
             crate::mcp::external::config::McpTransport::Http => Arc::new(HttpMcpClient::new(cfg)),
         };
         let tools = client.to_mcp_tools().await;
         let count = tools.len();
+        if count == 0 && supervisor::runtime_status(&server_name).is_none() {
+            // LOUD: an enabled server that exposed nothing must say why. A
+            // start failure that the client already recorded is kept (it
+            // carries the child's real stderr).
+            let reason =
+                "the MCP handshake produced no tools (check the omniagent log for the child's own output)";
+            supervisor::record_never_started(&server_name, reason);
+            tracing::error!(
+                "external MCP server '{}' is enabled but exposed 0 tool(s): {}",
+                server_name,
+                reason
+            );
+        }
         clients.register(&server_name, client);
         all_tools.extend(tools);
 
@@ -1487,15 +1908,25 @@ pub async fn initialize_single_server_tools(
     }
 
     let client: Arc<dyn McpServerClient> = match cfg.transport {
-        crate::mcp::external::config::McpTransport::Stdio => Arc::new(StdioMcpClient::new(cfg)),
+        crate::mcp::external::config::McpTransport::Stdio => {
+            let c = Arc::new(StdioMcpClient::new(cfg));
+            c.arm_supervision();
+            c as Arc<dyn McpServerClient>
+        }
         crate::mcp::external::config::McpTransport::Http => Arc::new(HttpMcpClient::new(cfg)),
     };
     let tools = client.to_mcp_tools().await;
 
     if tools.is_empty() {
+        // Say WHY truthfully: the child's own stderr when it died or failed the
+        // handshake, never a generic "did not initialize".
+        let why = match supervisor::runtime_status(server_name) {
+            Some(s) => s.message,
+            None => "the MCP handshake produced no tools (check the omniagent log for the child's own output)".to_string(),
+        };
         return Err(format!(
-            "MCP server '{}' initialized but returned no tools",
-            server_name
+            "MCP server '{}' initialized but returned no tools: {}",
+            server_name, why
         ));
     }
 
@@ -1620,5 +2051,188 @@ mod tests {
             pending.lock().get(&7).is_none(),
             "pending entry must be removed on drop"
         );
+    }
+
+    /// A minimal stdio MCP server (POSIX sh) used by the liveness regression
+    /// test: it answers initialize / tools/list / tools/call, prints one line
+    /// to stderr at startup (the stderr tail the crash report must carry) and
+    /// can be killed at any moment.
+    const FAKE_MCP_SERVER_SH: &str = r#"#!/bin/sh
+# Fake MCP stdio server for the liveness-supervision regression test.
+echo "fake-mcp starting (pid $$)" >&2
+while IFS= read -r line; do
+  id="${line#*\"id\":}"
+  id="${id%%,*}"
+  id="${id%%\}*}"
+  id=$(printf '%s' "$id" | tr -cd '0-9')
+  [ -n "$id" ] || id=0
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fake-mcp","version":"1"}}}\n' "$id"
+      ;;
+    *'"method":"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo","description":"echo","inputSchema":{"type":"object","properties":{}}}]}}\n' "$id"
+      ;;
+    *'"notifications/'*)
+      ;;
+    *'"method":"tools/call"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"pong"}]}}\n' "$id"
+      ;;
+    *'"method":'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      ;;
+  esac
+done
+echo "fake-mcp exiting" >&2
+"#;
+
+    /// Regression (2026-09-27, production incident thread 3356): an external
+    /// MCP child that DIES at runtime used to be invisible - no exit log, no
+    /// status, no restart, and every thread got a bare `Unknown tool`. This
+    /// test kills a real stdio MCP child mid-run and asserts the whole chain:
+    /// the death is recorded with pid + exit status + stderr tail, the child is
+    /// auto-restarted, and the tool is callable again afterwards.
+    #[tokio::test]
+    async fn dead_mcp_child_is_recorded_and_auto_restarted() {
+        use crate::mcp::external::supervisor;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("fake_mcp.sh");
+        std::fs::write(&script, FAKE_MCP_SERVER_SH).expect("write fake server");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script).expect("stat").permissions();
+            perms.set_mode(0o700);
+            std::fs::set_permissions(&script, perms).expect("chmod");
+        }
+
+        let server = "liveness-fake-server";
+        supervisor::clear(server);
+
+        let cfg = McpServerConfig {
+            name: server.to_string(),
+            tool_behavior: Default::default(),
+            transport: crate::mcp::external::config::McpTransport::Stdio,
+            command: Some("/bin/sh".to_string()),
+            args: vec![script.to_string_lossy().to_string()],
+            url: None,
+            env: HashMap::new(),
+            current_dir: Some(dir.path().to_string_lossy().to_string()),
+            timeout_secs: Some(20),
+            max_retries: 3,
+            allowed_tools: vec!["*".to_string()],
+            pool_size: 1,
+        };
+        let client = Arc::new(StdioMcpClient::new(cfg));
+        client.arm_supervision();
+
+        let clients = ExternalMcpClients::new();
+        clients.register(server, client.clone() as Arc<dyn McpServerClient>);
+
+        let tools = client.to_mcp_tools().await;
+        assert_eq!(tools.len(), 1, "the fake server exposes exactly one tool");
+        assert!(tools[0].name.contains("echo"), "got: {}", tools[0].name);
+        assert_eq!(
+            supervisor::runtime_status(server).map(|s| s.state),
+            Some(supervisor::LivenessState::Running),
+            "a healthy handshake must be recorded as running"
+        );
+
+        // Production installs the restart hook in main.rs; this test installs its
+        // own (name-filtered, so parallel tests cannot interfere).
+        {
+            let hook_client = client.clone();
+            let hook_name = server.to_string();
+            supervisor::set_restart_hook(Arc::new(move |n: String| {
+                if n != hook_name {
+                    return;
+                }
+                let hook_client = hook_client.clone();
+                tokio::spawn(async move {
+                    let _ = hook_client.restart_after_crash().await;
+                });
+            }));
+        }
+
+        // Kill the child mid-run, exactly like a crashing plugin process.
+        let killed_pid = {
+            let mut guard = client.child.lock().await;
+            let child = guard.as_mut().expect("child spawned");
+            let pid = child.id();
+            child.start_kill().expect("kill signal sent");
+            pid
+        };
+
+        // (a) The death is recorded with pid + exit status + stderr tail (the
+        // same values the watchdog logs at ERROR through crash_message).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let exit = loop {
+            if let Some(s) = supervisor::runtime_status(server) {
+                if let Some(exit) = s.exit.clone() {
+                    break exit;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the child died but no crash was recorded"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        assert_eq!(exit.pid, killed_pid, "the crash must name the dead child");
+        assert!(
+            !exit.status.is_empty(),
+            "the crash must carry an exit status"
+        );
+        #[cfg(unix)]
+        assert!(
+            exit.status.contains("signal"),
+            "a SIGKILLed child must be reported as a signal, got: {}",
+            exit.status
+        );
+        assert!(
+            exit.stderr_tail
+                .iter()
+                .any(|l| l.contains("fake-mcp starting")),
+            "the stderr tail must be captured, got: {:?}",
+            exit.stderr_tail
+        );
+        let logged = supervisor::crash_message(server, exit.pid, &exit.status, &exit.stderr_tail);
+        assert!(logged.contains(server), "got: {logged}");
+        assert!(logged.contains(&exit.status), "got: {logged}");
+
+        // (b) The supervisor restarts the child (bounded backoff, attempt 1 = 1s).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(s) = supervisor::runtime_status(server) {
+                if s.state == supervisor::LivenessState::Running && s.restarts >= 1 {
+                    break;
+                }
+                if s.state == supervisor::LivenessState::Failed {
+                    panic!("the supervisor gave up: {}", s.message);
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the crashed MCP child was never restarted"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // (c) The tool is callable again through the registry path the tool
+        // handler uses, and the plugin still exposes its tool.
+        let result = clients
+            .call_tool(server, "echo", &serde_json::json!({}), None)
+            .await
+            .expect("the restarted child must answer a tool call");
+        assert!(result.content.contains("pong"), "got: {}", result.content);
+        assert!(!result.is_error, "the call after the restart must succeed");
+        assert_eq!(
+            client.to_mcp_tools().await.len(),
+            1,
+            "the restarted plugin must still expose its tool"
+        );
+
+        supervisor::clear(server);
     }
 }
