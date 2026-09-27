@@ -752,7 +752,9 @@ fn test_kanban_patch_clears_profile_and_channel() {
         .post(format!("{}/kanban/tasks", BASE))
         .json(&serde_json::json!({
             "title": format!("patch-clear-{}", suffix),
-            "board": "plain",
+            // "main" exists in the stack's boards.yml (channel: main, profile:
+            // omni); the explicit values below must win over it at create.
+            "board": "main",
             "channel": "patch-clear-channel",
             "profile": "patch-clear-profile",
         }))
@@ -768,7 +770,7 @@ fn test_kanban_patch_clears_profile_and_channel() {
         "an explicit profile must win at create: {d}"
     );
     assert_eq!(
-        d["data"]["channel_id"], "patch-clear-channel",
+        d["data"]["channel"], "patch-clear-channel",
         "an explicit channel must win at create: {d}"
     );
 
@@ -785,7 +787,7 @@ fn test_kanban_patch_clears_profile_and_channel() {
         "an omitted profile must keep its value: {d}"
     );
     assert_eq!(
-        d["data"]["channel_id"], "patch-clear-channel",
+        d["data"]["channel"], "patch-clear-channel",
         "an omitted channel must keep its value: {d}"
     );
 
@@ -803,8 +805,8 @@ fn test_kanban_patch_clears_profile_and_channel() {
         "PATCH {{\"profile\":\"\"}} must clear the task profile: {d}"
     );
     assert_ne!(
-        d["data"]["channel_id"], "patch-clear-channel",
-        "PATCH {{\"channel\":\"\"}} must clear the task channel: {d}"
+        d["data"]["channel"], "patch-clear-channel",
+        "PATCH with an empty channel must clear the task channel: {d}"
     );
 
     // 4. Best-effort cleanup.
