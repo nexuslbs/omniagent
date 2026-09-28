@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*) FROM (\n                    SELECT thread_sequence FROM messages WHERE thread_id = $1\n                    GROUP BY thread_sequence HAVING COUNT(*) > 1\n                 ) d",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "d6753a2958d0641cc9b4a737aa6ac8ebb78f5f80711d13570d6107eb2d3675fc"
+}
