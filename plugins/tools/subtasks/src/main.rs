@@ -674,7 +674,7 @@ async fn main() -> Result<()> {
             def: McpToolDef {
                 name: "list_subtasks".to_string(),
                 description:
-                    "List all subtasks for a thread, ordered by priority then creation time. \
+                    "List all subtasks for a thread in CREATION order (the order the plan defined them / the agent created them). \
                      Returns current subtask, counts, and full subtask list."
                     .to_string(),
                 input_schema: serde_json::json!({
