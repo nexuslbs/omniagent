@@ -294,4 +294,100 @@ mod tests {
             assert!(!row(s).is_unfinished(), "{s} must not count as unfinished");
         }
     }
+
+    /// Requirement D (`task_omnidev_subtasks_stop_double_creating_plan`): the
+    /// listed / rendered order must be CREATION order, never priority order,
+    /// and it must be stable across repeated calls.
+    ///
+    /// Regression for thread 3443: the engine plan batch (priority = total-i)
+    /// and a mid-run addition carrying a HIGHER priority were interleaved by
+    /// `priority DESC`, so the priority-10 row rendered before the plan rows
+    /// and the list stopped matching the run's sequence.
+    ///
+    /// DB-backed: needs a live DATABASE_URL (dev stack), same convention as the
+    /// other `requires a live DATABASE_URL` tests.
+    #[tokio::test]
+    #[ignore = "requires a live DATABASE_URL"]
+    async fn list_subtasks_is_creation_order_and_stable() {
+        use sqlx::PgPool;
+
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("connect to DATABASE_URL");
+
+        // thread_subtasks.thread_id has an FK to threads(id): reuse an existing
+        // (oldest = surely idle) thread row instead of inventing one.
+        let thread_id: i64 = sqlx::query_scalar("SELECT id FROM threads ORDER BY id ASC LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .expect("need at least one thread row");
+
+        let tag = "[ordering-test]";
+        sql_forge!(
+            "DELETE FROM thread_subtasks WHERE thread_id = :thread_id AND description LIKE :tag",
+            ( :thread_id = thread_id, :tag = format!("{tag}%") )
+        )
+        .execute(&pool)
+        .await
+        .expect("cleanup before");
+
+        // One engine plan batch, exactly like extract_plan_steps (priority = total - i).
+        let mut created: Vec<i64> = Vec::new();
+        for (step, priority) in [(1, 3), (2, 2), (3, 1)] {
+            let row = add_subtask(
+                &pool,
+                thread_id,
+                &format!("{tag} plan step {step}"),
+                priority,
+            )
+            .await
+            .expect("insert plan row");
+            created.push(row.id);
+        }
+        // A mid-run discovery with a HIGHER priority than every plan row - the
+        // row that used to jump to the top of the list.
+        let discovered = add_subtask(&pool, thread_id, &format!("{tag} discovered mid-run"), 10)
+            .await
+            .expect("insert discovered row");
+        created.push(discovered.id);
+        created.sort_unstable();
+
+        let listed = list_subtasks(&pool, thread_id).await.expect("list");
+        let mine: Vec<i64> = listed
+            .iter()
+            .filter(|s| s.description.starts_with(tag))
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(
+            mine, created,
+            "list_subtasks must render CREATION order (ascending id), not priority order"
+        );
+        assert_eq!(
+            *mine.last().unwrap(),
+            discovered.id,
+            "the mid-run addition must land AFTER the plan rows it follows"
+        );
+        assert_eq!(
+            listed
+                .iter()
+                .filter(|s| s.description.starts_with(tag))
+                .count(),
+            created.len(),
+            "no row may be dropped or duplicated by the ordering"
+        );
+
+        // Same rows, same order on a repeated call (deterministic / stable).
+        let again = list_subtasks(&pool, thread_id).await.expect("list again");
+        let mine_again: Vec<i64> = again
+            .iter()
+            .filter(|s| s.description.starts_with(tag))
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(mine, mine_again, "list_subtasks order must be stable");
+
+        for id in &created {
+            delete_subtask(&pool, *id).await.expect("cleanup row");
+        }
+    }
 }
