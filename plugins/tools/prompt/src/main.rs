@@ -1494,6 +1494,13 @@ async fn handle_generate_full(
         match get_subtasks(pool, tid).await {
             Ok(subtasks) if !subtasks.is_empty() => {
                 let mut lines = vec![format!("## Subtasks (Thread #{})", tid)];
+                lines.push(
+                    "These rows are the thread's plan/execution subtasks, listed in creation order. \
+                     Each row is addressable by its id: update it with \
+                     subtasks__manage_subtasks(action=\"update\", subtask_id=<id>, status=\"processing\"|\"completed\"|\"cancelled\"). \
+                     Reuse these rows - do NOT create a duplicate set; only add a row for a step discovered mid-run."
+                        .to_string(),
+                );
                 for (i, s) in subtasks.iter().enumerate() {
                     let icon = match s.status.as_str() {
                         "completed" => "✅",
@@ -1502,7 +1509,7 @@ async fn handle_generate_full(
                         "error" => "⚠️",
                         _ => "⬜",
                     };
-                    lines.push(format!("{}. {} {}", i + 1, icon, s.description));
+                    lines.push(format!("{}. [#{}] {} {}", i + 1, s.id, icon, s.description));
                 }
                 context_blocks.push(lines.join("\n"));
             }

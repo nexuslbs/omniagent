@@ -93,7 +93,17 @@ pub async fn add_subtask(
     Ok(row)
 }
 
-/// List all subtasks for a thread, ordered by priority then creation time.
+/// List all subtasks for a thread in CREATION order (the order the plan defined
+/// them / the agent created them, i.e. execution order).
+///
+/// Sort key: `created_at ASC, id ASC`. Rows created as one plan batch keep
+/// their insertion order and mid-run additions land AFTER the steps they
+/// follow; `id` breaks ties when several rows share a timestamp. The `priority`
+/// column is deliberately NOT part of the display order any more: it used to
+/// interleave engine-created plan rows (priority = total-i) with agent-created
+/// rows (default priority 0), so the rendered list stopped matching the run.
+/// No backfill is needed: `created_at`/`id` exist for every row, so old threads
+/// render in creation order too.
 pub async fn list_subtasks(pool: &PgPool, thread_id: i64) -> anyhow::Result<Vec<SubtaskRow>> {
     let rows: Vec<SubtaskRow> = sql_forge!(
         SubtaskRow,
@@ -104,7 +114,7 @@ pub async fn list_subtasks(pool: &PgPool, thread_id: i64) -> anyhow::Result<Vec<
             COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
         FROM thread_subtasks
         WHERE thread_id = :thread_id
-        ORDER BY priority DESC, created_at ASC
+        ORDER BY created_at ASC, id ASC
         "#,
         ( :thread_id = thread_id )
     )
@@ -173,8 +183,9 @@ pub async fn delete_subtask(pool: &PgPool, subtask_id: i64) -> anyhow::Result<u6
 }
 
 /// Get the current subtask for a thread: a `processing` subtask when one is
-/// marked (that is the one the agent is focused on), else the first pending
-/// one. Within a status group the order is priority DESC, created_at ASC.
+/// marked (that is the one the agent is focused on), else the oldest pending
+/// one. Within a status group the order is created_at ASC, id ASC (creation
+/// order, see `list_subtasks`).
 pub async fn get_current_subtask(
     pool: &PgPool,
     thread_id: i64,
@@ -188,7 +199,7 @@ pub async fn get_current_subtask(
             COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
         FROM thread_subtasks
         WHERE thread_id = :thread_id AND status IN ('processing', 'pending')
-        ORDER BY (status = 'processing') DESC, priority DESC, created_at ASC
+        ORDER BY (status = 'processing') DESC, created_at ASC, id ASC
         LIMIT 1
         "#,
         ( :thread_id = thread_id )

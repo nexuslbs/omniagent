@@ -85,14 +85,16 @@ disk, when you need content again.\n\
 thread - a second read returns a '[duplicate read ...]' marker, not content. \
 Trust the injected '=== Context Compacted ===' summary and your notes instead; \
 re-reading dumps is a forbidden anti-loop that wastes iterations.\n\
-13. SUBTASKS: after planning a multi-step task, create one subtask per plan step \
-with the subtasks tool (subtasks__manage_subtasks, action=\"add\"), in the order \
-you will execute them; mark the subtask you are CURRENTLY working on as processing \
-(action=\"update\", subtask_id=N, status=\"processing\") - at least one at a time, \
-more allowed for interdependent subtasks; as you finish each step mark its subtask \
-completed (action=\"update\", subtask_id=N, status=\"completed\"); cancel any \
-subtask that is no longer needed (status=\"cancelled\"); before your final answer, \
-complete or cancel ALL subtasks so none remain pending.\n\
+13. SUBTASKS: the thread's subtasks are listed in the \"## Subtasks\" block of your \
+context WITH their ids ([#<id>]). In plan mode the engine has ALREADY created one \
+subtask per parsed plan step: REUSE those rows - mark the one you are CURRENTLY \
+working on as processing (action=\"update\", subtask_id=<id>, status=\"processing\"), \
+mark each finished step completed (action=\"update\", subtask_id=<id>, \
+status=\"completed\") and cancel rows that are no longer needed (status=\"cancelled\"). \
+Do NOT create a second set for the plan; call action=\"add\" only for steps discovered \
+MID-RUN, in the order you will execute them. At least one subtask processing at a \
+time, more allowed for interdependent subtasks. Before your final answer, complete or \
+cancel ALL subtasks so none remain pending.\n\
 14. NO-REPETITION + VERIFY-ONCE + NO-PROGRESS STOP: never re-issue a tool call \
 (same tool + same effective arguments/scope) whose result is already in your \
 context or notes when nothing relevant changed in between - including read-only \
@@ -379,10 +381,19 @@ pub enum SubtaskStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadSubtask {
+    pub id: i64,
     pub description: String,
     pub status: SubtaskStatus,
 }
 
+/// Render the `## Subtasks` block injected into the prompt.
+///
+/// Every row is prefixed with its numeric id (`[#123]`): that id is exactly what
+/// `subtasks__manage_subtasks` / `subtasks__update_subtask` accept, so the agent
+/// can update/cancel/complete the rows the ENGINE created (plan mode) instead of
+/// not knowing their ids and creating a duplicate set. Rows are rendered in the
+/// order they are passed in, which is creation order (see
+/// `subtask::list_subtasks`).
 pub fn format_subtask_section(subtasks: &[ThreadSubtask], thread_id: i64) -> Option<String> {
     if subtasks.is_empty() {
         return None;
@@ -396,7 +407,7 @@ pub fn format_subtask_section(subtasks: &[ThreadSubtask], thread_id: i64) -> Opt
             SubtaskStatus::Error => "⚠️",
             SubtaskStatus::Pending => "⬜",
         };
-        lines.push(format!("{}. {} {}", i + 1, icon, s.description));
+        lines.push(format!("{}. [#{}] {} {}", i + 1, s.id, icon, s.description));
     }
     lines.push(String::new());
     Some(lines.join("\n"))
@@ -736,4 +747,49 @@ mod platform_hint_tests {
 
     /// The Mattermost string the plugin declares (previously hardcoded here).
     const MATTERMOST_DECLARED_HINT: &str = "You are on a Mattermost messaging platform. Standard markdown formatting is supported: **bold**, *italic*, `code`, ```code blocks```, [links](url), headings, lists, tables, blockquotes. Mattermost supports most GFM (GitHub Flavored Markdown).";
+}
+
+#[cfg(test)]
+mod subtask_section_tests {
+    use super::*;
+
+    /// E: the injected block must render the row ids, in creation order, so the
+    /// agent can address the plan rows the engine created instead of creating a
+    /// duplicate set (thread 3443: 6 plan rows never touched + 11 agent rows).
+    #[test]
+    fn subtask_section_renders_ids_in_creation_order() {
+        let rows = vec![
+            ThreadSubtask {
+                id: 18410,
+                description: "orient".to_string(),
+                status: SubtaskStatus::Completed,
+            },
+            ThreadSubtask {
+                id: 18416,
+                description: "implement".to_string(),
+                status: SubtaskStatus::Processing,
+            },
+            ThreadSubtask {
+                id: 18426,
+                description: "discovered mid-run".to_string(),
+                status: SubtaskStatus::Pending,
+            },
+        ];
+        let block = format_subtask_section(&rows, 3443).expect("non-empty section");
+        let lines: Vec<&str> = block.lines().collect();
+        assert_eq!(lines[0], "## Subtasks (Thread #3443)");
+        assert!(lines[1].starts_with("1. [#18410]"), "{}", lines[1]);
+        assert!(lines[2].starts_with("2. [#18416]"), "{}", lines[2]);
+        assert!(lines[3].starts_with("3. [#18426]"), "{}", lines[3]);
+        // the rendered ids are the raw row ids the update tool accepts
+        for row in &rows {
+            assert!(block.contains(&format!("[#{}]", row.id)));
+            assert!(block.contains(&row.description));
+        }
+    }
+
+    #[test]
+    fn subtask_section_is_none_without_rows() {
+        assert!(format_subtask_section(&[], 1).is_none());
+    }
 }

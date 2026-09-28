@@ -1013,22 +1013,37 @@ Previous plan:\n{}",
                                 thread.id
                             );
                         } else {
+                            // These rows ARE the thread's plan subtasks: the prompt
+                            // injects them (with their ids, see the prompt plugin's
+                            // `## Subtasks` block), so the executor must update these
+                            // rows by id instead of creating a second set.
                             let total = steps.len();
+                            let mut created_ids: Vec<i64> = Vec::with_capacity(total);
                             for (i, step) in steps.iter().enumerate() {
                                 let priority = (total - i) as i32;
-                                if let Err(e) = crate::subtask::add_subtask(
+                                match crate::subtask::add_subtask(
                                     &cfg.pool, thread.id, step, priority,
                                 )
                                 .await
                                 {
-                                    warn!("[plan] Failed to create subtask '{}': {:?}", step, e);
-                                } else {
-                                    info!(
-                                        "[plan] Created subtask '{}' for complex thread {}",
-                                        step, thread.id
-                                    );
+                                    Ok(row) => {
+                                        info!(
+                                            "[plan] Created subtask #{} '{}' for complex thread {}",
+                                            row.id, step, thread.id
+                                        );
+                                        created_ids.push(row.id);
+                                    }
+                                    Err(e) => {
+                                        warn!("[plan] Failed to create subtask '{}': {:?}", step, e)
+                                    }
                                 }
                             }
+                            info!(
+                                "[plan] {} plan subtask(s) for thread {}: ids {:?} (list order = creation order)",
+                                created_ids.len(),
+                                thread.id,
+                                created_ids
+                            );
                         }
                     }
                     last_plan = Some(plan_content);
