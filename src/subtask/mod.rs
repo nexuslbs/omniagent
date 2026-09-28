@@ -390,4 +390,92 @@ mod tests {
             delete_subtask(&pool, *id).await.expect("cleanup row");
         }
     }
+
+    /// Requirement E (`task_omnidev_subtasks_stop_double_creating_plan`): the id
+    /// rendered by `list_subtasks` (the id the prompt shows as `[#<id>]`) must be
+    /// exactly the id the update path accepts, and it must change THAT row only.
+    ///
+    /// Round-trip: insert two rows -> list (take the id of the second) ->
+    /// `update_subtask_status(id, "processing")` -> exactly one row changed and
+    /// the listing reflects it. Regression for the orphaned plan rows of thread
+    /// 3443, whose engine-created rows the agent could not address at all.
+    ///
+    /// DB-backed: needs a live DATABASE_URL (dev stack), same convention as
+    /// `list_subtasks_is_creation_order_and_stable`.
+    #[tokio::test]
+    #[ignore = "requires a live DATABASE_URL"]
+    async fn list_id_round_trips_to_exactly_that_row() {
+        use sqlx::PgPool;
+
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("connect to DATABASE_URL");
+
+        // thread_subtasks.thread_id has an FK to threads(id): reuse an existing
+        // (oldest = surely idle) thread row instead of inventing one.
+        let thread_id: i64 = sqlx::query_scalar("SELECT id FROM threads ORDER BY id ASC LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .expect("need at least one thread row");
+
+        let tag = "[roundtrip-test]";
+        sql_forge!(
+            "DELETE FROM thread_subtasks WHERE thread_id = :thread_id AND description LIKE :tag",
+            ( :thread_id = thread_id, :tag = format!("{tag}%") )
+        )
+        .execute(&pool)
+        .await
+        .expect("cleanup before");
+
+        let first = add_subtask(&pool, thread_id, &format!("{tag} first"), 0)
+            .await
+            .expect("insert first");
+        let second = add_subtask(&pool, thread_id, &format!("{tag} second"), 0)
+            .await
+            .expect("insert second");
+
+        // The id the prompt renders (`[#<id>]`) is the id list_subtasks returns.
+        let listed = list_subtasks(&pool, thread_id).await.expect("list");
+        let mine: Vec<i64> = listed
+            .iter()
+            .filter(|s| s.description.starts_with(tag))
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(
+            mine,
+            vec![first.id, second.id],
+            "both rows listed in id order"
+        );
+        let target_id = mine[1];
+
+        let affected = update_subtask_status(&pool, target_id, "processing")
+            .await
+            .expect("update by id");
+        assert_eq!(affected, 1, "exactly the addressed row must change");
+
+        let after = list_subtasks(&pool, thread_id).await.expect("list after");
+        let target = after
+            .iter()
+            .find(|s| s.id == target_id)
+            .expect("addressed row still listed");
+        assert_eq!(target.status, "processing");
+        let other_id = if target_id == first.id {
+            second.id
+        } else {
+            first.id
+        };
+        let other = after
+            .iter()
+            .find(|s| s.id == other_id)
+            .expect("other row still listed");
+        assert_eq!(
+            other.status, "pending",
+            "updating by id must not leak onto another row"
+        );
+
+        for id in [first.id, second.id] {
+            delete_subtask(&pool, id).await.expect("cleanup row");
+        }
+    }
 }
