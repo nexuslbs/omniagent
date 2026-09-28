@@ -1,0 +1,48 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE kanban_tasks SET\n            title = CASE WHEN $1 = '' THEN title ELSE NULLIF($2, '')::text END,\n            body = CASE WHEN $3 = $4 THEN body ELSE $5 END,\n            assignee = CASE WHEN $6 = '' THEN assignee ELSE NULLIF($7, '')::text END,\n            channel_id = CASE WHEN $8 = $9 THEN channel_id ELSE NULLIF($10, '')::text END,\n            profile = CASE WHEN $11 = $12 THEN profile ELSE NULLIF($13, '')::text END,\n            priority = CASE WHEN $14 = -999999::bigint THEN priority::bigint ELSE $15 END,\n            status = CASE WHEN $16 = '' THEN status ELSE $17 END,\n            archived = $18,\n            template = CASE WHEN $19 = $20 THEN template ELSE NULLIF($21, '')::text END,\n            toolset = CASE WHEN $22 = $23 THEN toolset ELSE NULLIF($24, '')::text END,\n            plan = $25,\n            workflow_id = CASE WHEN $26 = $27 THEN workflow_id ELSE NULLIF($28, '')::text END,\n            board = CASE WHEN $29 = '' THEN board ELSE NULLIF($30, '')::text END,\n            position = CASE\n                WHEN $31 = -999999 THEN\n                    CASE WHEN $32 != '' AND $33 != board THEN 0 ELSE position END\n                ELSE $34\n            END,\n            updated_at = NOW()\n        WHERE id = $35\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Int8",
+        "Text",
+        "Text",
+        "Bool",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Bool",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int4",
+        "Text",
+        "Text",
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a97143099b2ce346ffeb26ed3a7f6f1f2563bbd48dbd2e7e6707178c8cfcd203"
+}
