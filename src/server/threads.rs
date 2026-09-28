@@ -83,6 +83,7 @@ pub struct ThreadEntry {
     pub workflow_step: Option<String>,
     pub workflow: Option<String>,
     pub kanban_board: Option<String>,
+    pub toolset: Option<String>,
     pub hook_id: Option<String>,
 }
 
@@ -144,6 +145,7 @@ struct ThreadListRow {
     workflow_id: Option<String>,
     external_id: Option<String>,
     kanban_board: Option<String>,
+    toolset: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -236,7 +238,8 @@ async fn list_threads_handler(
                 t.task_id,
                 t.schedule_task_id,
                 t.workflow_step,
-                t.workflow_id
+                t.workflow_id,
+                t.toolset
             FROM threads t
             WHERE 1=1
               AND (:status = '' OR t.status = ANY(string_to_array(:status, ',')))
@@ -276,6 +279,7 @@ async fn list_threads_handler(
             t.workflow_step,
             t.workflow_id AS workflow_id,
             m0.external_id,
+            t.toolset,
             kt.board AS kanban_board,
             COALESCE(cnt.msg_count, 0) AS msg_count,
             lm.content AS last_message
@@ -380,6 +384,7 @@ async fn list_threads_handler(
                 workflow_step: r.workflow_step,
                 workflow: r.workflow_id,
                 kanban_board: r.kanban_board,
+                toolset: r.toolset,
                 hook_id: r.external_id.as_deref().and_then(|ext| {
                     ext.strip_prefix("hook:")
                         .and_then(|rest| rest.split(':').next())
