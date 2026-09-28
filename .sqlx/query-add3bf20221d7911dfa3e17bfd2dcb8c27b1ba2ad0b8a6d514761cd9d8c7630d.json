@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM thread_subtasks WHERE thread_id = $1 AND description LIKE $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "add3bf20221d7911dfa3e17bfd2dcb8c27b1ba2ad0b8a6d514761cd9d8c7630d"
+}
