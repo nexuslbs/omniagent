@@ -163,6 +163,19 @@ impl Agent {
         // when the agent loop collapses on a DB error.
         let data_dir = self.data_dir;
 
+        // Live channel-handler tasks, keyed by channel id. The supervisor MUST
+        // track them: a handler that returns or panics WITHOUT cancelling its
+        // token otherwise leaves an Occupied `cancel_tokens` entry forever, and
+        // the spawn pass below (which only fills Vacant entries) would never
+        // start a handler for that channel again - every thread queued for it
+        // would then stay `pending` with `started_at = NULL` forever (incident
+        // 2026-09-28: kanban thread 3414 on channel `omnidev`).
+        let mut handler_tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
+        // Orphaned-pending-thread recovery: automatic re-dispatch attempts per
+        // kanban task within this process lifetime (bounded escalation).
+        let mut orphan_requeues: HashMap<String, u32> = HashMap::new();
+        let mut last_orphan_sweep: Option<std::time::Instant> = None;
+
         loop {
             // DB-recovery gate: the channel list comes from the YAML
             // config, so a DB outage would otherwise go unnoticed here.
@@ -198,6 +211,48 @@ impl Agent {
 
             let mut tokens = cancel_tokens.lock().await;
 
+            // ── Handler liveness sweep ────────────────────────────────────
+            // Reap handlers whose task is already finished while their cancel
+            // token is still registered and live: that means the handler died
+            // without cancelling (early return or panic), and the Occupied
+            // entry would suppress the respawn forever. Drop the stale token
+            // here so the spawn pass below respawns it in the SAME iteration.
+            let finished: Vec<String> = handler_tasks
+                .iter()
+                .filter(|(_, h)| h.is_finished())
+                .map(|(cid, _)| cid.clone())
+                .collect();
+            for cid in finished {
+                let Some(handle) = handler_tasks.remove(&cid) else {
+                    continue;
+                };
+                let token_cancelled = tokens.get(&cid).map(|t| t.is_cancelled()).unwrap_or(false);
+                let tracked = tokens.contains_key(&cid);
+                let reason = match handle.await {
+                    Ok(()) => "handler task finished".to_string(),
+                    Err(e) => handler_exit_reason(e),
+                };
+                tokens.remove(&cid);
+                // Only an exit while the token was LIVE on an OPEN channel is
+                // an anomaly: a cancelled token means the exit was requested
+                // (stop/close/recovery) and a closed channel is expected to
+                // have no handler.
+                let closed = queries::is_channel_closed(&agent_ctx.pool, &cid)
+                    .await
+                    .unwrap_or(false);
+                if tracked && !token_cancelled && !closed {
+                    error!(
+                        "[supervisor] channel handler for {} is gone ({}) while its cancel token was still live; dropped the stale token and respawning the handler",
+                        cid, reason
+                    );
+                } else {
+                    debug!(
+                        "[supervisor] channel handler for {} exited ({})",
+                        cid, reason
+                    );
+                }
+            }
+
             // Collect channel IDs before iterating to avoid borrow conflicts
             let channel_ids: Vec<String> = channels.iter().map(|c| c.id.clone()).collect();
 
@@ -220,9 +275,16 @@ impl Agent {
                     let cfg = agent_ctx.clone();
                     let cid = channel_id.clone();
 
-                    tokio::spawn(async move {
-                        channel_handler(cfg, cid, handler_token).await;
+                    // The handler NEVER leaves a live token behind: the token
+                    // is cancelled when its task ends, whatever the exit path
+                    // (a panic is covered by the liveness sweep above). A
+                    // cancelled token is dropped by the retain pass below, so
+                    // a stale entry can never suppress a respawn.
+                    let handler_task = tokio::spawn(async move {
+                        channel_handler(cfg, cid, handler_token.clone()).await;
+                        handler_token.cancel();
                     });
+                    handler_tasks.insert(channel_id.clone(), handler_task);
 
                     info!(
                         "Spawned channel handler for channel {} ({})",
@@ -255,11 +317,31 @@ impl Agent {
             // for channels that are no longer stopped.
             tokens.retain(|_, t| !t.is_cancelled());
 
-            // Prune tokens for channels that no longer exist in the DB
+            // Prune tokens for channels that no longer exist in the DB. Cancel
+            // them first: otherwise the handler task keeps polling a channel
+            // whose token nobody holds any more and can never be cancelled
+            // again (orphan task).
             let active_ids: Vec<String> = channels.iter().map(|c| c.id.clone()).collect();
-            tokens.retain(|k, _| active_ids.contains(k));
+            tokens.retain(|k, t| {
+                let keep = active_ids.contains(k);
+                if !keep {
+                    t.cancel();
+                }
+                keep
+            });
+            handler_tasks.retain(|k, _| active_ids.contains(k));
 
             drop(tokens);
+
+            // Orphaned-pending-thread sweep (throttled): the second, channel
+            // independent safety net behind the handler liveness sweep.
+            if last_orphan_sweep.is_none_or(|t| {
+                t.elapsed() >= Duration::from_secs(ORPHAN_SWEEP_INTERVAL_SECS)
+            }) {
+                last_orphan_sweep = Some(std::time::Instant::now());
+                sweep_orphaned_pending_threads(&agent_ctx, &data_dir, &mut orphan_requeues).await;
+            }
+
             sleep(Duration::from_secs(5)).await;
         }
     }
@@ -294,6 +376,254 @@ async fn run_db_recovery(
         return false;
     }
     true
+}
+
+/// Age beyond which a `pending` thread with `started_at IS NULL`, on an OPEN
+/// channel with no `processing` sibling, counts as orphaned: the channel's
+/// queue is not draining. The per-channel handler polls once a second, so a
+/// claimable thread is picked up within about a second; 120s leaves ample
+/// margin for a slow claim while still recovering a stranded queue promptly.
+const ORPHAN_PENDING_SECS: i64 = 120;
+
+/// Automatic re-dispatch attempts per kanban task before the task is blocked
+/// with a clear reason (bounded escalation, no infinite requeue loop).
+const ORPHAN_MAX_REQUEUES: u32 = 3;
+
+/// How often the orphan sweep runs (the supervisor loop ticks every 5s).
+const ORPHAN_SWEEP_INTERVAL_SECS: u64 = 30;
+
+/// Human-readable reason for a finished channel-handler task.
+fn handler_exit_reason(err: tokio::task::JoinError) -> String {
+    if err.is_panic() {
+        let payload = err.into_panic();
+        if let Some(s) = payload.downcast_ref::<&str>() {
+            format!("handler task panicked: {s}")
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            format!("handler task panicked: {s}")
+        } else {
+            "handler task panicked (non-string payload)".to_string()
+        }
+    } else {
+        format!("handler task aborted: {err}")
+    }
+}
+
+/// Recover threads that are queued but can never be claimed.
+///
+/// This is the safety net BEHIND the handler liveness sweep: that one
+/// guarantees a live handler for every open channel, this one notices a queue
+/// that still does not drain (handler wedged, or a thread queued at a moment
+/// when the channel had no handler at all) and recovers it deterministically,
+/// so a task is never left `running` with `thread_status = 'scheduled'` while
+/// nothing executes and no thread stays `pending` forever. Every action is
+/// logged at ERROR level.
+async fn sweep_orphaned_pending_threads(
+    cfg: &AgentContext,
+    data_dir: &str,
+    requeues: &mut HashMap<String, u32>,
+) {
+    let orphans = match queries::find_orphaned_pending_threads(&cfg.pool, ORPHAN_PENDING_SECS).await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!("[supervisor] orphaned-pending sweep query failed: {:?}", e);
+            return;
+        }
+    };
+
+    for orphan in orphans {
+        // A closed channel is not an orphan: its threads are skipped by the
+        // handler and startup paths, and the channel can be re-opened later.
+        if let Ok(true) = queries::is_channel_closed(&cfg.pool, &orphan.channel_id).await {
+            continue;
+        }
+
+        // The linked task's status decides the recovery outcome; it is
+        // resolved with a scalar lookup (a join in the orphan query would make
+        // every selected column look nullable to the compile-time checker) and
+        // is `None` when the task no longer exists.
+        let task_status = match orphan.task_id.as_deref() {
+            Some(task_id) => queries::kanban_task_status(&cfg.pool, task_id)
+                .await
+                .unwrap_or(None),
+            None => None,
+        };
+
+        error!(
+            "[supervisor] orphaned pending thread {} on channel {} (task {:?}) is {}s old, was never claimed (started_at IS NULL) and no thread of that channel is processing; recovering",
+            orphan.id, orphan.channel_id, orphan.task_id, orphan.age_secs().unwrap_or(0)
+        );
+
+        let attempts = orphan
+            .task_id
+            .as_ref()
+            .and_then(|t| requeues.get(t).copied())
+            .unwrap_or(0);
+
+        match queries::orphan_recovery(
+            orphan.task_id.as_deref(),
+            task_status.as_deref(),
+            attempts,
+            ORPHAN_MAX_REQUEUES,
+        ) {
+            queries::OrphanRecovery::Fail => {
+                fail_orphaned_pending_thread(cfg, &orphan).await;
+            }
+            queries::OrphanRecovery::Skip => {
+                skip_orphaned_pending_thread(
+                    cfg,
+                    &orphan,
+                    "linked kanban task is gone or finished",
+                )
+                .await;
+            }
+            queries::OrphanRecovery::Requeue { task_status } => {
+                let task_id = orphan.task_id.clone().unwrap_or_default();
+                skip_orphaned_pending_thread(cfg, &orphan, "re-dispatching the kanban step").await;
+                match queries::create_kanban_step_thread(
+                    &cfg.pool,
+                    data_dir,
+                    &task_id,
+                    &task_status,
+                )
+                .await
+                {
+                    Ok(Some(new_id)) => {
+                        *requeues.entry(task_id.clone()).or_insert(0) += 1;
+                        error!(
+                            "[supervisor] orphan recovery: re-dispatched kanban task {} (step {}) as thread {} (attempt {}/{})",
+                            task_id,
+                            task_status,
+                            new_id,
+                            attempts + 1,
+                            ORPHAN_MAX_REQUEUES
+                        );
+                    }
+                    Ok(None) => {
+                        // No role thread exists for that status: skipping the
+                        // orphan would strand the task, so block it loudly.
+                        let reason = format!(
+                            "Thread #{} stayed pending for {}s and no role thread exists for step '{}' to re-dispatch; the supervisor blocked the task instead of leaving it active with no executing thread.",
+                            orphan.id,
+                            orphan.age_secs().unwrap_or(0),
+                            task_status
+                        );
+                        let blocked = queries::block_kanban_task(&cfg.pool, &task_id, &reason)
+                            .await
+                            .unwrap_or(false);
+                        requeues.remove(&task_id);
+                        error!(
+                            "[supervisor] orphan recovery: no role thread for kanban task {} (step {}); blocked={} reason: {}",
+                            task_id, task_status, blocked, reason
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "[supervisor] orphan recovery: failed to re-dispatch kanban task {} (step {}): {:?}",
+                            task_id,
+                            task_status,
+                            e
+                        );
+                    }
+                }
+            }
+            queries::OrphanRecovery::Block => {
+                let task_id = orphan.task_id.clone().unwrap_or_default();
+                let reason = format!(
+                    "Thread #{} stayed pending for {}s without being claimed even after {} automatic re-dispatches; the supervisor blocked the task instead of leaving it active with no executing thread.",
+                    orphan.id,
+                    orphan.age_secs().unwrap_or(0),
+                    ORPHAN_MAX_REQUEUES
+                );
+                let blocked = queries::block_kanban_task(&cfg.pool, &task_id, &reason)
+                    .await
+                    .unwrap_or(false);
+                skip_orphaned_pending_thread(
+                    cfg,
+                    &orphan,
+                    "kanban task blocked (re-dispatch bound reached)",
+                )
+                .await;
+                requeues.remove(&task_id);
+                error!(
+                    "[supervisor] orphan recovery: blocked kanban task {} (moved: {}) after {} re-dispatch attempts; reason: {}",
+                    task_id, blocked, ORPHAN_MAX_REQUEUES, reason
+                );
+            }
+        }
+    }
+}
+
+/// Mark an orphaned pending thread terminal ('skipped').
+async fn skip_orphaned_pending_thread(
+    cfg: &AgentContext,
+    orphan: &queries::OrphanPendingThread,
+    reason: &str,
+) {
+    match queries::skip_thread(&cfg.pool, orphan.id).await {
+        Ok(_) => info!(
+            "[supervisor] orphan recovery: thread {} on channel {} skipped ({})",
+            orphan.id, orphan.channel_id, reason
+        ),
+        Err(e) => tracing::warn!(
+            "[supervisor] orphan recovery: failed to skip thread {}: {:?}",
+            orphan.id,
+            e
+        ),
+    }
+}
+
+/// Fail a non-kanban orphaned pending thread with a USER-VISIBLE error
+/// message: a queued thread that can never be claimed must neither stay
+/// pending forever nor disappear silently.
+async fn fail_orphaned_pending_thread(cfg: &AgentContext, orphan: &queries::OrphanPendingThread) {
+    let next_seq = queries::get_max_thread_sequence(&cfg.pool, orphan.id)
+        .await
+        .unwrap_or(0)
+        + 1;
+    let msg = queries::MessageNew {
+        thread_id: orphan.id,
+        role: "agent".to_string(),
+        content: format!(
+            "This thread was queued but never picked up: it stayed pending for {}s and no other thread of channel '{}' was processing. The supervisor recovered the stranded queue and marked this thread failed.",
+            orphan.age_secs().unwrap_or(0), orphan.channel_id
+        ),
+        thread_sequence: next_seq,
+        external_id: None,
+        metadata: serde_json::json!({}),
+        embedding: None,
+        summary_text: None,
+        is_summary: false,
+        original_thread_id: None,
+        msg_type: "error".to_string(),
+        msg_subtype: Some("orphan_pending".to_string()),
+        iteration_number: 0,
+        duration_ms: 0,
+        token_usage: serde_json::json!({}),
+    };
+    if let Err(e) = queries::create_message(&cfg.pool, &msg).await {
+        tracing::warn!(
+            "[supervisor] orphan recovery: failed to insert the error message for thread {}: {:?}",
+            orphan.id,
+            e
+        );
+    }
+    match queries::mark_thread_terminal(&cfg.pool, orphan.id, "failed").await {
+        Ok(n) => {
+            if n > 0 {
+                crate::hooks::fire_thread_terminated(orphan.id, "failed");
+            }
+            error!(
+                "[supervisor] orphan recovery: non-kanban thread {} on channel {} failed after {}s pending (no handler claimed it)",
+                orphan.id, orphan.channel_id, orphan.age_secs().unwrap_or(0)
+            );
+        }
+        Err(e) => tracing::warn!(
+            "[supervisor] orphan recovery: failed to fail thread {}: {:?}",
+            orphan.id,
+            e
+        ),
+    }
 }
 
 /// Cancel every in-flight task for all threads of a channel.

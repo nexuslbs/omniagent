@@ -2146,6 +2146,210 @@ pub async fn skip_all_pending_threads(pool: &PgPool, data_dir: &str) -> AppResul
 
     Ok(threads.len() as u64)
 }
+/// A `pending` thread that was never claimed: `started_at IS NULL`, older
+/// than the stale threshold, on a channel that is OPEN and has no
+/// `processing` thread.
+///
+/// The per-channel handler polls its channel once a second, so a claimable
+/// pending thread is picked up within about a second of becoming the oldest
+/// pending thread of its channel. A `processing` sibling means the channel is
+/// BUSY (threads are executed sequentially), not stuck, and is deliberately
+/// excluded here - only a channel whose queue provably does not drain
+/// produces an orphan.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct OrphanPendingThread {
+    pub id: i64,
+    pub channel_id: String,
+    pub task_id: Option<String>,
+    /// `threads.created_at` in the app's canonical timestamp format. The age is
+    /// computed in Rust ([`OrphanPendingThread::age_secs`]): keeping the SQL to
+    /// plain column selections avoids the numeric-expression typing pitfalls of
+    /// the compile-time checked query macro. `Option` because the query macro
+    /// treats formatted-timestamp expressions as nullable (`ThreadDb` does the
+    /// same).
+    pub created_at: Option<String>,
+}
+
+impl OrphanPendingThread {
+    /// Age of the thread in seconds; `None` when `created_at` cannot be parsed.
+    pub fn age_secs(&self) -> Option<i64> {
+        let created = self
+            .created_at
+            .as_deref()?
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .ok()?;
+        Some((chrono::Utc::now() - created).num_seconds().max(0))
+    }
+}
+
+/// Deterministic outcome for an orphaned pending thread (pure decision).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OrphanRecovery {
+    /// Non-kanban thread: fail it with a user-visible error message.
+    Fail,
+    /// Linked task deleted or finished (done/blocked): the queued thread is
+    /// meaningless - skip it (terminal) and leave the task untouched.
+    Skip,
+    /// Re-dispatch a fresh role thread for the linked task's CURRENT status
+    /// (the same path as startup redispatch and status-change dispatch).
+    Requeue { task_status: String },
+    /// Re-dispatch bound reached: block the task with a clear reason and skip
+    /// the orphaned thread, so no task is left `running` with a `scheduled`
+    /// marker while nothing executes.
+    Block,
+}
+
+/// Decide what to do with an orphaned pending thread. `attempts` counts the
+/// automatic re-dispatches already performed for this task in this process.
+pub fn orphan_recovery(
+    task_id: Option<&str>,
+    task_status: Option<&str>,
+    attempts: u32,
+    max_requeues: u32,
+) -> OrphanRecovery {
+    match (task_id, task_status) {
+        (None, _) => OrphanRecovery::Fail,
+        (Some(_), None) => OrphanRecovery::Skip,
+        (Some(_), Some("done") | Some("blocked")) => OrphanRecovery::Skip,
+        (Some(_), Some(_)) if attempts >= max_requeues => OrphanRecovery::Block,
+        (Some(_), Some(status)) => OrphanRecovery::Requeue {
+            task_status: status.to_string(),
+        },
+    }
+}
+
+/// Find orphaned pending threads (see [`OrphanPendingThread`]).
+///
+/// `stale_secs` is the age beyond which a never-started thread means the
+/// channel's queue is not draining.
+pub async fn find_orphaned_pending_threads(
+    pool: &PgPool,
+    stale_secs: i64,
+) -> AppResult<Vec<OrphanPendingThread>> {
+    let rows: Vec<OrphanPendingThread> = sql_forge!(
+        OrphanPendingThread,
+        r#"
+        SELECT th.id,
+               th.channel_id,
+               th.task_id,
+               COALESCE(TO_CHAR(th.created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
+        FROM threads th
+        WHERE th.status = 'pending'
+          AND th.started_at IS NULL
+          AND NOT th.terminal
+          AND NOT EXISTS (
+              SELECT 1 FROM threads p
+              WHERE p.channel_id = th.channel_id
+                AND p.status = 'processing'
+                AND NOT p.terminal
+          )
+        ORDER BY th.created_at ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter(|r| r.age_secs().is_some_and(|age| age > stale_secs))
+        .collect())
+}
+
+/// Move a kanban task to `blocked` and clear its `thread_status` marker.
+///
+/// Supervisor orphan recovery: a task must never stay `running`/`testing`/
+/// `review` with a live `scheduled` marker while its queued thread is not
+/// executing. `done`/`blocked` tasks are left untouched (idempotent) and the
+/// action is recorded in `kanban_history`. Returns true when the task row was
+/// actually moved.
+pub async fn block_kanban_task(pool: &PgPool, task_id: &str, reason: &str) -> AppResult<bool> {
+    let result = sql_forge!(
+        r#"UPDATE kanban_tasks
+           SET status = 'blocked', thread_status = NULL, updated_at = NOW()
+           WHERE id = :task_id AND status NOT IN ('done', 'blocked')"#,
+        ( :task_id = task_id )
+    )
+    .execute(pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Ok(false);
+    }
+    sql_forge!(
+        r#"INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
+           VALUES (:task_id, 'workflow', NULL, NULL, :comment)"#,
+        ( :task_id = task_id, :comment = reason )
+    )
+    .execute(pool)
+    .await?;
+    Ok(true)
+}
+
+/// Status of a kanban task, `None` when the task does not exist.
+///
+/// The orphan sweeper resolves the linked task's status with this scalar
+/// lookup instead of a join in the orphan query, so the orphan query stays a
+/// plain compile-time checked column selection.
+pub async fn kanban_task_status(pool: &PgPool, task_id: &str) -> AppResult<Option<String>> {
+    let status: Option<String> = sql_forge!(
+        scalar String,
+        "SELECT status FROM kanban_tasks WHERE id = :task_id",
+        ( :task_id = task_id )
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(status)
+}
+
+#[cfg(test)]
+mod orphan_recovery_tests {
+    use super::orphan_recovery;
+    use super::OrphanRecovery;
+
+    #[test]
+    fn non_kanban_thread_is_failed_with_a_visible_error() {
+        assert_eq!(orphan_recovery(None, None, 0, 3), OrphanRecovery::Fail);
+        assert_eq!(
+            orphan_recovery(None, Some("running"), 0, 3),
+            OrphanRecovery::Fail
+        );
+    }
+
+    #[test]
+    fn deleted_or_finished_task_skips() {
+        assert_eq!(
+            orphan_recovery(Some("t1"), None, 0, 3),
+            OrphanRecovery::Skip
+        );
+        assert_eq!(
+            orphan_recovery(Some("t1"), Some("done"), 0, 3),
+            OrphanRecovery::Skip
+        );
+        assert_eq!(
+            orphan_recovery(Some("t1"), Some("blocked"), 0, 3),
+            OrphanRecovery::Skip
+        );
+    }
+
+    #[test]
+    fn active_task_requeues_until_the_bound_then_blocks() {
+        assert_eq!(
+            orphan_recovery(Some("t1"), Some("running"), 0, 3),
+            OrphanRecovery::Requeue {
+                task_status: "running".to_string()
+            }
+        );
+        assert_eq!(
+            orphan_recovery(Some("t1"), Some("testing"), 2, 3),
+            OrphanRecovery::Requeue {
+                task_status: "testing".to_string()
+            }
+        );
+        assert_eq!(
+            orphan_recovery(Some("t1"), Some("running"), 3, 3),
+            OrphanRecovery::Block
+        );
+    }
+}
 
 /// Get the cause message (first message, role='cause') for a thread.
 pub async fn get_cause_message(pool: &PgPool, thread_id: i64) -> AppResult<Option<Message>> {
