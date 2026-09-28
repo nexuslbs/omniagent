@@ -33,8 +33,9 @@
 //! for hooks). Hook counters are the only runtime state and live in the
 //! `hook_counters` table.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -263,8 +264,12 @@ pub fn load_tasks(data_dir: &str) -> AppResult<TasksFile> {
     if trimmed.is_empty() {
         return Ok(TasksFile::default());
     }
-    serde_yaml::from_str(&content)
-        .map_err(|e| Error::Message(format!("Failed to parse {}: {}", path.display(), e)))
+    let tasks: TasksFile = serde_yaml::from_str(&content)
+        .map_err(|e| Error::Message(format!("Failed to parse {}: {}", path.display(), e)))?;
+    // Loud load-time validation: a definition that can never fire is reported
+    // (ERROR log + `validation_error` in the API), never silently accepted.
+    log_validation_issues(&tasks, &path);
+    Ok(tasks)
 }
 
 /// Load tasks.yml, logging + ignoring parse errors (used by background loops:
@@ -298,6 +303,101 @@ pub fn save_tasks(data_dir: &str, tasks: &TasksFile) -> AppResult<()> {
         ))
     })?;
     Ok(())
+}
+
+// ── Load-time validation (never silently inert) ─────────────────────────────
+
+/// One load-time validation issue: `(definition key, reason)`.
+pub type TaskValidationIssue = (String, String);
+
+/// Distinct issues already logged. tasks.yml is re-read on every event, so an
+/// unchanged invalid definition must not flood the log.
+static VALIDATION_LOGGED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn validation_logged_before(signature: &str) -> bool {
+    let mut seen = VALIDATION_LOGGED
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    !seen.insert(signature.to_string())
+}
+
+/// Validation reason for a hook definition, or `None` when it can fire.
+///
+/// Two engines consume `hooks:` entries:
+///  * the thread-lifecycle engine (`crate::hooks`) fires ONLY the eight
+///    lifecycle events (`crate::hooks::VALID_EVENTS`), filtered on
+///    `event == <fired event>`;
+///  * the published-event bus (`crate::events`) delivers a published event to
+///    every enabled listener whose `event` equals the published name AND whose
+///    mode is `action`. Published names are dynamic, so they cannot be checked
+///    against a static list.
+///
+/// An AGENTIC hook bound to a non-lifecycle event therefore matches no event any
+/// engine will ever emit: it can never fire, while `GET /hooks` used to report
+/// it as `enabled: true` with stale counters (the silent death of
+/// `thread_finished` after the 2026-09-17 lifecycle rename). Action-mode hooks
+/// remain valid: they are published-event listeners.
+pub fn hook_validation_error(key: &str, def: &HookDef) -> Option<String> {
+    if crate::hooks::VALID_EVENTS.contains(&def.event.trim()) {
+        // Lifecycle hook: the same strict rules as the API save path.
+        return validate_hook(key, def).err();
+    }
+    if def.mode() == crate::hooks::MODE_ACTION {
+        // Published-event listener: its event name only exists once something
+        // publishes it, so there is nothing to validate statically.
+        return None;
+    }
+    Some(format!(
+        "hook '{}': event '{}' is not a lifecycle event and the hook is not a \
+         published-event listener (mode '{}'): no engine can ever fire it. Agentic \
+         hooks must use one of {:?}; published events are delivered to mode 'action' listeners.",
+        key,
+        def.event,
+        def.mode(),
+        crate::hooks::VALID_EVENTS
+    ))
+}
+
+/// Validation reason for a schedule definition, or `None` when it is usable.
+pub fn schedule_validation_error(key: &str, def: &ScheduleDef) -> Option<String> {
+    validate_schedule(key, def).err()
+}
+
+/// Every load-time validation issue in `tasks`: hooks first (then schedules),
+/// each group ordered by key.
+pub fn validation_issues(tasks: &TasksFile) -> Vec<TaskValidationIssue> {
+    let mut out: Vec<TaskValidationIssue> = Vec::new();
+    let mut keys: Vec<&String> = tasks.hooks.keys().collect();
+    keys.sort();
+    for key in keys {
+        if let Some(reason) = hook_validation_error(key, &tasks.hooks[key]) {
+            out.push((key.clone(), reason));
+        }
+    }
+    let mut keys: Vec<&String> = tasks.schedules.keys().collect();
+    keys.sort();
+    for key in keys {
+        if let Some(reason) = schedule_validation_error(key, &tasks.schedules[key]) {
+            out.push((key.clone(), reason));
+        }
+    }
+    out
+}
+
+/// Log every load-time validation issue of a tasks file at ERROR level, once per
+/// distinct issue per process.
+pub fn log_validation_issues(tasks: &TasksFile, path: &std::path::Path) {
+    for (key, reason) in validation_issues(tasks) {
+        if validation_logged_before(&format!("{}::{}::{}", path.display(), key, reason)) {
+            continue;
+        }
+        tracing::error!(
+            "[tasks.yml] INVALID DEFINITION in {}: {} - this definition can never fire, fix it in the file",
+            path.display(),
+            reason
+        );
+    }
 }
 
 // ── Validation ──────────────────────────────────────────────────────────────
@@ -456,6 +556,83 @@ hooks:
         assert_eq!(m.mode(), "action", "action presence implies action mode");
         assert_eq!(m.scope, "profile");
         assert_eq!(m.count, 100);
+    }
+
+    #[test]
+    fn agentic_hook_with_non_lifecycle_event_is_invalid() {
+        // Regression: `thread_finished` was removed from VALID_EVENTS
+        // (2026-09-17). An agentic hook still bound to it matched no event and
+        // never fired, silently (counter frozen, no log, no API signal).
+        let def = HookDef {
+            event: "thread_finished".to_string(),
+            scope: "channel".to_string(),
+            count: 10,
+            ..Default::default()
+        };
+        let reason = hook_validation_error("channel-summaries", &def)
+            .expect("thread_finished must be reported invalid");
+        assert!(reason.contains("channel-summaries"), "{reason}");
+        assert!(reason.contains("thread_finished"), "{reason}");
+        assert!(reason.contains("thread_terminated"), "{reason}");
+
+        let mut tasks = TasksFile::default();
+        tasks.hooks.insert("channel-summaries".to_string(), def);
+        let issues = validation_issues(&tasks);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].0, "channel-summaries");
+
+        // Load-time validation reports but does NOT fail the load: a bad
+        // definition must not take the hooks engine / scheduler down.
+        let dir = std::env::temp_dir().join(format!("tasksyml-invalid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        save_tasks(dir.to_str().unwrap(), &tasks).expect("save");
+        let loaded = load_tasks(dir.to_str().unwrap()).expect("load stays Ok");
+        assert_eq!(loaded.hooks.len(), 1);
+        assert!(
+            hook_validation_error("channel-summaries", &loaded.hooks["channel-summaries"])
+                .is_some(),
+            "an invalid hook must stay visible after load"
+        );
+    }
+
+    #[test]
+    fn lifecycle_and_action_listener_hooks_are_valid() {
+        // A lifecycle event is valid (agentic, the rebind target) ...
+        let lifecycle = HookDef {
+            event: "thread_terminated".to_string(),
+            scope: "profile".to_string(),
+            count: 10,
+            ..Default::default()
+        };
+        assert!(hook_validation_error("wiki-maintenance", &lifecycle).is_none());
+
+        // ... and a published-event listener (mode action, e.g. solve-captcha,
+        // dispatched by crate::events) stays valid although its event is not a
+        // lifecycle event.
+        let listener = HookDef {
+            event: "solve-captcha".to_string(),
+            scope: "global".to_string(),
+            count: 1,
+            action: Some("solve_captcha_telegram".to_string()),
+            ..Default::default()
+        };
+        assert!(hook_validation_error("solve-captcha-telegram", &listener).is_none());
+    }
+
+    #[test]
+    fn invalid_schedule_cron_is_reported() {
+        let mut tasks = TasksFile::default();
+        tasks.schedules.insert(
+            "bad".to_string(),
+            ScheduleDef {
+                cron: "not a cron".to_string(),
+                ..Default::default()
+            },
+        );
+        let issues = validation_issues(&tasks);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].0, "bad");
+        assert!(issues[0].1.contains("cron"), "{}", issues[0].1);
     }
 
     #[test]

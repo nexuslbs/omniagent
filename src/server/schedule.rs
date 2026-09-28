@@ -83,6 +83,10 @@ pub struct JobEntry {
     pub template: Option<String>,
     pub toolset: Option<String>,
     pub plan: bool,
+    /// Load-time validation reason for a definition that can never run
+    /// (absent = the schedule is usable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -392,6 +396,7 @@ async fn schedule_to_entry(
         id: key.to_string(),
         name: key.to_string(),
         cron: def.cron.clone(),
+        validation_error: tasks_yaml::schedule_validation_error(key, def),
         prompt_preview,
         prompt: def.prompt.clone(),
         skills: parse_skills(def.skills.clone()),

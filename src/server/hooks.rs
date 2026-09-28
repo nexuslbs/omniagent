@@ -80,6 +80,11 @@ struct HookResponse {
     template: Option<String>,
     toolset: Option<String>,
     enabled: bool,
+    /// Load-time validation reason for a definition that can never fire
+    /// (absent = the hook can fire). A hook bound to an unknown/removed event
+    /// must never look like a healthy `enabled: true` hook.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    validation_error: Option<String>,
     created_at: Option<String>,
     updated_at: Option<String>,
 }
@@ -121,6 +126,7 @@ impl HookResponse {
             template: def.template.clone(),
             toolset: def.toolset.clone(),
             enabled: def.enabled,
+            validation_error: tasks_yaml::hook_validation_error(key, def),
             created_at: None,
             updated_at: None,
         }
