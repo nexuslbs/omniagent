@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id, thread_id, description, status, priority,\n            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"created_at\",\n            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"updated_at\"\n        FROM thread_subtasks\n        WHERE thread_id = $1 AND status IN ('processing', 'pending')\n        ORDER BY (status = 'processing') DESC, priority DESC, created_at ASC\n        LIMIT 1\n        ",
+  "query": "\n        SELECT\n            id, thread_id, description, status, priority,\n            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"created_at\",\n            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"updated_at\"\n        FROM thread_subtasks\n        WHERE thread_id = $1\n        ORDER BY created_at ASC, id ASC\n        ",
   "describe": {
     "columns": [
       {
@@ -86,5 +86,5 @@
       null
     ]
   },
-  "hash": "71a6aa8421de68f1cf3b44e58bc7ef472e3b2580965c87818fc2e00f396edfbc"
+  "hash": "3190d14efd5b6322127d42d966f2eff875bf7a91140f591a21ddf202ffa6686a"
 }

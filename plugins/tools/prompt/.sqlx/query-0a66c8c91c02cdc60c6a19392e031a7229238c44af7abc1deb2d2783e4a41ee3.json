@@ -1,0 +1,57 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT th.id,\n               th.channel_id,\n               th.task_id,\n               COALESCE(TO_CHAR(th.created_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"created_at\"\n        FROM threads th\n        WHERE th.status = 'pending'\n          AND th.started_at IS NULL\n          AND NOT th.terminal\n          AND NOT EXISTS (\n              SELECT 1 FROM threads p\n              WHERE p.channel_id = th.channel_id\n                AND p.status = 'processing'\n                AND NOT p.terminal\n          )\n        ORDER BY th.created_at ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "channel_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "channel_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "task_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "task_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "created_at",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "0a66c8c91c02cdc60c6a19392e031a7229238c44af7abc1deb2d2783e4a41ee3"
+}

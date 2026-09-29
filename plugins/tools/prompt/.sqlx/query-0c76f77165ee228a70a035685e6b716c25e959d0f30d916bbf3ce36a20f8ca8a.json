@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)\n           VALUES ($1, 'workflow', NULL, NULL, $2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0c76f77165ee228a70a035685e6b716c25e959d0f30d916bbf3ce36a20f8ca8a"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE kanban_tasks\n           SET status = 'blocked', thread_status = NULL, updated_at = NOW()\n           WHERE id = $1 AND status NOT IN ('done', 'blocked')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "90d65e9ea2d7c930ef031046d3b15ba1dde66ec9dcad0b8d696c977d19361abc"
+}
