@@ -335,9 +335,9 @@ impl Agent {
 
             // Orphaned-pending-thread sweep (throttled): the second, channel
             // independent safety net behind the handler liveness sweep.
-            if last_orphan_sweep.is_none_or(|t| {
-                t.elapsed() >= Duration::from_secs(ORPHAN_SWEEP_INTERVAL_SECS)
-            }) {
+            if last_orphan_sweep
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(ORPHAN_SWEEP_INTERVAL_SECS))
+            {
                 last_orphan_sweep = Some(std::time::Instant::now());
                 sweep_orphaned_pending_threads(&agent_ctx, &data_dir, &mut orphan_requeues).await;
             }
