@@ -469,8 +469,10 @@ pub(crate) async fn handle_response(
 
     // Thread-end Usage message: insert just before the thread's last message,
     // carrying the concatenated usage array (all `_meta.usage` items from tool
-    // call results in call order + the omniagent's own LLM-call entries) plus
-    // the aggregate fields (full_*, cost, default 0).
+    // call results in call order + the omniagent's own LLM-call entries). The
+    // message content is the array itself; the aggregate fields are written
+    // to the threads table below (operator UPDATE 2026-09-30 threads
+    // 3702/3705/3707/3709).
     if let Err(e) = insert_thread_usage_message(
         &cfg.pool,
         thread.id,
@@ -484,6 +486,13 @@ pub(crate) async fn handle_response(
             thread.id, e
         );
     }
+
+    // Threads-table aggregate columns (operator UPDATE 2026-09-30): sums over
+    // the usage array items, min-clamped against the omniagent's own bare
+    // totals (aggregate_fields does the clamp), populated at thread end exactly
+    // like input_tokens / cached_tokens / output_tokens are today.
+    let usage_agg =
+        crate::agent::usage_entries::aggregate_fields(usage_entries, cumulative_usage.as_ref());
 
     helpers::finalize_thread(
         &cfg.ctx,
@@ -506,6 +515,11 @@ pub(crate) async fn handle_response(
                 .map(|u| u.completion_tokens as i32)
                 .unwrap_or(0),
             duration_ms: agent_elapsed_ms,
+            full_input_tokens: usage_agg.full_input_tokens as i32,
+            full_cached_tokens: usage_agg.full_cached_tokens as i32,
+            full_output_tokens: usage_agg.full_output_tokens as i32,
+            full_reasoning_tokens: usage_agg.full_reasoning_tokens as i32,
+            cost: usage_agg.cost,
         },
     )
     .await?;
@@ -522,11 +536,14 @@ pub(crate) async fn handle_response(
 /// Insert the thread-end "Usage"-type message just before the thread's last
 /// message.
 ///
-/// The message carries the concatenated usage array (all `_meta.usage` items
+/// The message content is the usage ARRAY itself (all `_meta.usage` items
 /// from tool call results in call order + the omniagent's own LLM-call
-/// entries) plus the aggregate fields (`full_input_tokens`,
-/// `full_cached_tokens`, `full_output_tokens`, `full_reasoning_tokens`,
-/// `cost`, default 0) - see [`crate::agent::usage_entries`].
+/// entries) - no wrapper object, no `full_*` keys (operator UPDATE 2026-09-30
+/// threads 3705/3707/3709). The aggregate fields are carried in the message's
+/// `token_usage` metadata so `complete_thread`'s fallback aggregation can sum
+/// them on fail/interrupt paths; the live path also writes them to the
+/// threads table columns via `CompleteThreadStats` in `handle_response` - see
+/// [`crate::agent::usage_entries`].
 ///
 /// Placement: the last message's `thread_sequence` is bumped by one and the
 /// Usage message takes the freed slot, so it ends up immediately before the
@@ -552,11 +569,16 @@ async fn insert_thread_usage_message(
     )
     .execute(pool)
     .await?;
-    let content = crate::agent::usage_entries::usage_message_content(entries, cumulative_usage);
+    // The message content is the usage ARRAY itself (operator UPDATE 3709);
+    // the aggregates ride in the message's token_usage metadata, which
+    // complete_thread's fallback aggregation reads when the live stats are
+    // zero (fail/interrupt paths).
+    let content = crate::agent::usage_entries::usage_message_content(entries);
+    let agg = crate::agent::usage_entries::aggregate_fields(entries, cumulative_usage);
     let msg = MessageNew {
         thread_id,
         role: "agent".to_string(),
-        content: serde_json::to_string(&content).unwrap_or_else(|_| "{}".to_string()),
+        content: serde_json::to_string(&content).unwrap_or_else(|_| "[]".to_string()),
         thread_sequence: max_seq,
         external_id: None,
         metadata: serde_json::json!({ "is_usage": true }),
@@ -569,11 +591,11 @@ async fn insert_thread_usage_message(
         iteration_number: 0,
         duration_ms: 0,
         token_usage: serde_json::json!({
-            "full_input_tokens": content["full_input_tokens"],
-            "full_cached_tokens": content["full_cached_tokens"],
-            "full_output_tokens": content["full_output_tokens"],
-            "full_reasoning_tokens": content["full_reasoning_tokens"],
-            "cost": content["cost"],
+            "full_input_tokens": agg.full_input_tokens,
+            "full_cached_tokens": agg.full_cached_tokens,
+            "full_output_tokens": agg.full_output_tokens,
+            "full_reasoning_tokens": agg.full_reasoning_tokens,
+            "cost": agg.cost,
         }),
     };
     queries::create_message(pool, &msg).await?;

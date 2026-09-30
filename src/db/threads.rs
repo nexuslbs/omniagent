@@ -936,6 +936,15 @@ pub async fn complete_thread(
                                      ELSE usage_agg.cached_tokens END,
                 output_tokens = CASE WHEN :output_tokens > 0 THEN :output_tokens
                                      ELSE usage_agg.output_tokens END,
+                full_input_tokens = CASE WHEN :full_input_tokens > 0 THEN :full_input_tokens
+                                         ELSE usage_agg.full_input_tokens END,
+                full_cached_tokens = CASE WHEN :full_cached_tokens > 0 THEN :full_cached_tokens
+                                          ELSE usage_agg.full_cached_tokens END,
+                full_output_tokens = CASE WHEN :full_output_tokens > 0 THEN :full_output_tokens
+                                          ELSE usage_agg.full_output_tokens END,
+                full_reasoning_tokens = CASE WHEN :full_reasoning_tokens > 0 THEN :full_reasoning_tokens
+                                             ELSE usage_agg.full_reasoning_tokens END,
+                cost = CASE WHEN :cost::float8 > 0 THEN :cost::float8 ELSE usage_agg.cost END,
                 duration_ms = GREATEST(
                     0,
                     :duration_ms,
@@ -953,12 +962,17 @@ pub async fn complete_thread(
                 SELECT
                     COALESCE(SUM(COALESCE((m.token_usage->>'prompt_tokens')::bigint, 0)), 0)::int AS input_tokens,
                     COALESCE(SUM(COALESCE((m.token_usage->>'cached_tokens')::bigint, 0)), 0)::int AS cached_tokens,
-                    COALESCE(SUM(COALESCE((m.token_usage->>'completion_tokens')::bigint, 0)), 0)::int AS output_tokens
+                    COALESCE(SUM(COALESCE((m.token_usage->>'completion_tokens')::bigint, 0)), 0)::int AS output_tokens,
+                    COALESCE(SUM(COALESCE((m.token_usage->>'full_input_tokens')::bigint, 0)), 0)::int AS full_input_tokens,
+                    COALESCE(SUM(COALESCE((m.token_usage->>'full_cached_tokens')::bigint, 0)), 0)::int AS full_cached_tokens,
+                    COALESCE(SUM(COALESCE((m.token_usage->>'full_output_tokens')::bigint, 0)), 0)::int AS full_output_tokens,
+                    COALESCE(SUM(COALESCE((m.token_usage->>'full_reasoning_tokens')::bigint, 0)), 0)::int AS full_reasoning_tokens,
+                    COALESCE(SUM(COALESCE((m.token_usage->>'cost')::double precision, 0)), 0)::double precision AS cost
                 FROM messages m
                 WHERE m.thread_id = :id AND m.msg_type <> 'error'
             ) usage_agg
             WHERE t.id = :id AND NOT t.terminal"#,
-        ( :status = status, :id = thread_id, :input_tokens = stats.input_tokens, :cached_tokens = stats.cached_tokens, :output_tokens = stats.output_tokens, :duration_ms = stats.duration_ms )
+        ( :status = status, :id = thread_id, :input_tokens = stats.input_tokens, :cached_tokens = stats.cached_tokens, :output_tokens = stats.output_tokens, :full_input_tokens = stats.full_input_tokens, :full_cached_tokens = stats.full_cached_tokens, :full_output_tokens = stats.full_output_tokens, :full_reasoning_tokens = stats.full_reasoning_tokens, :cost = stats.cost, :duration_ms = stats.duration_ms )
     )
     .execute(pool)
     .await?;
@@ -3037,6 +3051,11 @@ mod tests {
                 cached_tokens: 20 * i,
                 output_tokens: 50 * i,
                 duration_ms: 500 * i,
+                full_input_tokens: 0,
+                full_cached_tokens: 0,
+                full_output_tokens: 0,
+                full_reasoning_tokens: 0,
+                cost: 0.0,
             };
             update_thread_progress(&pool, thread_id, i, stats)
                 .await
@@ -3090,6 +3109,11 @@ mod tests {
             cached_tokens: 60,
             output_tokens: 150,
             duration_ms: 1500,
+            full_input_tokens: 0,
+            full_cached_tokens: 0,
+            full_output_tokens: 0,
+            full_reasoning_tokens: 0,
+            cost: 0.0,
         };
         complete_thread(&pool, thread_id, "completed", final_stats)
             .await
@@ -3191,6 +3215,11 @@ mod tests {
                 cached_tokens: 0,
                 output_tokens: 0,
                 duration_ms: 0,
+                full_input_tokens: 0,
+                full_cached_tokens: 0,
+                full_output_tokens: 0,
+                full_reasoning_tokens: 0,
+                cost: 0.0,
             },
         )
         .await
@@ -3314,6 +3343,11 @@ mod tests {
                 cached_tokens: 0,
                 output_tokens: 0,
                 duration_ms: 5000,
+                full_input_tokens: 0,
+                full_cached_tokens: 0,
+                full_output_tokens: 0,
+                full_reasoning_tokens: 0,
+                cost: 0.0,
             },
         )
         .await
@@ -3327,6 +3361,11 @@ mod tests {
                 cached_tokens: 0,
                 output_tokens: 0,
                 duration_ms: 0,
+                full_input_tokens: 0,
+                full_cached_tokens: 0,
+                full_output_tokens: 0,
+                full_reasoning_tokens: 0,
+                cost: 0.0,
             },
         )
         .await
@@ -3364,6 +3403,11 @@ mod tests {
                 cached_tokens: 0,
                 output_tokens: 0,
                 duration_ms: 0,
+                full_input_tokens: 0,
+                full_cached_tokens: 0,
+                full_output_tokens: 0,
+                full_reasoning_tokens: 0,
+                cost: 0.0,
             },
         )
         .await

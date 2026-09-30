@@ -228,6 +228,20 @@ pub struct CompleteThreadStats {
     pub output_tokens: i32,
     #[allow(dead_code)]
     pub duration_ms: i32,
+    /// Sum over the thread's usage array items, min-clamped against
+    /// `input_tokens` (threads table aggregate columns, v0.4.2).
+    #[allow(dead_code)]
+    pub full_input_tokens: i32,
+    #[allow(dead_code)]
+    pub full_cached_tokens: i32,
+    #[allow(dead_code)]
+    pub full_output_tokens: i32,
+    #[allow(dead_code)]
+    pub full_reasoning_tokens: i32,
+    /// Sum of `cost.amount_usd` over the usage array items (no bare
+    /// counterpart: the agent never estimates cost).
+    #[allow(dead_code)]
+    pub cost: f64,
 }
 
 /// Parameters for [`create_thread_with_cause`]. Collects all fields beyond

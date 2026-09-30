@@ -46,6 +46,11 @@ fn thread_progress_stats(
             .map(|u| u.completion_tokens as i32)
             .unwrap_or(0),
         duration_ms: start_time.elapsed().as_millis() as i32,
+        full_input_tokens: 0,
+        full_cached_tokens: 0,
+        full_output_tokens: 0,
+        full_reasoning_tokens: 0,
+        cost: 0.0,
     }
 }
 

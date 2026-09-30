@@ -98,6 +98,11 @@ pub async fn persist_or_abort(
                     cached_tokens: 0,
                     output_tokens: 0,
                     duration_ms: 0,
+                    full_input_tokens: 0,
+                    full_cached_tokens: 0,
+                    full_output_tokens: 0,
+                    full_reasoning_tokens: 0,
+                    cost: 0.0,
                 },
             )
             .await

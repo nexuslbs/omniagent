@@ -851,6 +851,34 @@ async fn create_tables(pool: &PgPool) -> Result<()> {
         .await
         .ok();
 
+    // ── Thread usage aggregate columns (v0.4.2) ──────────────────────────
+    // full_* and cost: sums over the thread's usage array items (tool-call
+    // `_meta.usage` + the omniagent's own LLM-call entries), min-clamped
+    // against the omniagent bare totals; populated at thread end exactly like
+    // input_tokens / cached_tokens / output_tokens are today.
+    sqlx::query("ALTER TABLE threads ADD COLUMN IF NOT EXISTS full_input_tokens INT DEFAULT 0;")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE threads ADD COLUMN IF NOT EXISTS full_cached_tokens INT DEFAULT 0;")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE threads ADD COLUMN IF NOT EXISTS full_output_tokens INT DEFAULT 0;")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query(
+        "ALTER TABLE threads ADD COLUMN IF NOT EXISTS full_reasoning_tokens INT DEFAULT 0;",
+    )
+    .execute(pool)
+    .await
+    .ok();
+    sqlx::query("ALTER TABLE threads ADD COLUMN IF NOT EXISTS cost DOUBLE PRECISION DEFAULT 0;")
+        .execute(pool)
+        .await
+        .ok();
+
     // ── Kanban dependencies ───────────────────────────────────────────────
     sqlx::query(
         r#"

@@ -78,6 +78,11 @@ pub(crate) async fn fail_thread(
             cached_tokens: 0,
             output_tokens: 0,
             duration_ms: helpers::elapsed_ms_since_start(thread),
+            full_input_tokens: 0,
+            full_cached_tokens: 0,
+            full_output_tokens: 0,
+            full_reasoning_tokens: 0,
+            cost: 0.0,
         },
     )
     .await
@@ -776,6 +781,11 @@ pub(crate) async fn fail_thread_tool(
             cached_tokens: 0,
             output_tokens: 0,
             duration_ms: helpers::elapsed_ms_since_start(thread),
+            full_input_tokens: 0,
+            full_cached_tokens: 0,
+            full_output_tokens: 0,
+            full_reasoning_tokens: 0,
+            cost: 0.0,
         },
     )
     .await

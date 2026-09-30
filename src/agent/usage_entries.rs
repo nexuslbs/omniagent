@@ -14,11 +14,14 @@
 //! 2. concatenates all `_meta.usage` items from all tool call results of the
 //!    thread into one array, plus the omniagent's own LLM-call entries;
 //! 3. inserts a "Usage"-type message at thread end (just before the last
-//!    message) carrying that array and aggregate fields (`full_input_tokens`,
-//!    `full_cached_tokens`, `full_output_tokens`, `full_reasoning_tokens`,
-//!    `cost`), each the sum over the array items, min-clamped against the
-//!    omniagent's own bare totals (e.g. `full_input_tokens =
-//!    min(input_tokens, sum_over_usage)`).
+//!    message) carrying ONLY that array (operator UPDATE 2026-09-30 threads
+//!    3705/3707/3709: no wrapper object, no "usage" key, no `full_*` keys);
+//! 4. the aggregate fields (`full_input_tokens`, `full_cached_tokens`,
+//!    `full_output_tokens`, `full_reasoning_tokens`, `cost`) are computed as
+//!    sums over the array items, min-clamped against the omniagent's own bare
+//!    totals (e.g. `full_input_tokens = min(input_tokens, sum_over_usage)`),
+//!    and written to the THREADS TABLE at thread end (operator UPDATE 3702) -
+//!    they never appear on the Usage message.
 //!
 //! RAW RESULTS ONLY: none of these fields are ever changed by agents - they
 //! are raw provider and tool results. Cost is never estimated by the agent
@@ -118,13 +121,16 @@ pub fn sum_usage_items(entries: &[Value]) -> UsageAggregates {
     agg
 }
 
-/// Aggregate fields for the thread-end Usage message, min-clamped against the
-/// omniagent's own bare totals (requirement 8): `full_input_tokens =
-/// min(input_tokens, sum_over_usage)` - the omniagent's recorded totals
-/// (threads.input_tokens etc., fed from `cumulative_usage`) are the
-/// authoritative billed numbers, and the array sum is never allowed to exceed
-/// them for the omniagent-only calculated fields. `cost` has no bare
-/// counterpart (the agent never estimates cost), so it is the plain sum.
+/// Aggregate fields for the THREADS TABLE (operator UPDATE 2026-09-30 thread
+/// 3702: the new fields are columns on the threads table, populated at thread
+/// end exactly like `input_tokens` / `cached_tokens` / `output_tokens` are
+/// today), min-clamped against the omniagent's own bare totals (requirement
+/// 8): `full_input_tokens = min(input_tokens, sum_over_usage)` - the
+/// omniagent's recorded totals (threads.input_tokens etc., fed from
+/// `cumulative_usage`) are the authoritative billed numbers, and the array
+/// sum is never allowed to exceed them for the omniagent-only calculated
+/// fields. `cost` has no bare counterpart (the agent never estimates cost),
+/// so it is the plain sum.
 pub fn aggregate_fields(entries: &[Value], cumulative: Option<&Usage>) -> UsageAggregates {
     let sum = sum_usage_items(entries);
     let Some(cum) = cumulative else {
@@ -143,19 +149,14 @@ pub fn aggregate_fields(entries: &[Value], cumulative: Option<&Usage>) -> UsageA
     }
 }
 
-/// Content of the thread-end "Usage"-type message: the concatenated usage
-/// array (all `_meta.usage` items in call order + the omniagent's own entries)
-/// plus the aggregate fields (default 0).
-pub fn usage_message_content(entries: &[Value], cumulative: Option<&Usage>) -> Value {
-    let agg = aggregate_fields(entries, cumulative);
-    json!({
-        "usage": entries,
-        "full_input_tokens": agg.full_input_tokens,
-        "full_cached_tokens": agg.full_cached_tokens,
-        "full_output_tokens": agg.full_output_tokens,
-        "full_reasoning_tokens": agg.full_reasoning_tokens,
-        "cost": agg.cost,
-    })
+/// Content of the thread-end "Usage"-type message: the usage ARRAY itself -
+/// all `_meta.usage` items in call order + the omniagent's own LLM-call
+/// entries (operator UPDATE 2026-09-30 thread 3709: "the message should be
+/// the array, and message type 'Usage'"). No wrapper object, no "usage" key,
+/// no `full_*` aggregate fields (those live on the threads table, see
+/// [`aggregate_fields`]).
+pub fn usage_message_content(entries: &[Value]) -> Value {
+    Value::Array(entries.to_vec())
 }
 
 #[cfg(test)]
@@ -305,17 +306,23 @@ mod tests {
     }
 
     #[test]
-    fn usage_message_content_carries_array_and_aggregate_fields() {
+    fn usage_message_content_is_the_array_itself() {
         let entries = json!([
-            {"agent": "dsh", "input_tokens": 10, "output_tokens": 2, "cost": {"amount_usd": 0.0005}}
+            {"agent": "dsh", "input_tokens": 10, "output_tokens": 2, "cost": {"amount_usd": 0.0005}},
+            {"omniagent": true, "input_tokens": 100, "output_tokens": 25}
         ]);
         let entries: Vec<Value> = serde_json::from_value(entries).unwrap();
-        let content = usage_message_content(&entries, None);
-        assert_eq!(content["usage"].as_array().unwrap().len(), 1);
-        assert_eq!(content["full_input_tokens"], 10);
-        assert_eq!(content["full_cached_tokens"], 0, "default 0");
-        assert_eq!(content["full_output_tokens"], 2);
-        assert_eq!(content["full_reasoning_tokens"], 0, "default 0");
-        assert!((content["cost"].as_f64().unwrap() - 0.0005).abs() < f64::EPSILON);
+        let content = usage_message_content(&entries);
+        let arr = content.as_array().expect("content is the array itself");
+        assert_eq!(arr.len(), 2, "all items in order");
+        assert_eq!(arr[0]["agent"], "dsh");
+        assert_eq!(arr[1]["omniagent"], true);
+        // No wrapper object: no "usage" key, no full_* aggregates.
+        assert!(content.get("usage").is_none());
+        assert!(content.get("full_input_tokens").is_none());
+        assert!(content.get("full_cached_tokens").is_none());
+        assert!(content.get("full_output_tokens").is_none());
+        assert!(content.get("full_reasoning_tokens").is_none());
+        assert!(content.get("cost").is_none());
     }
 }
