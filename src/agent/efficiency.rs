@@ -16,6 +16,12 @@
 //! name) plus the CANONICAL form of its arguments. The mechanism is therefore
 //! generic by construction: a tool the core has never seen participates on
 //! exactly the same terms, and an unknown invocation always EXECUTES.
+//! The identity is EXACT: same tool id + same canonical arguments. Any
+//! difference in the arguments (offset/limit windows, SQL parameter values,
+//! ...) is a DIFFERENT invocation and always executes. There is deliberately
+//! NO semantic or similarity-based duplicate detection (operator decision,
+//! telegram 3621, 2026-09-30): the 3605-style re-paged reads of the same file
+//! with varied windows are not duplicates and must never be blocked.
 //!
 //! A record is invalidated (the invocation executes normally again) by:
 //! - a SUCCESSFUL invocation whose tool's own registered descriptor says it
@@ -286,6 +292,60 @@ mod tests {
         assert_eq!(
             led.observe("zorp__other", "{\"a\":1}"),
             CallVerdict::Execute
+        );
+    }
+
+    /// Operator decision (telegram 3621, 2026-09-30): the ledger matches on
+    /// EXACT tool id + EXACT canonical arguments only. The 3605-style pattern
+    /// (same file re-read with varied offset/limit windows) is a set of
+    /// DIFFERENT invocations: every variation executes normally and is never
+    /// marked duplicate.
+    #[test]
+    fn re_paged_reads_with_different_windows_always_execute() {
+        let mut led = CallLedger::new();
+        let p1 = canonical_args(
+            "{\"path\":\"/opt/workspace/omniagent/src/agent/efficiency.rs\",\"offset\":0,\"limit\":50000}",
+        );
+        let p2 = canonical_args(
+            "{\"path\":\"/opt/workspace/omniagent/src/agent/efficiency.rs\",\"offset\":50000,\"limit\":50000}",
+        );
+        let p3 = canonical_args(
+            "{\"path\":\"/opt/workspace/omniagent/src/agent/efficiency.rs\",\"offset\":0,\"limit\":20000}",
+        );
+        led.record_executed(UNSEEN_TOOL, &p1, 1);
+        // exact replay of the same window is still a duplicate (unchanged)
+        assert_eq!(
+            led.observe(UNSEEN_TOOL, &p1),
+            CallVerdict::Duplicate { first_iter: 1 }
+        );
+        // any window difference (offset OR limit) executes normally
+        assert_eq!(led.observe(UNSEEN_TOOL, &p2), CallVerdict::Execute);
+        assert_eq!(led.observe(UNSEEN_TOOL, &p3), CallVerdict::Execute);
+        led.record_executed(UNSEEN_TOOL, &p2, 2);
+        led.record_executed(UNSEEN_TOOL, &p3, 3);
+        assert_eq!(led.duplicates(), 0);
+        assert_eq!(led.executions(), 3);
+    }
+
+    /// Canonicalization normalises key ORDER and whitespace, never VALUES: two
+    /// invocations whose argument VALUES differ have different canonical forms
+    /// and both execute. There is no semantic or similarity-based dedup
+    /// (operator decision 2026-09-30).
+    #[test]
+    fn canonicalization_never_collapses_differing_values() {
+        assert_ne!(
+            canonical_args("{\"offset\":0,\"limit\":1200}"),
+            canonical_args("{\"offset\":0,\"limit\":2000}")
+        );
+        assert_ne!(
+            canonical_args("{\"sql\":\"SELECT left(content, 1200) FROM messages\"}"),
+            canonical_args("{\"sql\":\"SELECT left(content, 2000) FROM messages\"}")
+        );
+        // same values in a different key order are the SAME canonical form
+        // (key order/whitespace cannot disguise an exact replay)
+        assert_eq!(
+            canonical_args("{\"offset\":0,\"limit\":1200}"),
+            canonical_args("{\"limit\":1200,\"offset\":0}")
         );
     }
 
