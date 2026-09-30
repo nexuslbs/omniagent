@@ -1951,7 +1951,12 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
             Err(e) => return Ok((format!("Failed to parse messages: {}", e), true)),
         };
 
-    // Threshold gate: compact ONLY when the hard budget is exceeded.
+    // Threshold gate: compact ONLY when the provider-fit hard budget is
+    // exceeded. With a billing baseline the gate is hard_budget - overhead
+    // (- headroom): the provider bills measured + overhead, so the raw
+    // measured size must sit BELOW the hard budget by the known overhead or
+    // the provider bills over and the overshoot error fires (chronic
+    // 279/24h). Without a baseline (first call) it is the raw hard budget.
     // The main loop calls this tool before EVERY LLM call, and the noop
     // test-tool-caller relies on the assistant tool_calls history to count
     // script steps and resolve ${step.field} placeholders. Compacting a tiny
@@ -2028,7 +2033,16 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
     // (279 error-level overshoots / 24h, 2026-09-20).
     let billed_prompt_tokens = args["billed_prompt_tokens"].as_u64().unwrap_or(0) as usize;
     let measured_tokens = args["measured_tokens"].as_u64().unwrap_or(0) as usize;
-    let over_billed = billed_prompt_tokens > hard_budget;
+    // A billing baseline exists when the core paired a provider-billed prompt
+    // token count with the plugin's measured size of the SAME request. The
+    // difference is the invisible overhead (tool schemas, chat template, the
+    // provider's own tokenizer, cached-token accounting) that the plugin's
+    // message-only measure cannot see. It is applied to the gate AND targets
+    // whenever a baseline exists - NOT only after an overshoot - so compaction
+    // fires BEFORE the provider bills over the hard budget. The chronic
+    // "condensation did not reduce it" error (279/24h on 2026-09-20) fired
+    // once per growth span because the gate compared the raw measured size
+    // against the hard budget while the provider billed measured + overhead.
     let overhead = if measured_tokens > 0 && billed_prompt_tokens > measured_tokens {
         // Clamp: a provider number can be a cumulative/aggregate total, and
         // tokenizers differ; never let the derived overhead drive the
@@ -2038,7 +2052,10 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
     } else {
         0
     };
-    let headroom = if over_billed {
+    // Headroom absorbs tokenizer drift and the per-iteration system injections
+    // the compaction gate cannot measure; applied whenever a billing baseline
+    // exists (the estimate comes from the PREVIOUS request, the next one drifts).
+    let headroom = if overhead > 0 {
         cfg.compact_headroom_tokens
     } else {
         0
@@ -2049,16 +2066,17 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
     let hard_target = hard_budget
         .saturating_sub(overhead)
         .saturating_sub(headroom);
-    // The size the provider needs: while it bills OVER the hard budget the
-    // unmeasurable overhead has to come out of our own measure as well.
-    let must_fit_target = if over_billed {
+    // The size the provider needs: whenever a billing baseline exists, the
+    // unmeasurable overhead has to come out of our own measure as well -
+    // otherwise the provider bills over while the plugin still sees "under".
+    let must_fit_target = if overhead > 0 {
         hard_target
     } else {
         hard_budget
     };
     // Progressive-drain target: the soft budget (the historical reduction
-    // target), tightened to `hard_target` while the provider is overshooting.
-    let reduce_target = if over_billed {
+    // target), tightened to `hard_target` whenever a billing baseline exists.
+    let reduce_target = if overhead > 0 {
         soft_budget.min(hard_target)
     } else {
         soft_budget
@@ -2068,7 +2086,7 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
     // must not disable the reduction).
     let effective_target = reduce_target.min(must_fit_target);
 
-    if force_compact || current_size > hard_budget {
+    if force_compact || current_size > must_fit_target {
         // Reduce to the effective target: compact, and if still over, keep
         // compacting with a progressively smaller keep_recent. Compaction
         // stops when size <= soft or there is nothing more to compact
@@ -3307,6 +3325,82 @@ mod token_counting_tests {
         assert!(
             tool_msg["content"].as_str().unwrap().chars().count() < 200_000,
             "retained tool result must be truncated"
+        );
+    }
+
+    // Chronic-overshoot regression (operator reopen 2026-09-30): the gate and
+    // targets must subtract the KNOWN provider overhead even when the previous
+    // call did NOT bill over the hard budget (over_billed=false). Before this
+    // fix the gate compared the raw measured size against the hard budget, so
+    // a prompt measuring in (hard - overhead, hard] was left UNTOUCHED while
+    // the provider billed measured + overhead > hard - the chronic
+    // "condensation did not reduce it" error fired once per growth span
+    // (279/24h). The overhead baseline (billed - measured from the previous
+    // call) must tighten the gate and targets immediately, not one overshoot
+    // later.
+    #[tokio::test]
+    async fn compaction_applies_known_overhead_to_gate_before_overshoot() {
+        let cfg = compact_cfg("");
+        let mut msgs = vec![ChatMessage {
+            role: "system".to_string(),
+            content: "SYSTEM PROMPT MUST SURVIVE".to_string(),
+            tool_call_id: None,
+            tool_calls: None,
+            name: None,
+        }];
+        // 3 tool turns x 20k chars = 60k chars = 15k proxy tokens: sits in
+        // (hard - overhead - headroom, hard] for hard=20k, overhead=5k.
+        for _ in 0..3 {
+            msgs.push(tool_call_msg("filesystem_read", "{}", "reading"));
+            msgs.push(tool_result("filesystem_read", &"X".repeat(20_000)));
+        }
+        msgs.push(user_msg("CURRENT USER TURN MUST SURVIVE"));
+        msgs.push(assistant_msg("working"));
+
+        let measured = measure_size(&msgs, "");
+        let hard = 20_000usize;
+        let soft = 10_000usize;
+        // Previous call: measured 10k, provider billed 15k (overhead 5k) -
+        // billed UNDER the hard budget, so over_billed=false, but the
+        // overhead baseline is real and must be applied to the gate.
+        let billed_prev = 15_000usize;
+        let measured_prev = 10_000usize;
+        assert!(
+            measured > hard - 5_000 - 2_000 && measured < hard,
+            "corpus must sit in (hard-overhead-headroom, hard]: measured={measured}"
+        );
+
+        let args = json!({
+            "messages": msgs
+                .iter()
+                .map(|m| serde_json::to_value(m).unwrap())
+                .collect::<Vec<_>>(),
+            "keep_recent": 3,
+            "soft_budget": soft,
+            "hard_budget": hard,
+            "billed_prompt_tokens": billed_prev,
+            "measured_tokens": measured_prev,
+        });
+        let (out, is_error) = handle_compact_messages(&args, &cfg).await.unwrap();
+        assert!(!is_error, "compaction must not error: {out}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        // overhead = 15k - 10k = 5k; headroom = 2k; target = 20k - 5k - 2k.
+        let truncate_target = v["truncate_target"].as_u64().unwrap();
+        assert_eq!(truncate_target, 13_000, "truncate target: {v}");
+        assert_eq!(
+            v["was_compacted"], true,
+            "known overhead must trigger compaction before the overshoot: {v}"
+        );
+        assert_eq!(v["over_budget"], false, "still over the target: {v}");
+        assert!(
+            v["measured_tokens"].as_u64().unwrap() <= truncate_target,
+            "{v}"
+        );
+        let arr = v["messages"].as_array().expect("messages applied");
+        assert_eq!(arr[0]["content"], "SYSTEM PROMPT MUST SURVIVE");
+        assert_eq!(
+            arr[arr.len() - 2]["content"],
+            "CURRENT USER TURN MUST SURVIVE"
         );
     }
 
