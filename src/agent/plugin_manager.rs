@@ -13,6 +13,16 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::mcp::{McpRegistry, McpTool};
 
+/// Global handle to the live plugin manager, set once at startup (main.rs).
+///
+/// Mirrors the `TASK_REGISTRY` global pattern: builtin core tools that need to
+/// invoke OTHER tools by name (e.g. `core__call_and_wait`) reach the live tool
+/// registry through this handle - a snapshot taken here is always the current
+/// registry, including tools added/removed by plugin reloads. `None` before
+/// startup completes; tool handlers must treat an absent handle as an error.
+pub static PLUGIN_MANAGER: std::sync::OnceLock<std::sync::Arc<dyn PluginManager>> =
+    std::sync::OnceLock::new();
+
 /// Plugin manager trait - single authority for all plugin lifecycle operations.
 ///
 /// Every call site in the server handlers, agent executor, and scheduler goes

@@ -48,6 +48,10 @@ pub const SYNC_CONTROL_TOOLS: &[&str] = &[
     "core__cancel_task",
     "core__read_task_logs",
     "core__wait_for_status",
+    // Call a tool + immediately wait for its background task in one call:
+    // must stay synchronous (it IS the wait - backgrounding it would return a
+    // NEW task id instead of the awaited result).
+    "core__call_and_wait",
     // Fast core coordination tools.
     "core__read_attached_file",
     "core__fail_thread",
@@ -151,6 +155,7 @@ mod tests {
             "cancel_task",
             "read_task_logs",
             "wait_for_status",
+            "call_and_wait",
             "read_attached_file",
             "fail_thread",
             "omniagent_api",

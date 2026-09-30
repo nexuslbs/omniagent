@@ -306,6 +306,10 @@ async fn run_server() -> AppResult<()> {
             external_clients.clone(),
             Some(pool.clone()), // resolves $secret:NAME refs in MCP plugin configs
         ));
+    // Expose the live plugin manager to builtin core tools that invoke other
+    // tools by name (core__call_and_wait snapshots the registry through this
+    // handle). Mirrors the TASK_REGISTRY global pattern.
+    let _ = crate::agent::plugin_manager::PLUGIN_MANAGER.set(plugin_manager.clone());
 
     // Supervised MCP liveness (2026-09-27): an external MCP server that dies at
     // runtime is detected by its client's child watchdog, logged with pid, exit

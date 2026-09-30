@@ -1256,6 +1256,47 @@ fn wait_task_tool() -> McpTool {
     }
 }
 
+/// Build the `call-and-wait` tool: call a tool with the given params and
+/// immediately wait for its background task in a SINGLE call (operator
+/// request 2026-09-30: "2 tool calls in 1"). The wrapped tool must be one the
+/// agent has permission to call directly; the `timeout` is forwarded to the
+/// wait on the wrapped tool's background task.
+fn call_and_wait_tool() -> McpTool {
+    McpTool {
+        name: tool_qualify(CORE_PLUGIN_NAME, "call_and_wait"),
+        description: "Call a tool with the given params and immediately wait for its result in a SINGLE call (2 tool calls in 1). Use for tasks you KNOW will take some time (long scripts, workstation delegation): instead of calling the tool, getting a task id, and then calling core__wait_task separately, this invokes the wrapped tool and returns its FINAL result when it finishes, or the timeout outcome if the timeout hits first - exactly as calling the tool and then core__wait_task would behave. The wrapped tool must be one you have permission to call directly: the same permission check as a direct call applies, and a disallowed tool is NOT invoked. Pass the fully qualified tool name in 'tool' (e.g. ssh__run, docker__compose), the exact params object in 'params', and a generous 'timeout' (seconds, default 900) for long operations.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tool": {
+                    "type": "string",
+                    "description": "The fully qualified name of the tool to call, e.g. ssh__run or docker__compose. The agent must have permission to call this tool directly."
+                },
+                "params": {
+                    "type": "object",
+                    "description": "The parameters object to pass to the wrapped tool (its own schema), e.g. {\"command\": \"sleep 30 && echo done\"} for a script. Pass {} for tools that take no params."
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Maximum seconds to wait for the wrapped tool to finish (default: 900), forwarded to the wait. The tool polls every 500ms and returns as soon as the task finishes, so a long value costs nothing for fast tasks. On timeout the in-flight call is torn down and a timeout status is returned. Use 900-1800 for Rust cargo builds or full dev-stack setup.",
+                    "default": 900
+                }
+            },
+            "required": ["tool", "params"]
+        }),
+        server_name: None,
+        // No declared timeout: like wait-task, the handler self-bounds by its
+        // own `timeout` argument and returns a timeout STATUS (not an error)
+        // when exceeded - an external kill clock would cut a legitimate wait
+        // short.
+        timeout_secs: None,
+        behavior: ToolBehavior::default(),
+        handler: std::sync::Arc::new(|args: Value, ctx: crate::mcp::AppContext| {
+            Box::pin(crate::mcp::task_tools::handle_call_and_wait(args, ctx))
+        }),
+    }
+}
+
 /// Build the `wait-for-status` tool: wait until a kanban task or thread
 /// reaches one of the target statuses (threads 1136/1146 incident: the agent
 /// had no status-change listener and burned 3x1h blind wait-task calls on a
@@ -1673,6 +1714,7 @@ pub async fn default_registry(ctx: &mut AppContext) -> McpRegistry {
     // TOOL tasks.)
     registry.register(poll_task_tool());
     registry.register(wait_task_tool());
+    registry.register(call_and_wait_tool());
     registry.register(wait_for_status_tool());
     registry.register(cancel_task_tool());
     registry.register(read_task_logs_tool());

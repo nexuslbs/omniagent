@@ -253,6 +253,176 @@ pub async fn handle_read_task_logs(args: Value, _ctx: AppContext) -> AppResult<M
     })
 }
 
+/// Handle the builtin `call-and-wait` tool: call a tool with the given params
+/// and immediately wait for its background task, in a SINGLE call (operator
+/// request 2026-09-30: "2 tool calls in 1").
+///
+/// Flow: (1) the agent must have permission to call the WRAPPED tool - the
+/// same check as if it called it directly (an agent without permission gets a
+/// permission error and the tool is NOT invoked); (2) the wrapped tool is
+/// executed with the params, bounded by the outer `timeout`; (3) if it returns
+/// a background task handle (`status=processing` + `task_id`), the core
+/// wait-task behavior is applied to that task id with the same timeout; (4) a
+/// completed result is returned immediately, and a timeout returns the
+/// timeout outcome the core wait task would return.
+pub async fn handle_call_and_wait(args: Value, ctx: AppContext) -> AppResult<McpToolResult> {
+    let tool_name = match get_wrapped_tool(&args) {
+        Some(name) => name,
+        None => {
+            return Ok(McpToolResult {
+                call_id: String::new(),
+                content: "Error: 'tool' parameter is required: the fully qualified name of the tool to call, e.g. ssh__run or docker__compose."
+                    .to_string(),
+                is_error: true,
+            });
+        }
+    };
+    let params = args.get("params").cloned().unwrap_or(serde_json::json!({}));
+    let timeout_secs = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(900);
+
+    // Snapshot the live registry through the global plugin-manager handle
+    // (the same registry the agent loop dispatches against, including plugin
+    // reloads). Absent handle = startup not finished: fail loudly.
+    let registry = crate::agent::plugin_manager::PLUGIN_MANAGER
+        .get()
+        .ok_or_else(|| {
+            crate::error::Error::Message(
+                "core__call_and_wait: plugin manager not initialized".to_string(),
+            )
+        })?
+        .snapshot_registry()
+        .await;
+
+    // MANDATORY permission check: the agent must have permission to call the
+    // WRAPPED tool, exactly as if it called it directly. Without this gate the
+    // toolset filter (which hides disallowed tools from the LLM) could be
+    // bypassed by routing a call through core__call_and_wait.
+    if !wrapped_tool_permitted(&registry, ctx.current_allowed_tools.as_deref(), &tool_name) {
+        return Ok(McpToolResult {
+            call_id: String::new(),
+            content: format!(
+                "Permission denied: '{}' is not in the effective allowed tools for this thread, so core__call_and_wait cannot invoke it. Call the tool directly if you believe it should be allowed.",
+                tool_name
+            ),
+            is_error: true,
+        });
+    }
+
+    if registry.get(&tool_name).is_none() {
+        return Ok(McpToolResult {
+            call_id: String::new(),
+            content: format!(
+                "Error: unknown tool '{}' - it is not registered in the current tool registry.",
+                tool_name
+            ),
+            is_error: true,
+        });
+    }
+
+    execute_call_and_wait(registry, tool_name, params, timeout_secs, ctx).await
+}
+
+/// The timeout-bounded execution core shared by `handle_call_and_wait` and the
+/// unit tests: run the wrapped tool, wait on a returned background task handle
+/// (status=processing) with the outer timeout, return completed results
+/// immediately and shape a timeout outcome like the core wait task's.
+async fn execute_call_and_wait(
+    registry: crate::mcp::McpRegistry,
+    tool_name: String,
+    params: Value,
+    timeout_secs: u64,
+    ctx: AppContext,
+) -> AppResult<McpToolResult> {
+    let call = crate::mcp::McpToolCall {
+        id: String::new(),
+        name: tool_name.clone(),
+        arguments: params,
+    };
+    let started = std::time::Instant::now();
+    let wrapped = tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        registry.execute(&call, ctx.clone()),
+    )
+    .await;
+
+    match wrapped {
+        Ok(Ok(res)) => {
+            // The wrapped tool returned a background task handle: wait on it
+            // with the timeout given in the outer call (the wait-task
+            // behavior, unchanged). A completed result is returned as-is.
+            if let Some(task_id) = processing_task_id(&res.content) {
+                return handle_wait_task(
+                    serde_json::json!({
+                        "task_id": task_id,
+                        "timeout_secs": timeout_secs,
+                    }),
+                    ctx,
+                )
+                .await;
+            }
+            Ok(res)
+        }
+        Ok(Err(e)) => Err(e),
+        Err(_) => {
+            // Timeout outcome, shaped like the core wait-task timeout: the
+            // in-flight call was torn down, so the agent knows the work did
+            // NOT continue in the background.
+            let elapsed = started.elapsed().as_secs_f64();
+            Ok(McpToolResult {
+                call_id: String::new(),
+                content: serde_json::json!({
+                    "status": "timeout",
+                    "tool": tool_name,
+                    "elapsed_secs": elapsed,
+                    "message": format!(
+                        "Tool '{}' still running after {}s timeout (the in-flight call was torn down)",
+                        tool_name, timeout_secs
+                    ),
+                })
+                .to_string(),
+                is_error: false,
+            })
+        }
+    }
+}
+
+/// The wrapped tool name from call-and-wait args (trimmed, non-empty).
+fn get_wrapped_tool(args: &Value) -> Option<String> {
+    args.get("tool")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Extract a background task id from a tool result that used the standard
+/// `status=processing` envelope; `None` for any completed/errored/non-JSON
+/// result (the common case: direct execution returns the final result).
+fn processing_task_id(content: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(content).ok()?;
+    if v.get("status").and_then(|s| s.as_str()) == Some("processing") {
+        v.get("task_id")
+            .and_then(|t| t.as_str())
+            .map(|s| s.to_string())
+    } else {
+        None
+    }
+}
+
+/// The permission gate for the wrapped tool: the agent must be permitted to
+/// call it directly. `None` (no restriction) permits everything; otherwise the
+/// registry's own allow-list logic (`McpRegistry::allowed`, the SAME logic the
+/// toolset filter applies) decides.
+fn wrapped_tool_permitted(
+    registry: &crate::mcp::McpRegistry,
+    allowed: Option<&[String]>,
+    tool_name: &str,
+) -> bool {
+    match allowed {
+        None => true,
+        Some(names) => registry.allowed(names).iter().any(|t| t.name == tool_name),
+    }
+}
+
 /// Handle the builtin `wait-for-status` tool: wait until a kanban task or
 /// thread reaches one of the target statuses (bounded by timeout_s). The
 /// waiting core is crate::status_wait (DB status observation); this handler
@@ -464,5 +634,270 @@ mod fail_thread_tests {
         assert_eq!(normalize_workflow_step(Some("tester")), "invalid");
         assert_eq!(normalize_workflow_step(Some("reviewer")), "invalid");
         assert_eq!(normalize_workflow_step(Some("bogus")), "invalid");
+    }
+}
+#[cfg(test)]
+mod call_and_wait_tests {
+    use super::*;
+    use crate::mcp::{McpRegistry, McpTool, ToolBehavior};
+    use serde_json::json;
+    use std::sync::Arc;
+
+    /// A lazy (never-connecting) test AppContext; the fake tools below never
+    /// touch the pool, so the connection is never attempted.
+    fn test_ctx(allowed: Option<Vec<String>>) -> AppContext {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://user:pass@127.0.0.1:1/none")
+            .expect("lazy pool");
+        let mut ctx = AppContext::new(
+            pool.clone(),
+            pool,
+            "/tmp",
+            std::collections::HashMap::new(),
+            Arc::new(crate::mcp::external::client::ExternalMcpClients::new()),
+        );
+        ctx.current_allowed_tools = allowed;
+        ctx
+    }
+
+    /// A fake tool whose handler sleeps `sleep_secs` and then returns
+    /// `output` verbatim. The plugin (server_name) is derived from the name
+    /// prefix so the tool passes the registry's exposed-name validation (a
+    /// `core` plugin is reserved and would be rejected).
+    fn fake_tool(name: &str, sleep_secs: u64, output: &'static str) -> McpTool {
+        let plugin = name
+            .split_once("__")
+            .map(|(p, _)| p.to_string())
+            .unwrap_or_else(|| "fake".to_string());
+        McpTool {
+            name: name.to_string(),
+            description: "fake test tool".to_string(),
+            input_schema: json!({"type": "object", "properties": {}}),
+            server_name: Some(plugin),
+            timeout_secs: None,
+            behavior: ToolBehavior::default(),
+            handler: Arc::new(move |_args: Value, _ctx: AppContext| {
+                let output = output.to_string();
+                Box::pin(async move {
+                    if sleep_secs > 0 {
+                        tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
+                    }
+                    Ok(McpToolResult {
+                        call_id: String::new(),
+                        content: output,
+                        is_error: false,
+                    })
+                })
+            }),
+        }
+    }
+
+    // ─── arg parsing ───
+
+    #[test]
+    fn get_wrapped_tool_parses_qualified_name() {
+        assert_eq!(
+            get_wrapped_tool(&json!({"tool": "ssh__run", "params": {}})),
+            Some("ssh__run".to_string())
+        );
+        assert_eq!(
+            get_wrapped_tool(&json!({"tool": "  docker__compose "})),
+            Some("docker__compose".to_string())
+        );
+    }
+
+    #[test]
+    fn get_wrapped_tool_rejects_missing_empty_non_string() {
+        assert_eq!(get_wrapped_tool(&json!({})), None);
+        assert_eq!(get_wrapped_tool(&json!({"tool": ""})), None);
+        assert_eq!(get_wrapped_tool(&json!({"tool": "  "})), None);
+        assert_eq!(get_wrapped_tool(&json!({"tool": 42})), None);
+    }
+
+    // ─── processing-envelope detection ───
+
+    #[test]
+    fn processing_task_id_detects_processing_envelope() {
+        assert_eq!(
+            processing_task_id(r#"{"status":"processing","task_id":"abc-123","tool":"ssh__run"}"#),
+            Some("abc-123".to_string())
+        );
+    }
+
+    #[test]
+    fn processing_task_id_returns_none_for_completed_or_non_json() {
+        assert_eq!(
+            processing_task_id(r#"{"status":"completed","task_id":"x"}"#),
+            None
+        );
+        assert_eq!(
+            processing_task_id(r#"{"status":"timeout","task_id":"x"}"#),
+            None
+        );
+        assert_eq!(processing_task_id("plain text output"), None);
+        assert_eq!(processing_task_id(""), None);
+    }
+
+    // ─── permission gate ───
+
+    #[test]
+    fn wrapped_tool_permitted_without_restriction() {
+        let registry = McpRegistry::new();
+        assert!(wrapped_tool_permitted(&registry, None, "ssh__run"));
+    }
+
+    #[test]
+    fn wrapped_tool_permitted_follows_the_allow_list() {
+        let mut registry = McpRegistry::new();
+        registry.register(fake_tool("ssh__run", 0, "ok"));
+        registry.register(fake_tool("docker__compose", 0, "ok"));
+        let allowed = vec!["ssh__run".to_string()];
+        assert!(wrapped_tool_permitted(
+            &registry,
+            Some(&allowed),
+            "ssh__run"
+        ));
+        assert!(!wrapped_tool_permitted(
+            &registry,
+            Some(&allowed),
+            "docker__compose"
+        ));
+        // Empty allow-list = no tool allowed.
+        assert!(!wrapped_tool_permitted(&registry, Some(&[]), "ssh__run"));
+    }
+
+    // ─── execution core ───
+
+    #[tokio::test]
+    async fn long_running_tool_returns_final_result_in_a_single_call() {
+        let mut registry = McpRegistry::new();
+        registry.register(fake_tool("slow_tool", 1, "FINAL-RESULT"));
+        let result = execute_call_and_wait(
+            registry,
+            "slow_tool".to_string(),
+            json!({}),
+            30,
+            test_ctx(None),
+        )
+        .await
+        .expect("call_and_wait should succeed");
+        assert!(
+            result.content.contains("FINAL-RESULT"),
+            "content: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("processing"),
+            "must not return the processing envelope"
+        );
+        assert!(!result.content.contains("timeout"));
+        assert!(!result.is_error);
+    }
+
+    #[tokio::test]
+    async fn fast_tool_returns_its_direct_result_immediately() {
+        let mut registry = McpRegistry::new();
+        registry.register(fake_tool("fast_tool", 0, "direct-done"));
+        let started = std::time::Instant::now();
+        let result = execute_call_and_wait(
+            registry,
+            "fast_tool".to_string(),
+            json!({}),
+            30,
+            test_ctx(None),
+        )
+        .await
+        .expect("call_and_wait should succeed");
+        assert_eq!(result.content, "direct-done");
+        assert!(started.elapsed().as_secs() < 5, "fast tool must not wait");
+    }
+
+    #[tokio::test]
+    async fn short_timeout_returns_the_timeout_outcome() {
+        let mut registry = McpRegistry::new();
+        registry.register(fake_tool("slow_tool", 30, "never"));
+        let started = std::time::Instant::now();
+        let result = execute_call_and_wait(
+            registry,
+            "slow_tool".to_string(),
+            json!({}),
+            1,
+            test_ctx(None),
+        )
+        .await
+        .expect("timeout is a status, not an error");
+        assert!(!result.is_error);
+        let v: Value = serde_json::from_str(&result.content).expect("timeout outcome is JSON");
+        assert_eq!(v["status"], "timeout");
+        assert_eq!(v["tool"], "slow_tool");
+        assert!(started.elapsed().as_secs_f64() >= 1.0);
+        assert!(
+            started.elapsed().as_secs() < 10,
+            "must return right after the timeout"
+        );
+    }
+
+    // ─── handler-level flow (permission gate + global registry) ───
+    // Single test so the PLUGIN_MANAGER global is set exactly once (OnceLock)
+    // and every scenario runs against the same shared registry.
+
+    #[tokio::test]
+    async fn handler_permission_gate_and_unknown_tool() {
+        let mut reg = McpRegistry::new();
+        reg.register(fake_tool("ssh__run", 0, "ssh-done"));
+        reg.register(fake_tool("docker__compose", 0, "docker-done"));
+        let pm: Arc<dyn crate::agent::plugin_manager::PluginManager> =
+            Arc::new(crate::agent::plugin_manager::LegacyPluginManager::new(
+                Arc::new(tokio::sync::RwLock::new(reg)),
+                Arc::new(crate::mcp::external::client::ExternalMcpClients::new()),
+                None,
+            ));
+        let _ = crate::agent::plugin_manager::PLUGIN_MANAGER.set(pm);
+
+        // Agent WITHOUT permission: permission error, tool NOT invoked.
+        let ctx = test_ctx(Some(vec!["docker__compose".to_string()]));
+        let result = handle_call_and_wait(
+            json!({"tool": "ssh__run", "params": {}, "timeout": 30}),
+            ctx,
+        )
+        .await
+        .expect("permission denial is a result, not an error");
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("Permission denied"),
+            "content: {}",
+            result.content
+        );
+        assert!(result.content.contains("ssh__run"));
+
+        // Agent WITH permission: succeeds.
+        let ctx = test_ctx(Some(vec!["ssh__run".to_string()]));
+        let result = handle_call_and_wait(
+            json!({"tool": "ssh__run", "params": {}, "timeout": 30}),
+            ctx,
+        )
+        .await
+        .expect("permitted call should succeed");
+        assert!(!result.is_error);
+        assert_eq!(result.content, "ssh-done");
+
+        // Unknown tool: clear error, nothing invoked.
+        let result =
+            handle_call_and_wait(json!({"tool": "nope__nope", "params": {}}), test_ctx(None))
+                .await
+                .expect("unknown tool is a result, not an error");
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("unknown tool"),
+            "content: {}",
+            result.content
+        );
+
+        // Missing tool param: clear error.
+        let result = handle_call_and_wait(json!({"params": {}}), test_ctx(None))
+            .await
+            .expect("missing tool is a result, not an error");
+        assert!(result.is_error);
+        assert!(result.content.contains("'tool' parameter is required"));
     }
 }
