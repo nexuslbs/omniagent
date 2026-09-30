@@ -736,6 +736,10 @@ pub(crate) async fn run_main_loop(
 ) -> AppResult<Message> {
     // Track cumulative token usage across all LLM calls
     let mut cumulative_usage: Option<crate::llm::Usage> = None;
+    // Thread-wide usage entries: every `_meta.usage` item collected from tool
+    // call results plus the omniagent's own LLM-call entries. Flows into the
+    // thread-end "Usage"-type message (see usage_entries module).
+    let mut usage_entries: Vec<serde_json::Value> = Vec::new();
     let mut force_failed: bool = false;
     let mut current_iter: i32;
 
@@ -906,6 +910,14 @@ Previous plan:\n{}",
             match per_thread_llm.completion(plan_request).await {
                 Ok(resp) => {
                     helpers::merge_usage(&mut cumulative_usage, resp.usage.clone());
+                    if let Some(ref u) = resp.usage {
+                        usage_entries.push(crate::agent::usage_entries::omniagent_usage_entry(
+                            u,
+                            &per_thread_llm.config.provider.0,
+                            &per_thread_llm.config.model,
+                            &thread.profile,
+                        ));
+                    }
                     // Live progress: persist intermediate usage stats after the
                     // planning LLM call so processing threads show live values.
                     if let Err(e) = queries::update_thread_progress(
@@ -2009,6 +2021,17 @@ Previous plan:\n{}",
 
         // Track cumulative token usage
         helpers::merge_usage(&mut cumulative_usage, response.usage.clone());
+        // The omniagent's own LLM call contributes a usage entry to the
+        // thread-end Usage message (omniagent: true + agent filled by the main
+        // loop, never by the provider).
+        if let Some(ref u) = response.usage {
+            usage_entries.push(crate::agent::usage_entries::omniagent_usage_entry(
+                u,
+                &per_thread_llm.config.provider.0,
+                &per_thread_llm.config.model,
+                &thread.profile,
+            ));
+        }
 
         // Compaction over-budget escalation: provider usage is ground truth. When
         // the billed context exceeds the effective hard budget, log loudly ONCE per
@@ -2689,6 +2712,7 @@ Previous plan:\n{}",
                         tool_name.clone(),
                         block_msg,
                         true, // is_error
+                        Vec::new(), // no usage entries
                     );
                 }
 
@@ -2794,15 +2818,24 @@ Previous plan:\n{}",
                     }
                 };
 
-                let (output, is_error) = match &result {
+                // Strip `_meta` from the tool result (it must never reach the
+                // agent context nor the stored thread messages) and collect its
+                // `_meta.usage` array items for the thread-end Usage message
+                // (operator request 2026-09-30).
+                let mut task_usage: Vec<serde_json::Value> = Vec::new();
+                let (output, is_error, task_usage) = match &result {
                     Ok(res) => {
+                        let stripped = crate::agent::usage_entries::strip_meta_and_collect(
+                            &res.content,
+                            &mut task_usage,
+                        );
                         // Tool-result spill: oversized results (> max_inline_chars)
                         // are persisted in full to a session-scoped spill file and
                         // replaced inline by a preview + locator so the model can
                         // recover the full output via filesystem_read. 0/off
                         // (max_inline_chars == 0) disables the cap: full result
                         // stays inline, no spill.
-                        if max_inline_chars > 0 && res.content.len() > max_inline_chars {
+                        if max_inline_chars > 0 && stripped.len() > max_inline_chars {
                             tracing::info!(
                                 thread_id = tid,
                                 knob = "max_inline_chars",
@@ -2811,21 +2844,25 @@ Previous plan:\n{}",
                                     "max_inline_chars"
                                 ),
                                 tool = %tool_name,
-                                content_chars = res.content.len(),
+                                content_chars = stripped.len(),
                                 "tool-output cap fired: spilling oversized tool result"
                             );
                         }
                         let spilled = spill_tool_result(
-                            &res.content,
+                            &stripped,
                             tid,
                             &tc_id,
                             &tool_name,
                             &spill_root,
                             max_inline_chars,
                         );
-                        (spilled.inline, false)
+                        (spilled.inline, false, task_usage)
                     }
-                    Err(e) => (format!("Error executing tool '{}': {}", tool_name, e), true),
+                    Err(e) => (
+                        format!("Error executing tool '{}': {}", tool_name, e),
+                        true,
+                        Vec::new(),
+                    ),
                 };
 
                 // For multi-tool calls: JSON with tool/input/output for disambiguation.
@@ -2882,7 +2919,7 @@ Previous plan:\n{}",
                     helpers::CreateMessageResult::Success(_) => {}
                 }
 
-                    (idx, tc_id, tool_name, output, is_error)
+                    (idx, tc_id, tool_name, output, is_error, task_usage)
                 })
                 .catch_unwind()
                 .await;
@@ -2900,7 +2937,7 @@ Previous plan:\n{}",
                             panic_tool_name, panic_message
                         );
                         error!("{}", output);
-                        (panic_idx, panic_tc_id, panic_tool_name, output, true)
+                        (panic_idx, panic_tc_id, panic_tool_name, output, true, Vec::new())
                     }
                 }
             });
@@ -2930,9 +2967,10 @@ Previous plan:\n{}",
         let mut tool_errors: Vec<bool> = vec![true; tool_count];
         while let Some(join_result) = join_set.join_next().await {
             match join_result {
-                Ok((idx, tc_id, tool_name, output, is_error)) => {
+                Ok((idx, tc_id, tool_name, output, is_error, task_usage)) => {
                     tool_errors[idx] = is_error;
                     tool_results[idx] = Some((tc_id, tool_name, output));
+                    usage_entries.extend(task_usage);
                 }
                 Err(e) => {
                     // The per-tool catch_unwind above should make this
@@ -3199,6 +3237,7 @@ Review the tool results above to see what was attempted and what remains."
         *next_seq,
         start_time,
         &messages,
+        &mut usage_entries,
         &mut cumulative_usage,
         &mut force_failed,
         limit_reached,

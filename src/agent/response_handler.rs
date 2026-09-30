@@ -9,6 +9,7 @@ use crate::db::types as queries;
 use crate::db::types::{CompleteThreadStats, Message, MessageNew, Thread};
 use crate::error::AppResult;
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient, Usage};
+use sql_forge::sql_forge;
 use tracing::{info, warn};
 
 #[allow(clippy::too_many_arguments)]
@@ -20,6 +21,7 @@ pub(crate) async fn handle_response(
     next_seq: i32,
     start_time: std::time::Instant,
     messages: &[ChatMessage],
+    usage_entries: &mut Vec<serde_json::Value>,
     cumulative_usage: &mut Option<Usage>,
     force_failed: &mut bool,
     limit_reached: bool,
@@ -46,6 +48,21 @@ pub(crate) async fn handle_response(
             let saved = queries::get_last_message(&cfg.pool, thread.id)
                 .await?
                 .unwrap_or_else(|| cause_msg.clone());
+            // The fail-thread tool already persisted its Error-type last
+            // message: insert the thread-end Usage message just before it.
+            if let Err(e) = insert_thread_usage_message(
+                &cfg.pool,
+                thread.id,
+                usage_entries,
+                cumulative_usage.as_ref(),
+            )
+            .await
+            {
+                warn!(
+                    "[usage] Failed to insert thread-end usage message for thread {}: {:?}",
+                    thread.id, e
+                );
+            }
             return Ok(saved);
         }
     }
@@ -117,6 +134,14 @@ pub(crate) async fn handle_response(
             .await
         {
             Ok(resp) => {
+                if let Some(ref u) = resp.usage {
+                    usage_entries.push(crate::agent::usage_entries::omniagent_usage_entry(
+                        u,
+                        &per_thread_llm.config.provider.0,
+                        &per_thread_llm.config.model,
+                        &thread.profile,
+                    ));
+                }
                 let usage = resp.usage.clone();
                 helpers::merge_usage(cumulative_usage, resp.usage);
                 let tokens = usage.as_ref().map(|u| {
@@ -233,6 +258,14 @@ pub(crate) async fn handle_response(
             let (mut summary_text, _summary_token_usage) =
                 match per_thread_llm.completion(summary_request).await {
                     Ok(resp) => {
+                        if let Some(ref u) = resp.usage {
+                            usage_entries.push(crate::agent::usage_entries::omniagent_usage_entry(
+                                u,
+                                &per_thread_llm.config.provider.0,
+                                &per_thread_llm.config.model,
+                                &thread.profile,
+                            ));
+                        }
                         let tokens = resp
                             .usage
                             .as_ref()
@@ -434,6 +467,24 @@ pub(crate) async fn handle_response(
     // Recompute final status after post-loop enforcement
     let final_status = post_loop_final_status(*force_failed, limit_reached);
 
+    // Thread-end Usage message: insert just before the thread's last message,
+    // carrying the concatenated usage array (all `_meta.usage` items from tool
+    // call results in call order + the omniagent's own LLM-call entries) plus
+    // the aggregate fields (full_*, cost, default 0).
+    if let Err(e) = insert_thread_usage_message(
+        &cfg.pool,
+        thread.id,
+        usage_entries,
+        cumulative_usage.as_ref(),
+    )
+    .await
+    {
+        warn!(
+            "[usage] Failed to insert thread-end usage message for thread {}: {:?}",
+            thread.id, e
+        );
+    }
+
     helpers::finalize_thread(
         &cfg.ctx,
         &cfg.pool,
@@ -466,6 +517,67 @@ pub(crate) async fn handle_response(
     crate::agent::summary_trigger::trigger_summary_and_cleanup(cfg, thread).await;
 
     Ok(saved)
+}
+
+/// Insert the thread-end "Usage"-type message just before the thread's last
+/// message.
+///
+/// The message carries the concatenated usage array (all `_meta.usage` items
+/// from tool call results in call order + the omniagent's own LLM-call
+/// entries) plus the aggregate fields (`full_input_tokens`,
+/// `full_cached_tokens`, `full_output_tokens`, `full_reasoning_tokens`,
+/// `cost`, default 0) - see [`crate::agent::usage_entries`].
+///
+/// Placement: the last message's `thread_sequence` is bumped by one and the
+/// Usage message takes the freed slot, so it ends up immediately before the
+/// thread's final message. Skipped when the thread has no usage entries or no
+/// messages at all.
+async fn insert_thread_usage_message(
+    pool: &sqlx::PgPool,
+    thread_id: i64,
+    entries: &[serde_json::Value],
+    cumulative_usage: Option<&Usage>,
+) -> AppResult<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let max_seq = crate::db::threads::get_max_thread_sequence(pool, thread_id).await?;
+    if max_seq == 0 {
+        return Ok(());
+    }
+    sql_forge!(
+        r#"UPDATE messages SET thread_sequence = thread_sequence + 1
+           WHERE thread_id = :thread_id AND thread_sequence = :seq"#,
+        ( :thread_id = thread_id, :seq = max_seq )
+    )
+    .execute(pool)
+    .await?;
+    let content = crate::agent::usage_entries::usage_message_content(entries, cumulative_usage);
+    let msg = MessageNew {
+        thread_id,
+        role: "agent".to_string(),
+        content: serde_json::to_string(&content).unwrap_or_else(|_| "{}".to_string()),
+        thread_sequence: max_seq,
+        external_id: None,
+        metadata: serde_json::json!({ "is_usage": true }),
+        embedding: None,
+        summary_text: None,
+        is_summary: false,
+        original_thread_id: None,
+        msg_type: "usage".to_string(),
+        msg_subtype: None,
+        iteration_number: 0,
+        duration_ms: 0,
+        token_usage: serde_json::json!({
+            "full_input_tokens": content["full_input_tokens"],
+            "full_cached_tokens": content["full_cached_tokens"],
+            "full_output_tokens": content["full_output_tokens"],
+            "full_reasoning_tokens": content["full_reasoning_tokens"],
+            "cost": content["cost"],
+        }),
+    };
+    queries::create_message(pool, &msg).await?;
+    Ok(())
 }
 
 /// Final thread status after the executor loop (pure, unit-tested).

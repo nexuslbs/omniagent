@@ -33,6 +33,7 @@ pub mod task_registry;
 pub(crate) mod terminal_summary;
 pub mod token_usage;
 pub(crate) mod tool_result_pruner;
+pub(crate) mod usage_entries;
 
 use parking_lot::RwLock;
 use sql_forge::sql_forge;
