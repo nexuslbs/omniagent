@@ -330,7 +330,7 @@ async fn get_recent_channel_operator_messages(
     before_thread_id: i64,
     limit: i64,
 ) -> Result<Vec<ChannelOperatorMessage>> {
-    let rows = sql_forge!(
+    let mut rows = sql_forge!(
         ChannelOperatorMessage,
         r#"
         SELECT t.id AS thread_id, m.content AS content
@@ -352,6 +352,13 @@ async fn get_recent_channel_operator_messages(
     .await
     .context("Failed to fetch channel operator messages")?;
 
+    // The SQL selects the most recent `limit` rows (DESC) so the window keeps
+    // the NEWEST prompts; the block is then rendered oldest-first so it reads
+    // chronologically and matches its own "newest last" label. The Python twin
+    // (omni-plugins tools/prompt/server.py) does `rows.reverse()` for exactly
+    // the same reason: both implementations of this parity-pinned block must
+    // emit the same order.
+    rows.reverse();
     Ok(rows)
 }
 
@@ -2671,21 +2678,28 @@ mod tests {
             2,
             "expected the 2 prior prompts of this channel: {ops:?}"
         );
+        // Order is pinned to OLDEST FIRST / newest last, matching the block's
+        // own header label and the Python twin (`rows.reverse()  # oldest
+        // first` in omni-plugins tools/prompt/server.py). The two
+        // implementations of this parity-pinned block must not diverge.
         assert_eq!(
-            ops[0].thread_id, t_long,
-            "newest prior thread must come first"
+            ops[0].thread_id, t_first,
+            "oldest prior thread must come first (newest last)"
+        );
+        assert_eq!(ops[0].content, "OPERATOR FIRST MESSAGE");
+        assert_eq!(
+            ops[1].thread_id, t_long,
+            "the newest prior thread must come last"
         );
         assert_eq!(
-            ops[0].content, long_prompt,
+            ops[1].content, long_prompt,
             "operator words must be verbatim"
         );
         assert!(
-            ops[0].content.len() > 400,
+            ops[1].content.len() > 400,
             "prompt truncated below the old 400-char cap (len={})",
-            ops[0].content.len()
+            ops[1].content.len()
         );
-        assert_eq!(ops[1].thread_id, t_first);
-        assert_eq!(ops[1].content, "OPERATOR FIRST MESSAGE");
         assert!(
             !ops.iter().any(|o| o.thread_id == t_current),
             "the current thread must not appear in the prior-thread block"
@@ -2711,7 +2725,8 @@ mod tests {
 
         // Evidence cases, verbatim operator words (telegram channel).
         let case_3737 = "What are the token usages and cost of thread 353 in omnidev project?";
-        let case_3738 = "Look again. I said omnidev project. Should have 62 messages in the thread.";
+        let case_3738 =
+            "Look again. I said omnidev project. Should have 62 messages in the thread.";
         let case_3745 = "No, I said before, the results I got in the dashboard are: 0 NULL NULL NULL NULL 353 NULL completed";
 
         let _t1 = seed_ctx_thread(&pool, &channel, case_3737).await;
@@ -2793,9 +2808,24 @@ mod tests {
         assert!(!missing(case_3738), "case 3738 operator words missing");
         assert!(!missing(case_3745), "case 3745 operator words missing");
 
+        // Parity/order pin (review finding 1): the injected channel-operator
+        // block must read OLDEST FIRST / newest last, i.e. the three prior
+        // operator prompts appear in chronological order, matching the block's
+        // own "newest last" header and the Python twin
+        // (omni-plugins tools/prompt/server.py: `rows.reverse()  # oldest first`).
+        let (i_3737, i_3738, i_3745) = (
+            prompt.find(case_3737).expect("case 3737 present"),
+            prompt.find(case_3738).expect("case 3738 present"),
+            prompt.find(case_3745).expect("case 3745 present"),
+        );
+        assert!(
+            i_3737 < i_3738 && i_3738 < i_3745,
+            "channel-operator block must render oldest-first/newest-last \
+             (3737@{i_3737} 3738@{i_3738} 3745@{i_3745})"
+        );
+
         drop_ctx_rows(&pool, &[t_cur, _t1, _t2, _t3]).await;
     }
-
 
     #[tokio::test]
     #[ignore = "requires a live DATABASE_URL"]
