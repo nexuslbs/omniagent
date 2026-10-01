@@ -142,6 +142,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     create_vector_support(pool).await?;
     create_search_support(pool).await?;
     create_triggers(pool).await?;
+    backfill_thread_end_usage_messages(pool).await?;
     migrate_channels_to_yml(pool).await?;
     assert_retention_regression_guards(pool).await?;
 
@@ -1458,6 +1459,36 @@ async fn create_triggers(pool: &PgPool) -> Result<()> {
                 RAISE EXCEPTION 'messages is append-only. Deletion of messages is not permitted.';
             END IF;
 
+            -- Scoped exception (thread-end usage message, 2026-10-01): the
+            -- "Usage"-type message inserted at thread end must land as the
+            -- thread's 2nd-last message, so the current last message's
+            -- thread_sequence is shifted by one and the Usage message takes
+            -- the freed slot. The shift is allowed ONLY while the session
+            -- variable omniagent.allow_message_seq_shift is 'on' (set inside
+            -- the usage-message transaction; see insert_thread_usage_message
+            -- in response_handler.rs) AND the ONLY change is
+            -- thread_sequence = OLD.thread_sequence + 1. Everything else
+            -- keeps the append-only guard intact.
+            IF current_setting('omniagent.allow_message_seq_shift', true) = 'on' THEN
+                IF NEW.id = OLD.id
+                   AND NEW.thread_sequence = OLD.thread_sequence + 1
+                   AND NEW.role IS NOT DISTINCT FROM OLD.role
+                   AND NEW.content IS NOT DISTINCT FROM OLD.content
+                   AND NEW.thread_id IS NOT DISTINCT FROM OLD.thread_id
+                   AND NEW.external_id IS NOT DISTINCT FROM OLD.external_id
+                   AND NEW.metadata IS NOT DISTINCT FROM OLD.metadata
+                   AND NEW.embedding_vec IS NOT DISTINCT FROM OLD.embedding_vec
+                   AND NEW.embedding IS NOT DISTINCT FROM OLD.embedding
+                   AND NEW.summary_text IS NOT DISTINCT FROM OLD.summary_text
+                   AND NEW.is_summary IS NOT DISTINCT FROM OLD.is_summary
+                   AND NEW.msg_type IS NOT DISTINCT FROM OLD.msg_type
+                   AND NEW.msg_subtype IS NOT DISTINCT FROM OLD.msg_subtype
+                   AND NEW.iteration_number IS NOT DISTINCT FROM OLD.iteration_number
+                THEN
+                    RETURN NEW;
+                END IF;
+            END IF;
+
             -- Allow UPDATE if only embedding_vec changed (vectorizer)
             IF NEW.embedding_vec IS DISTINCT FROM OLD.embedding_vec THEN
                 IF NEW.id = OLD.id
@@ -1546,6 +1577,87 @@ async fn create_triggers(pool: &PgPool) -> Result<()> {
     .await?;
 
     tracing::info!("[migration] Append-only trigger created on messages");
+    Ok(())
+}
+
+/// Backfill (2026-10-01): insert the thread-end "Usage"-type message for
+/// every thread that terminated Completed/Interrupted/Failed before the
+/// runtime insertion existed (or while it silently failed), so the invariant
+/// "every terminated non-skipped thread has a msg_type='usage' message as its
+/// 2nd-last message" holds across the whole DB.
+///
+/// The per-call usage array was never persisted for those threads, so the
+/// content is synthesized from the threads-table bare totals (the omniagent's
+/// own LLM usage, the only data recoverable) as a single entry; threads with
+/// zero recorded usage get an empty array. Idempotent: threads that already
+/// carry a msg_type='usage' message, and Skipped/Merged threads, are
+/// untouched. Uses the same scoped trigger exception as the runtime insertion
+/// (`omniagent.allow_message_seq_shift`, see `prevent_message_mutation`).
+async fn backfill_thread_end_usage_messages(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        DO $$
+        DECLARE
+            t RECORD;
+            max_seq INT;
+            content TEXT;
+        BEGIN
+            PERFORM set_config('omniagent.allow_message_seq_shift', 'on', true);
+            FOR t IN
+                SELECT th.id, th.profile, th.input_tokens, th.cached_tokens, th.output_tokens
+                FROM threads th
+                WHERE th.status IN ('completed', 'interrupted', 'failed')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM messages m
+                      WHERE m.thread_id = th.id AND m.msg_type = 'usage'
+                  )
+            LOOP
+                SELECT COALESCE(MAX(thread_sequence), 0) INTO max_seq
+                FROM messages WHERE thread_id = t.id;
+                IF max_seq = 0 THEN
+                    CONTINUE;
+                END IF;
+                UPDATE messages SET thread_sequence = thread_sequence + 1
+                WHERE thread_id = t.id AND thread_sequence = max_seq;
+                IF COALESCE(t.input_tokens, 0) > 0 OR COALESCE(t.output_tokens, 0) > 0
+                   OR COALESCE(t.cached_tokens, 0) > 0 THEN
+                    content := jsonb_build_array(jsonb_build_object(
+                        'omniagent', true,
+                        'agent', COALESCE(t.profile, 'omni'),
+                        'input_tokens', COALESCE(t.input_tokens, 0),
+                        'output_tokens', COALESCE(t.output_tokens, 0),
+                        'total_tokens', COALESCE(t.input_tokens, 0) + COALESCE(t.output_tokens, 0),
+                        'cached_input_tokens', COALESCE(t.cached_tokens, 0),
+                        'cache_write_tokens', NULL,
+                        'reasoning_tokens', 0,
+                        'cost', NULL,
+                        'provider', NULL,
+                        'model', NULL
+                    ))::text;
+                ELSE
+                    content := '[]';
+                END IF;
+                INSERT INTO messages (
+                    thread_id, role, content, thread_sequence, external_id,
+                    metadata, summary_text, is_summary,
+                    msg_type, msg_subtype, iteration_number, duration_ms,
+                    token_usage, channel_id
+                )
+                VALUES (
+                    t.id, 'agent', content, max_seq, NULL,
+                    '{"is_usage": true}'::jsonb, NULL, false,
+                    'usage', NULL, 0, 0, '{}'::jsonb,
+                    (SELECT channel_id FROM threads WHERE id = t.id)
+                );
+            END LOOP;
+        END $$;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    tracing::info!(
+        "[migration] Backfilled thread-end Usage messages for terminated non-skipped threads"
+    );
     Ok(())
 }
 

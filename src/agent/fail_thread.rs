@@ -59,6 +59,21 @@ pub(crate) async fn fail_thread(
 
     let saved = queries::create_message(&cfg.pool, &err_msg).await?;
 
+    // Thread-end Usage message (operator UPDATE 2026-10-01): every terminated
+    // non-skipped thread carries it as its 2nd-last message. This early
+    // failure path never ran the loop, so the entries are empty (the message
+    // content is the empty array).
+    if let Err(e) =
+        crate::agent::response_handler::insert_thread_usage_message(&cfg.pool, thread.id, &[], None)
+            .await
+    {
+        tracing::warn!(
+            "[usage] Failed to insert thread-end usage message for thread {}: {:?}",
+            thread.id,
+            e
+        );
+    }
+
     // Fetch the channel for reaction delivery; finalize_thread resolves a
     // REAL cause-message target and enqueues the status reaction.
     let channel = queries::get_channel_by_id(&cfg.pool, &thread.channel_id)

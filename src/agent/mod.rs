@@ -835,6 +835,18 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                             if let Err(e) = queries::create_message(&cfg.pool, &err_msg).await {
                                 tracing::warn!("[supervisor] Failed to create no-cause error msg for thread {}: {:?}", thread.id, e);
                             }
+                            // Thread-end Usage message (operator UPDATE 2026-10-01): every
+                            // terminated non-skipped thread carries it as its 2nd-last message.
+                            if let Err(e) = crate::agent::response_handler::insert_thread_usage_message(
+                                &cfg.pool, thread.id, &[], None,
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    "[usage] Failed to insert thread-end usage message for thread {}: {:?}",
+                                    thread.id, e
+                                );
+                            }
                             // Mark thread as failed
                             let channel = crate::db::channels::get_channel_by_id(&cfg.pool, &thread.channel_id).await.ok().flatten();
                             if let Err(e) = crate::agent::helpers::finalize_thread(&cfg.ctx, &cfg.pool, thread.id, None, channel.as_ref(), "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: crate::agent::helpers::elapsed_ms_since_start(thread), full_input_tokens: 0, full_cached_tokens: 0, full_output_tokens: 0, full_reasoning_tokens: 0, cost: 0.0 }).await {
@@ -867,6 +879,18 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                             };
                             if let Err(e) = queries::create_message(&cfg.pool, &err_msg).await {
                                 tracing::warn!("[supervisor] Failed to create error msg for thread {}: {:?}", thread.id, e);
+                            }
+                            // Thread-end Usage message (operator UPDATE 2026-10-01): every
+                            // terminated non-skipped thread carries it as its 2nd-last message.
+                            if let Err(e) = crate::agent::response_handler::insert_thread_usage_message(
+                                &cfg.pool, thread.id, &[], None,
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    "[usage] Failed to insert thread-end usage message for thread {}: {:?}",
+                                    thread.id, e
+                                );
                             }
                             let channel = crate::db::channels::get_channel_by_id(&cfg.pool, &thread.channel_id).await.ok().flatten();
                             if let Err(e) = crate::agent::helpers::finalize_thread(&cfg.ctx, &cfg.pool, thread.id, None, channel.as_ref(), "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: crate::agent::helpers::elapsed_ms_since_start(thread), full_input_tokens: 0, full_cached_tokens: 0, full_output_tokens: 0, full_reasoning_tokens: 0, cost: 0.0 }).await {
@@ -977,6 +1001,18 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                                                 };
                         if let Err(e) = queries::create_message(&cfg.pool, &err_msg).await {
                             tracing::warn!("[supervisor] Failed to create error msg for failed thread {}: {:?}", thread.id, e);
+                        }
+                        // Thread-end Usage message (operator UPDATE 2026-10-01): every
+                        // terminated non-skipped thread carries it as its 2nd-last message.
+                        if let Err(e) = crate::agent::response_handler::insert_thread_usage_message(
+                            &cfg.pool, thread.id, &[], None,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                "[usage] Failed to insert thread-end usage message for thread {}: {:?}",
+                                thread.id, e
+                            );
                         }
                         // Mark thread as failed
                         let channel = crate::db::channels::get_channel_by_id(&cfg.pool, &thread.channel_id).await.ok().flatten();

@@ -547,28 +547,27 @@ pub(crate) async fn handle_response(
 ///
 /// Placement: the last message's `thread_sequence` is bumped by one and the
 /// Usage message takes the freed slot, so it ends up immediately before the
-/// thread's final message. Skipped when the thread has no usage entries or no
-/// messages at all.
-async fn insert_thread_usage_message(
+/// thread's final message.
+///
+/// The append-only trigger (`prevent_message_mutation`, db-migrations)
+/// forbids changing `thread_sequence` on existing rows, so the bump runs
+/// inside a transaction that sets the scoped session variable
+/// `omniagent.allow_message_seq_shift` - the trigger permits the seq shift
+/// ONLY while that variable is set (incident 2026-10-01: without it the
+/// UPDATE raised P0001, the caller only warn-logged, and no Usage message was
+/// ever inserted on any thread). Skipped when the thread has no messages at
+/// all (max_seq == 0); a thread with no usage entries still gets the message
+/// with an empty array, so every terminated non-skipped thread carries it.
+pub(crate) async fn insert_thread_usage_message(
     pool: &sqlx::PgPool,
     thread_id: i64,
     entries: &[serde_json::Value],
     cumulative_usage: Option<&Usage>,
 ) -> AppResult<()> {
-    if entries.is_empty() {
-        return Ok(());
-    }
     let max_seq = crate::db::threads::get_max_thread_sequence(pool, thread_id).await?;
     if max_seq == 0 {
         return Ok(());
     }
-    sql_forge!(
-        r#"UPDATE messages SET thread_sequence = thread_sequence + 1
-           WHERE thread_id = :thread_id AND thread_sequence = :seq"#,
-        ( :thread_id = thread_id, :seq = max_seq )
-    )
-    .execute(pool)
-    .await?;
     // The message content is the usage ARRAY itself (operator UPDATE 3709);
     // the aggregates ride in the message's token_usage metadata, which
     // complete_thread's fallback aggregation reads when the live stats are
@@ -598,7 +597,38 @@ async fn insert_thread_usage_message(
             "cost": agg.cost,
         }),
     };
-    queries::create_message(pool, &msg).await?;
+    let metadata_val: serde_json::Value =
+        serde_json::from_str(&msg.metadata.to_string()).unwrap_or_default();
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET LOCAL omniagent.allow_message_seq_shift = 'on'")
+        .execute(&mut *tx)
+        .await?;
+    sql_forge!(
+        r#"UPDATE messages SET thread_sequence = thread_sequence + 1
+           WHERE thread_id = :thread_id AND thread_sequence = :seq"#,
+        ( :thread_id = thread_id, :seq = max_seq )
+    )
+    .execute(&mut *tx)
+    .await?;
+    // Inlined create_message INSERT (no new_message hook: the Usage message
+    // is internal bookkeeping, never delivered to the platform).
+    sql_forge!(
+        r#"INSERT INTO messages (
+            thread_id, role, content, thread_sequence, external_id,
+            metadata, embedding, summary_text, is_summary,
+            msg_type, msg_subtype, original_thread_id, iteration_number,
+            duration_ms, token_usage, channel_id
+        )
+        VALUES (:thread_id, :role, :content, :thread_sequence, NULLIF(:external_id, '')::text,
+            :metadata, NULLIF(:embedding, '')::text, NULLIF(:summary_text, '')::text, :is_summary,
+            :msg_type, NULLIF(:msg_subtype, '')::text, NULLIF(:original_thread_id, -1::bigint)::bigint, :iteration_number,
+            :duration_ms, COALESCE(NULLIF(:token_usage, '')::jsonb, '{}'::jsonb),
+            (SELECT channel_id FROM threads WHERE id = :thread_id))"#,
+        ( :thread_id = msg.thread_id, :role = &msg.role, :content = &msg.content, :thread_sequence = msg.thread_sequence, :external_id = msg.external_id.as_deref().unwrap_or(""), :metadata = &metadata_val, :embedding = msg.embedding.as_deref().unwrap_or(""), :summary_text = msg.summary_text.as_deref().unwrap_or(""), :is_summary = msg.is_summary, :msg_type = &msg.msg_type, :msg_subtype = msg.msg_subtype.as_deref().unwrap_or(""), :original_thread_id = msg.original_thread_id.unwrap_or(-1i64), :iteration_number = msg.iteration_number, :duration_ms = msg.duration_ms, :token_usage = &msg.token_usage.to_string() )
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 
