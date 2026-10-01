@@ -227,6 +227,12 @@ struct MessageRow {
 }
 
 #[derive(Debug, FromRow)]
+struct ChannelOperatorMessage {
+    thread_id: i64,
+    content: String,
+}
+
+#[derive(Debug, FromRow)]
 struct SummaryRow {
     id: i64,
     channel_id: String,
@@ -269,7 +275,8 @@ async fn get_thread_messages(pool: &PgPool, thread_id: i64, limit: i64) -> Resul
                COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS created_at
         FROM messages
         WHERE thread_id = :thread_id
-          AND (role = 'cause' OR msg_type IN ('message', 'reasoning'))
+          AND (role IN ('cause', 'sub_cause')
+               OR msg_type IN ('message', 'reasoning', 'summary'))
         ORDER BY created_at DESC
         LIMIT :limit
         "#,
@@ -281,6 +288,69 @@ async fn get_thread_messages(pool: &PgPool, thread_id: i64, limit: i64) -> Resul
     .fetch_all(pool)
     .await
     .context("Failed to fetch thread messages")?;
+
+    Ok(rows)
+}
+
+// ---------------------------------------------------------------------------
+// Conversation history selection (2026-10-01, task: omni profile "main" loses
+// operator statements 2-3 turns later).
+//
+// The OPERATOR-VISIBLE turns of a thread are:
+//   role 'cause'       = the operator prompt that opened the thread
+//   role 'sub_cause'   = an operator prompt merged into a RUNNING thread
+//   msg_type 'summary' = the agent's final answer (what the operator reads)
+//   msg_type 'message'/'reasoning' = intermediate agent text
+// Everything else is TOOL TRAFFIC ('tool', 'tool-result', 'multi-tool'), the
+// prompt dump ('prompt') or the internal plan ('plan') and must NOT be
+// selected: it would swamp the window with machine output.
+//
+// The previous filter `role = 'cause' OR msg_type IN ('message','reasoning')`
+// matched the cause plus ONE reasoning blob in a 73-message thread (thread
+// 3745), so the agent could not see ANY of its own previous answers or the
+// operator prompts merged into the thread: the rendered prompt carried a
+// 2-line "conversation" for a 73-message conversation.
+const CONVERSATION_MESSAGE_MAX_CHARS: usize = 1200;
+const CONVERSATION_HISTORY_MAX_CHARS: usize = 8000;
+// Verbatim operator prompts of the most recent OTHER threads of the channel.
+// A new operator message normally starts a NEW thread (the previous one is
+// terminal), so the current thread's own history holds only the new prompt;
+// without this the operator's earlier words reach the agent only through the
+// lossy, agent-generated channel summary.
+const CHANNEL_OPERATOR_MESSAGES_LIMIT: i64 = 5;
+const CHANNEL_OPERATOR_MESSAGE_MAX_CHARS: usize = 1200;
+
+/// Verbatim operator prompts from the most recent OTHER threads of the same
+/// channel (newest last). Purely additive context: it lets a follow-up thread
+/// answer from the operator's ACTUAL words instead of the paraphrased channel
+/// summary.
+async fn get_recent_channel_operator_messages(
+    pool: &PgPool,
+    channel_id: &str,
+    before_thread_id: i64,
+    limit: i64,
+) -> Result<Vec<ChannelOperatorMessage>> {
+    let rows = sql_forge!(
+        ChannelOperatorMessage,
+        r#"
+        SELECT t.id AS thread_id, m.content AS content
+        FROM messages m
+        JOIN threads t ON t.id = m.thread_id
+        WHERE t.channel_id = :channel_id
+          AND m.role = 'cause'
+          AND t.id < :before_thread_id
+        ORDER BY m.id DESC
+        LIMIT :limit
+        "#,
+        (
+            :channel_id = channel_id,
+            :before_thread_id = before_thread_id,
+            :limit = limit,
+        )
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch channel operator messages")?;
 
     Ok(rows)
 }
@@ -1406,17 +1476,27 @@ async fn handle_generate_full(
     // 2. Build context blocks (thread messages, summaries, skills)
     let mut context_blocks: Vec<String> = Vec::new();
 
-    // 2a. Recent thread messages
+    // 2a. Recent thread messages: the thread's own operator-visible turns
+    //     (cause/sub_cause prompts + the agent's summaries/messages/reasoning).
+    //     Newest turns first while the total budget lasts: a follow-up refers
+    //     to the recent turns, never to the beginning of the thread.
     if let Some(tid) = thread_id {
         match get_thread_messages(pool, tid, 10).await {
             Ok(msgs) if !msgs.is_empty() => {
-                let formatted: Vec<String> = msgs
-                    .iter()
-                    .rev()
-                    .map(|m| format!("[{}]: {}", m.role, truncate_str(&m.content, 400)))
-                    .collect();
+                let mut remaining = CONVERSATION_HISTORY_MAX_CHARS;
+                let mut formatted: Vec<String> = Vec::new();
+                for m in msgs.iter() {
+                    let text = truncate_str(&m.content, CONVERSATION_MESSAGE_MAX_CHARS);
+                    if !formatted.is_empty() && text.len() > remaining {
+                        break;
+                    }
+                    remaining = remaining.saturating_sub(text.len());
+                    formatted.push(format!("[{}]: {}", m.role, text));
+                }
+                formatted.reverse();
                 context_blocks.push(format!(
-                    "Recent conversation history (current thread):\n{}",
+                    "Recent conversation history (current thread, oldest first; each entry is \
+                     one operator-visible turn):\n{}",
                     formatted.join("\n")
                 ));
             }
@@ -1426,8 +1506,8 @@ async fn handle_generate_full(
     }
 
     // 2b. Latest summary and threads since
-    if let Some(cid) = channel_id {
-        match get_latest_summary(pool, &cid).await {
+    if let Some(ref cid) = channel_id {
+        match get_latest_summary(pool, cid).await {
             Ok(Some(summary)) => {
                 context_blocks.push(format!(
                     "Previous channel summary (covers threads up to id={}):\n{}",
@@ -1435,7 +1515,7 @@ async fn handle_generate_full(
                     truncate_str(&summary.content, 3000)
                 ));
 
-                match get_threads_since(pool, &cid, summary.next_thread_id, 5).await {
+                match get_threads_since(pool, cid, summary.next_thread_id, 5).await {
                     Ok(threads) if !threads.is_empty() => {
                         let thread_info: Vec<String> = threads
                             .iter()
@@ -1451,6 +1531,37 @@ async fn handle_generate_full(
             }
             Ok(None) => { /* no summary yet */ }
             Err(e) => tracing::warn!("Failed to get summary: {}", e),
+        }
+    }
+
+    // 2b-2. Verbatim operator prompts from the most recent other threads of
+    //       this channel. Operator statements made 2-3 messages ago normally
+    //       live in a PREVIOUS thread (each operator message opens its own
+    //       thread once the previous one is terminal); without this block they
+    //       reach the agent only as the lossy channel summary paraphrase.
+    if let (Some(cid), Some(tid)) = (channel_id.as_deref(), thread_id) {
+        match get_recent_channel_operator_messages(pool, cid, tid, CHANNEL_OPERATOR_MESSAGES_LIMIT)
+            .await
+        {
+            Ok(ops) if !ops.is_empty() => {
+                let lines: Vec<String> = ops
+                    .iter()
+                    .map(|o| {
+                        format!(
+                            "[Thread #{} operator]: {}",
+                            o.thread_id,
+                            truncate_str(&o.content, CHANNEL_OPERATOR_MESSAGE_MAX_CHARS)
+                        )
+                    })
+                    .collect();
+                context_blocks.push(format!(
+                    "Recent operator messages in this channel (VERBATIM operator words, threads \
+                     just before this one, newest last; when they disagree with the channel \
+                     summary above, THESE win):\n{}",
+                    lines.join("\n")
+                ));
+            }
+            _ => {}
         }
     }
 
