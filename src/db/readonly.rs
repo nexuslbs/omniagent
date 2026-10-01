@@ -394,6 +394,14 @@ fn decode_column_value(row: &sqlx::postgres::PgRow, i: usize) -> Value {
                 Value::String(s.to_string())
             } else if let Ok(n) = row.try_get::<i64, _>(i) {
                 serde_json::json!(n)
+            } else if let Ok(n) = row.try_get::<i32, _>(i) {
+                // PostgreSQL INT4 (integer). sqlx's i64 decoder accepts INT8
+                // only, so without this branch int4 columns silently decoded
+                // as NULL (regression reported 2026-10-01).
+                serde_json::json!(n)
+            } else if let Ok(n) = row.try_get::<i16, _>(i) {
+                // PostgreSQL INT2 (smallint); same i64-decoder limitation.
+                serde_json::json!(n)
             } else if let Ok(n) = row.try_get::<f64, _>(i) {
                 serde_json::json!(n)
             } else if let Ok(b) = row.try_get::<bool, _>(i) {
@@ -653,6 +661,19 @@ mod tests {
             vec!["zz".to_string(), "aa".to_string()],
             "columns must be in SELECT order, not alphabetical JSON key order"
         );
+
+        // int4 (integer) and int2 (smallint) columns must decode as JSON
+        // numbers: sqlx's i64 decoder accepts INT8 only, and the missing
+        // int4/int2 branches made those columns come back as NULL.
+        let ints = execute_readonly_query(
+            &pool,
+            "SELECT 353::int4 AS id, 823808::int4 AS cached, 7::int2 AS small",
+        )
+        .await
+        .expect("int decode SELECT must succeed");
+        assert_eq!(ints.rows[0]["id"], serde_json::json!(353));
+        assert_eq!(ints.rows[0]["cached"], serde_json::json!(823808));
+        assert_eq!(ints.rows[0]["small"], serde_json::json!(7));
 
         // Write attempt is rejected before touching the database.
         assert!(matches!(
