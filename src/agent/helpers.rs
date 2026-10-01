@@ -724,6 +724,12 @@ pub(crate) async fn finalize_thread(
     status: &str,
     stats: CompleteThreadStats,
 ) -> crate::error::AppResult<()> {
+    // Usage aggregates FIRST, unconditionally: `complete_thread` performs the
+    // terminal transition under `AND NOT t.terminal`, so on a thread the
+    // fail-thread tool already finalized mid-loop (before the thread-end usage
+    // entries existed) that write is a no-op and this one is the only write
+    // that lands (tester verdict thread 3861: Failed rows kept full_* = 0).
+    crate::db::threads::update_thread_usage_aggregates(pool, thread_id, &stats).await?;
     crate::db::threads::complete_thread(pool, thread_id, status, stats).await?;
     enqueue_status_reaction(ctx, pool, thread_id, cause_msg, channel, status).await;
     Ok(())

@@ -143,6 +143,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     create_search_support(pool).await?;
     create_triggers(pool).await?;
     backfill_thread_end_usage_messages(pool).await?;
+    backfill_terminal_thread_usage_aggregates(pool).await?;
     migrate_channels_to_yml(pool).await?;
     assert_retention_regression_guards(pool).await?;
 
@@ -1658,6 +1659,69 @@ async fn backfill_thread_end_usage_messages(pool: &PgPool) -> Result<()> {
     tracing::info!(
         "[migration] Backfilled thread-end Usage messages for terminated non-skipped threads"
     );
+    Ok(())
+}
+
+/// Backfill (2026-10-01, rework prompted by the tester verdict on thread 3861):
+/// populate the threads-table `full_*` / `cost` aggregate columns for terminal
+/// threads that still carry the pre-aggregate fallback (0).
+///
+/// Two classes of rows are covered: legacy threads whose Usage message was
+/// inserted by the backfill above, and threads finalized BEFORE the thread-end
+/// usage entries existed - the fail-thread tool finalized the row mid-loop, so
+/// the loop-exit aggregate write became a no-op against `complete_thread`'s
+/// `AND NOT t.terminal` guard (runtime fix: `update_thread_usage_aggregates`).
+///
+/// The sums come from the usage-message content (the usage ARRAY itself), since
+/// the backfilled messages carry no `token_usage` aggregates, and are
+/// min-clamped against the thread's bare totals exactly like the runtime
+/// `usage_entries::aggregate_fields` clamp. Migrations are declarative and run
+/// at every startup, so this is idempotent: a column that is already non-zero is
+/// left untouched, and Skipped/Merged threads are never touched.
+async fn backfill_terminal_thread_usage_aggregates(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE threads t
+        SET full_input_tokens = CASE WHEN COALESCE(t.full_input_tokens, 0) > 0 THEN t.full_input_tokens
+                                     ELSE LEAST(COALESCE(t.input_tokens, 0)::bigint, s.sum_input)::int END,
+            full_cached_tokens = CASE WHEN COALESCE(t.full_cached_tokens, 0) > 0 THEN t.full_cached_tokens
+                                      ELSE LEAST(COALESCE(t.cached_tokens, 0)::bigint, s.sum_cached)::int END,
+            full_output_tokens = CASE WHEN COALESCE(t.full_output_tokens, 0) > 0 THEN t.full_output_tokens
+                                      ELSE LEAST(COALESCE(t.output_tokens, 0)::bigint, s.sum_output)::int END,
+            full_reasoning_tokens = CASE WHEN COALESCE(t.full_reasoning_tokens, 0) > 0 THEN t.full_reasoning_tokens
+                                         ELSE s.sum_reasoning::int END,
+            cost = CASE WHEN COALESCE(t.cost, 0) > 0 THEN t.cost ELSE s.sum_cost END
+        FROM (
+            SELECT m.thread_id AS thread_id,
+                   COALESCE(SUM(CASE WHEN jsonb_typeof(e.item -> 'input_tokens') = 'number'
+                                     THEN (e.item ->> 'input_tokens')::bigint ELSE 0 END), 0) AS sum_input,
+                   COALESCE(SUM(CASE WHEN jsonb_typeof(e.item -> 'cached_input_tokens') = 'number'
+                                     THEN (e.item ->> 'cached_input_tokens')::bigint ELSE 0 END), 0) AS sum_cached,
+                   COALESCE(SUM(CASE WHEN jsonb_typeof(e.item -> 'output_tokens') = 'number'
+                                     THEN (e.item ->> 'output_tokens')::bigint ELSE 0 END), 0) AS sum_output,
+                   COALESCE(SUM(CASE WHEN jsonb_typeof(e.item -> 'reasoning_tokens') = 'number'
+                                     THEN (e.item ->> 'reasoning_tokens')::bigint ELSE 0 END), 0) AS sum_reasoning,
+                   COALESCE(SUM(CASE WHEN jsonb_typeof(e.item -> 'cost') = 'object'
+                                      AND jsonb_typeof((e.item -> 'cost') -> 'amount_usd') = 'number'
+                                     THEN ((e.item -> 'cost') ->> 'amount_usd')::double precision
+                                     ELSE 0 END), 0) AS sum_cost
+            FROM messages m
+            CROSS JOIN LATERAL jsonb_array_elements(
+                CASE WHEN m.content LIKE '[%' THEN m.content::jsonb ELSE '[]'::jsonb END
+            ) AS e(item)
+            WHERE m.msg_type = 'usage'
+            GROUP BY m.thread_id
+        ) s
+        WHERE t.id = s.thread_id
+          AND t.status IN ('completed', 'interrupted', 'failed')
+          AND (COALESCE(t.full_input_tokens, 0) = 0
+               OR COALESCE(t.full_cached_tokens, 0) = 0
+               OR COALESCE(t.full_output_tokens, 0) = 0)
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    tracing::info!("[migration] Backfilled threads-table usage aggregates for terminal threads");
     Ok(())
 }
 

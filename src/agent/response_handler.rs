@@ -63,6 +63,29 @@ pub(crate) async fn handle_response(
                     thread.id, e
                 );
             }
+            // This branch returns BEFORE the loop-exit aggregate write, and the
+            // fail-thread tool finalized the row mid-loop (terminal), so the
+            // threads-table usage aggregates must be written here directly
+            // (tester verdict thread 3861: Failed rows kept full_* = 0 while
+            // their usage array summed to non-zero; reproduced live on omnidev
+            // thread 478, ended 21:57:41Z with full_input_tokens = 0).
+            let usage_stats = thread_usage_stats(
+                usage_entries,
+                cumulative_usage.as_ref(),
+                start_time.elapsed().as_millis() as i32,
+            );
+            if let Err(e) = crate::db::threads::update_thread_usage_aggregates(
+                &cfg.pool,
+                thread.id,
+                &usage_stats,
+            )
+            .await
+            {
+                warn!(
+                    "[usage] Failed to write usage aggregates for failed thread {}: {:?}",
+                    thread.id, e
+                );
+            }
             return Ok(saved);
         }
     }
@@ -491,8 +514,8 @@ pub(crate) async fn handle_response(
     // the usage array items, min-clamped against the omniagent's own bare
     // totals (aggregate_fields does the clamp), populated at thread end exactly
     // like input_tokens / cached_tokens / output_tokens are today.
-    let usage_agg =
-        crate::agent::usage_entries::aggregate_fields(usage_entries, cumulative_usage.as_ref());
+    let usage_stats =
+        thread_usage_stats(usage_entries, cumulative_usage.as_ref(), agent_elapsed_ms);
 
     helpers::finalize_thread(
         &cfg.ctx,
@@ -501,26 +524,7 @@ pub(crate) async fn handle_response(
         Some(cause_msg),
         Some(channel),
         final_status,
-        CompleteThreadStats {
-            input_tokens: cumulative_usage
-                .as_ref()
-                .map(|u| u.prompt_tokens as i32)
-                .unwrap_or(0),
-            cached_tokens: cumulative_usage
-                .as_ref()
-                .map(|u| u.cached_tokens.unwrap_or(0) as i32)
-                .unwrap_or(0),
-            output_tokens: cumulative_usage
-                .as_ref()
-                .map(|u| u.completion_tokens as i32)
-                .unwrap_or(0),
-            duration_ms: agent_elapsed_ms,
-            full_input_tokens: usage_agg.full_input_tokens as i32,
-            full_cached_tokens: usage_agg.full_cached_tokens as i32,
-            full_output_tokens: usage_agg.full_output_tokens as i32,
-            full_reasoning_tokens: usage_agg.full_reasoning_tokens as i32,
-            cost: usage_agg.cost,
-        },
+        usage_stats,
     )
     .await?;
 
@@ -531,6 +535,39 @@ pub(crate) async fn handle_response(
     crate::agent::summary_trigger::trigger_summary_and_cleanup(cfg, thread).await;
 
     Ok(saved)
+}
+
+/// Threads-table usage stats for a terminating thread: the omniagent's own
+/// cumulative bare totals plus the `full_*` / `cost` aggregates over the
+/// collected usage array items (min-clamped, see
+/// [`crate::agent::usage_entries::aggregate_fields`]).
+///
+/// Shared by the loop-exit finalization and the early return of a thread the
+/// fail-thread tool already finalized (`complete_thread` is a no-op there, so
+/// the aggregates must be written explicitly).
+fn thread_usage_stats(
+    usage_entries: &[serde_json::Value],
+    cumulative_usage: Option<&Usage>,
+    duration_ms: i32,
+) -> CompleteThreadStats {
+    let agg = crate::agent::usage_entries::aggregate_fields(usage_entries, cumulative_usage);
+    CompleteThreadStats {
+        input_tokens: cumulative_usage
+            .map(|u| u.prompt_tokens as i32)
+            .unwrap_or(0),
+        cached_tokens: cumulative_usage
+            .map(|u| u.cached_tokens.unwrap_or(0) as i32)
+            .unwrap_or(0),
+        output_tokens: cumulative_usage
+            .map(|u| u.completion_tokens as i32)
+            .unwrap_or(0),
+        duration_ms,
+        full_input_tokens: agg.full_input_tokens as i32,
+        full_cached_tokens: agg.full_cached_tokens as i32,
+        full_output_tokens: agg.full_output_tokens as i32,
+        full_reasoning_tokens: agg.full_reasoning_tokens as i32,
+        cost: agg.cost,
+    }
 }
 
 /// Insert the thread-end "Usage"-type message just before the thread's last

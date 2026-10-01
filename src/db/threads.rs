@@ -987,6 +987,70 @@ pub async fn complete_thread(
     Ok(())
 }
 
+/// Write ONLY the thread's token-usage columns, unconditionally (terminal or
+/// not).
+///
+/// `complete_thread` performs the terminal transition and is guarded by
+/// `AND NOT t.terminal`, so a second completion on an already-terminal row is
+/// a no-op. The builtin fail-thread tool finalizes the row mid-loop, i.e.
+/// BEFORE the thread-end usage entries exist, so the loop-exit aggregate write
+/// hit that guard and the `full_*` / `cost` columns kept their pre-usage
+/// fallback (0) - the defect the tester found on omnidev thread 378
+/// (`full_input_tokens = 0` while the usage array summed to 62105 and the bare
+/// `input_tokens` was 62105; tester verdict thread 3861, gate 3).
+///
+/// `finalize_thread` calls this on every terminal path, so Completed /
+/// Interrupted / Failed threads all end with the aggregates over the usage
+/// array, min-clamped against the bare totals by the caller
+/// (`usage_entries::aggregate_fields`). Like `complete_thread` it falls back to
+/// summing the thread's `messages.token_usage` when the caller has no live
+/// stats, so fail/interrupt paths without live usage still persist real values.
+///
+/// It never touches `status`, `ended_at`, `iterations`, `terminal` or the
+/// lifecycle hooks.
+pub async fn update_thread_usage_aggregates(
+    pool: &PgPool,
+    thread_id: i64,
+    stats: &CompleteThreadStats,
+) -> AppResult<()> {
+    sql_forge!(
+        r#"        UPDATE threads t
+            SET input_tokens = CASE WHEN :input_tokens > 0 THEN :input_tokens
+                                    ELSE usage_agg.input_tokens END,
+                cached_tokens = CASE WHEN :cached_tokens > 0 THEN :cached_tokens
+                                     ELSE usage_agg.cached_tokens END,
+                output_tokens = CASE WHEN :output_tokens > 0 THEN :output_tokens
+                                     ELSE usage_agg.output_tokens END,
+                full_input_tokens = CASE WHEN :full_input_tokens > 0 THEN :full_input_tokens
+                                         ELSE usage_agg.full_input_tokens END,
+                full_cached_tokens = CASE WHEN :full_cached_tokens > 0 THEN :full_cached_tokens
+                                          ELSE usage_agg.full_cached_tokens END,
+                full_output_tokens = CASE WHEN :full_output_tokens > 0 THEN :full_output_tokens
+                                          ELSE usage_agg.full_output_tokens END,
+                full_reasoning_tokens = CASE WHEN :full_reasoning_tokens > 0 THEN :full_reasoning_tokens
+                                             ELSE usage_agg.full_reasoning_tokens END,
+                cost = CASE WHEN :cost::float8 > 0 THEN :cost::float8 ELSE usage_agg.cost END
+            FROM (
+                SELECT
+                    COALESCE(SUM(COALESCE((m.token_usage->>'prompt_tokens')::bigint, 0)), 0)::int AS input_tokens,
+                    COALESCE(SUM(COALESCE((m.token_usage->>'cached_tokens')::bigint, 0)), 0)::int AS cached_tokens,
+                    COALESCE(SUM(COALESCE((m.token_usage->>'completion_tokens')::bigint, 0)), 0)::int AS output_tokens,
+                    COALESCE(SUM(COALESCE((m.token_usage->>'full_input_tokens')::bigint, 0)), 0)::int AS full_input_tokens,
+                    COALESCE(SUM(COALESCE((m.token_usage->>'full_cached_tokens')::bigint, 0)), 0)::int AS full_cached_tokens,
+                    COALESCE(SUM(COALESCE((m.token_usage->>'full_output_tokens')::bigint, 0)), 0)::int AS full_output_tokens,
+                    COALESCE(SUM(COALESCE((m.token_usage->>'full_reasoning_tokens')::bigint, 0)), 0)::int AS full_reasoning_tokens,
+                    COALESCE(SUM(COALESCE((m.token_usage->>'cost')::double precision, 0)), 0)::double precision AS cost
+                FROM messages m
+                WHERE m.thread_id = :id AND m.msg_type <> 'error'
+            ) usage_agg
+            WHERE t.id = :id"#,
+        ( :id = thread_id, :input_tokens = stats.input_tokens, :cached_tokens = stats.cached_tokens, :output_tokens = stats.output_tokens, :full_input_tokens = stats.full_input_tokens, :full_cached_tokens = stats.full_cached_tokens, :full_output_tokens = stats.full_output_tokens, :full_reasoning_tokens = stats.full_reasoning_tokens, :cost = stats.cost )
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Aggregate the thread's real token usage from its messages' token_usage
 /// (prompt/cached/completion sums), excluding terminal error messages (which
 /// carry the same aggregate for message-level UI and must not be
@@ -3016,6 +3080,100 @@ mod tests {
             kanban_thread_content("Title", Some("Body")),
             "Title\n\nBody"
         );
+    }
+
+    #[tokio::test]
+    async fn usage_aggregates_land_on_already_terminal_failed_thread() {
+        // Regression (tester verdict thread 3861, gate 3): the fail-thread tool
+        // finalizes the row mid-loop, so the loop-exit aggregate write hit
+        // `complete_thread`'s `AND NOT t.terminal` guard and became a no-op -
+        // the failed thread kept full_input_tokens = 0 while its usage array
+        // summed to 62105. `update_thread_usage_aggregates` must land on an
+        // already-terminal row. DB-backed (dev DB only), skipped without
+        // DATABASE_URL; only touches a row it creates itself.
+        let Ok(db_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let _db_guard = crate::db::DB_TEST_LOCK.lock().await;
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect dev db");
+
+        let thread_id: i64 = sqlx::query_scalar(
+            "INSERT INTO threads (status, cause, channel_id, profile) \
+             VALUES ('processing', 'user', 'test-channel-usage-agg', 'test-profile') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("insert test thread");
+
+        // The thread's LLM call persisted its own token usage on a message.
+        sqlx::query(
+            "INSERT INTO messages (thread_id, thread_sequence, role, content, msg_type, token_usage) \
+             VALUES ($1, 1, 'agent', 'x', 'message', '{\"prompt_tokens\": 62105}'::jsonb)",
+        )
+        .bind(thread_id)
+        .execute(&pool)
+        .await
+        .expect("insert test message");
+
+        let zero_stats = CompleteThreadStats {
+            input_tokens: 0,
+            cached_tokens: 0,
+            output_tokens: 0,
+            duration_ms: 0,
+            full_input_tokens: 0,
+            full_cached_tokens: 0,
+            full_output_tokens: 0,
+            full_reasoning_tokens: 0,
+            cost: 0.0,
+        };
+        // Fail-thread tool: it finalizes the row FIRST (row becomes terminal).
+        complete_thread(&pool, thread_id, "failed", zero_stats)
+            .await
+            .expect("fail finalize must succeed");
+
+        // Loop exit: the usage aggregates arrive after the row is terminal.
+        let with_usage = CompleteThreadStats {
+            input_tokens: 62105,
+            cached_tokens: 0,
+            output_tokens: 0,
+            duration_ms: 0,
+            full_input_tokens: 62105,
+            full_cached_tokens: 0,
+            full_output_tokens: 0,
+            full_reasoning_tokens: 0,
+            cost: 0.0,
+        };
+        update_thread_usage_aggregates(&pool, thread_id, &with_usage)
+            .await
+            .expect("aggregate write must succeed");
+
+        let (status, terminal, full_input, input): (String, bool, i32, i32) = sqlx::query_as(
+            "SELECT status, terminal, full_input_tokens, input_tokens FROM threads WHERE id = $1",
+        )
+        .bind(thread_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch terminal row");
+
+        assert_eq!(status, "failed", "status must stay terminal-failed");
+        assert!(terminal, "row stays terminal");
+        assert_eq!(input, 62105, "bare totals unchanged");
+        assert_eq!(
+            full_input, 62105,
+            "aggregates must land on an already-terminal row"
+        );
+
+        // Best-effort cleanup: keep the shared dev DB free of test rows.
+        let _ = sqlx::query("DELETE FROM messages WHERE thread_id = $1")
+            .bind(thread_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM threads WHERE id = $1")
+            .bind(thread_id)
+            .execute(&pool)
+            .await;
     }
 
     #[tokio::test]
