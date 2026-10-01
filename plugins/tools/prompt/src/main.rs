@@ -2535,6 +2535,268 @@ mod tests {
         assert_eq!(extract_tracking_path("see data/tasks/"), None);
     }
 
+    // ---------------------------------------------------------------------
+    // Conversation-history context (2026-10-01 task: omni profile "main"
+    // loses operator statements 2-3 turns later). DB-backed: the selection
+    // is a SQL filter, plus the verbatim prior-thread operator query.
+    // ---------------------------------------------------------------------
+    async fn seed_ctx_thread(pool: &PgPool, channel: &str, prompt: &str) -> i64 {
+        let tid: i64 = sqlx::query_scalar(
+            "INSERT INTO threads (cause, channel_id, profile, status, terminal, template) \
+             VALUES ('user', $1, 'omni', 'processing', false, '') RETURNING id",
+        )
+        .bind(channel)
+        .fetch_one(pool)
+        .await
+        .expect("insert synthetic thread");
+        sqlx::query(
+            "INSERT INTO messages (role, content, thread_id, thread_sequence, msg_type) \
+             VALUES ('cause', $1, $2, 0, 'cause')",
+        )
+        .bind(prompt)
+        .bind(tid)
+        .execute(pool)
+        .await
+        .expect("insert synthetic cause message");
+        tid
+    }
+
+    async fn drop_ctx_rows(pool: &PgPool, tids: &[i64]) {
+        // messages carries an append-only trigger (prevent_message_mutation); it
+        // is disabled only for this dev-only cleanup and always re-enabled.
+        let _ = sqlx::query("ALTER TABLE messages DISABLE TRIGGER trg_messages_append_only")
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM messages WHERE thread_id = ANY($1)")
+            .bind(tids.to_vec())
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE messages ENABLE TRIGGER trg_messages_append_only")
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM threads WHERE id = ANY($1)")
+            .bind(tids.to_vec())
+            .execute(pool)
+            .await;
+    }
+
+    fn ctx_uniq(tag: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("tester-{tag}-{nanos}")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live DATABASE_URL"]
+    async fn prompt_ctx_selection_keeps_operator_turns() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let pool = connect_db(&url).await.expect("connect_db");
+        let channel = ctx_uniq("ctx-hist");
+        let tid = seed_ctx_thread(&pool, &channel, "CURRENT OPERATOR PROMPT").await;
+        let rows = [
+            ("sub_cause", "sub_cause", "MERGED OPERATOR PROMPT"),
+            ("agent", "summary", "AGENT FINAL ANSWER"),
+            ("agent", "reasoning", "AGENT REASONING"),
+            ("agent", "tool", "TOOL CALL TRAFFIC"),
+            ("agent", "tool-result", "TOOL RESULT TRAFFIC"),
+        ];
+        for (i, (role, msg_type, content)) in rows.iter().enumerate() {
+            let offset = (i as i32 + 1) * 10;
+            sqlx::query(
+                "INSERT INTO messages (role, content, thread_id, thread_sequence, msg_type, created_at) \
+                 VALUES ($1, $2, $3, $4, $5, now() + ($6::int * interval '1 millisecond'))",
+            )
+            .bind(role)
+            .bind(content)
+            .bind(tid)
+            .bind(i as i32 + 1)
+            .bind(msg_type)
+            .bind(offset)
+            .execute(&pool)
+            .await
+            .expect("insert synthetic message");
+        }
+
+        let msgs = get_thread_messages(&pool, tid, 10)
+            .await
+            .expect("get_thread_messages");
+        let selected: Vec<(String, String)> = msgs
+            .iter()
+            .map(|m| (m.role.clone(), m.msg_type.clone()))
+            .collect();
+        let has = |role: &str, ty: &str| selected.iter().any(|(r, t)| r == role && t == ty);
+        assert!(has("cause", "cause"), "thread cause missing: {selected:?}");
+        assert!(
+            has("sub_cause", "sub_cause"),
+            "operator prompt merged into the running thread missing: {selected:?}"
+        );
+        assert!(
+            has("agent", "summary"),
+            "agent's own final answer missing: {selected:?}"
+        );
+        assert!(
+            has("agent", "reasoning"),
+            "agent reasoning missing: {selected:?}"
+        );
+        assert!(
+            !selected
+                .iter()
+                .any(|(_, t)| t == "tool" || t == "tool-result"),
+            "tool traffic must not be selected: {selected:?}"
+        );
+
+        drop_ctx_rows(&pool, &[tid]).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live DATABASE_URL"]
+    async fn prompt_ctx_channel_operator_block_is_verbatim() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let pool = connect_db(&url).await.expect("connect_db");
+        let channel = ctx_uniq("ctx-ops");
+        let foreign = ctx_uniq("ctx-foreign");
+        let long_prompt = format!("OPERATOR FACT: {}", "z".repeat(600));
+        let t_first = seed_ctx_thread(&pool, &channel, "OPERATOR FIRST MESSAGE").await;
+        let t_long = seed_ctx_thread(&pool, &channel, &long_prompt).await;
+        let t_foreign = seed_ctx_thread(&pool, &foreign, "FOREIGN CHANNEL MESSAGE").await;
+        let t_current = seed_ctx_thread(&pool, &channel, "CURRENT THREAD PROMPT").await;
+
+        let ops = get_recent_channel_operator_messages(&pool, &channel, t_current, 5)
+            .await
+            .expect("get_recent_channel_operator_messages");
+        assert_eq!(
+            ops.len(),
+            2,
+            "expected the 2 prior prompts of this channel: {ops:?}"
+        );
+        assert_eq!(
+            ops[0].thread_id, t_long,
+            "newest prior thread must come first"
+        );
+        assert_eq!(
+            ops[0].content, long_prompt,
+            "operator words must be verbatim"
+        );
+        assert!(
+            ops[0].content.len() > 400,
+            "prompt truncated below the old 400-char cap (len={})",
+            ops[0].content.len()
+        );
+        assert_eq!(ops[1].thread_id, t_first);
+        assert_eq!(ops[1].content, "OPERATOR FIRST MESSAGE");
+        assert!(
+            !ops.iter().any(|o| o.thread_id == t_current),
+            "the current thread must not appear in the prior-thread block"
+        );
+        assert!(
+            !ops.iter().any(|o| o.thread_id == t_foreign),
+            "another channel's prompt leaked into the block"
+        );
+
+        drop_ctx_rows(&pool, &[t_first, t_long, t_foreign, t_current]).await;
+    }
+    /// Controlled multi-turn render (task gate 4+5): a statement made in an
+    /// earlier turn/thread must reach the model VERBATIM when it is referenced
+    /// 3-5 turns later. The prior-thread fixtures reuse the verbatim operator
+    /// texts of the evidence cases (telegram threads 3737/3738/3745) that
+    /// produced the wrong answers.
+    #[tokio::test]
+    #[ignore = "requires a live DATABASE_URL"]
+    async fn prompt_ctx_multiturn_render_keeps_earlier_operator_statements() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let pool = connect_db(&url).await.expect("connect_db");
+        let channel = ctx_uniq("ctx-e2e");
+
+        // Evidence cases, verbatim operator words (telegram channel).
+        let case_3737 = "What are the token usages and cost of thread 353 in omnidev project?";
+        let case_3738 = "Look again. I said omnidev project. Should have 62 messages in the thread.";
+        let case_3745 = "No, I said before, the results I got in the dashboard are: 0 NULL NULL NULL NULL 353 NULL completed";
+
+        let _t1 = seed_ctx_thread(&pool, &channel, case_3737).await;
+        let _t2 = seed_ctx_thread(&pool, &channel, case_3738).await;
+        let _t3 = seed_ctx_thread(&pool, &channel, case_3745).await;
+
+        // Thread under test: operator prompt, the agent's own turn, an operator
+        // message merged into the RUNNING thread (sub_cause), the agent's later
+        // answer - i.e. the earlier statement must still be visible here.
+        let t_cur = seed_ctx_thread(
+            &pool,
+            &channel,
+            "Create an omnidev task in backlog to verify why omni profile main stops understanding operator messages 2-3 turns later",
+        )
+        .await;
+        let turns = [
+            ("agent", "summary", "FIRST ANSWER IN CURRENT THREAD"),
+            (
+                "sub_cause",
+                "sub_cause",
+                "OPERATOR MERGED FOLLOW-UP: it is the omnidev project, use omnidev.env",
+            ),
+            ("agent", "summary", "SECOND ANSWER IN CURRENT THREAD"),
+        ];
+        for (i, (role, msg_type, content)) in turns.iter().enumerate() {
+            let offset = ((i + 1) * 10) as i32;
+            sqlx::query(
+                "INSERT INTO messages (role, content, thread_id, thread_sequence, msg_type, created_at) \
+                 VALUES ($1, $2, $3, $4, $5, now() + ($6::int * interval '1 millisecond'))",
+            )
+            .bind(role)
+            .bind(content)
+            .bind(t_cur)
+            .bind(i as i32 + 1)
+            .bind(msg_type)
+            .bind(offset)
+            .execute(&pool)
+            .await
+            .expect("insert synthetic turn");
+        }
+
+        let mut cfg = PluginConfig::default();
+        cfg.database_url = url.clone();
+        cfg.omni_dir = if std::path::Path::new("/opt/omni/profiles/omni").exists() {
+            "/opt/omni".to_string()
+        } else {
+            ctx_uniq("ctx-omni-dir")
+        };
+
+        let args = serde_json::json!({
+            "thread_id": t_cur,
+            "channel_id": channel,
+            "profile_name": "omni",
+            "tool_names": ["filesystem__read"],
+        });
+        let (prompt, _plan) = handle_generate_full(&pool, &args, None, &cfg)
+            .await
+            .expect("handle_generate_full");
+
+        let missing = |s: &str| !prompt.contains(s);
+        assert!(
+            !missing("FIRST ANSWER IN CURRENT THREAD"),
+            "the agent's own earlier turn is missing from the render"
+        );
+        assert!(
+            !missing("SECOND ANSWER IN CURRENT THREAD"),
+            "the agent's own previous answer is missing from the render"
+        );
+        assert!(
+            !missing("OPERATOR MERGED FOLLOW-UP"),
+            "an operator message merged into the running thread is missing from the render"
+        );
+        assert!(
+            !missing("Recent operator messages in this channel (VERBATIM"),
+            "the verbatim channel-operator block is missing from the render"
+        );
+        // Gate 5: the three evidence cases must be visible VERBATIM.
+        assert!(!missing(case_3737), "case 3737 operator words missing");
+        assert!(!missing(case_3738), "case 3738 operator words missing");
+        assert!(!missing(case_3745), "case 3745 operator words missing");
+
+        drop_ctx_rows(&pool, &[t_cur, _t1, _t2, _t3]).await;
+    }
+
+
     #[tokio::test]
     #[ignore = "requires a live DATABASE_URL"]
     async fn continuation_block_skipped_for_plain_thread() {
