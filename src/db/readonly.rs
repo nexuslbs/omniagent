@@ -168,6 +168,13 @@ impl std::fmt::Display for ReadOnlyQueryError {
 pub struct ReadOnlyQueryResult {
     pub rows: Vec<Value>,
     pub row_count: usize,
+    /// Result columns in STATEMENT order (sqlx `Row::columns()`, i.e. the
+    /// order the columns were written in the SELECT). The JSON row objects
+    /// themselves serialize their keys in ALPHABETICAL order (serde_json
+    /// without `preserve_order`), so consumers that must preserve the SELECT
+    /// order (the dashboard Database page result table) have to use this list
+    /// instead of `Object.keys(row)`.
+    pub columns: Vec<String>,
 }
 
 /// Strips SQL comments and string/identifier literals, replacing their contents
@@ -501,6 +508,13 @@ pub async fn execute_readonly_query(
         }
     };
 
+    // Column order of the statement (empty when the statement returned no row:
+    // then there is no row description to read).
+    let columns: Vec<String> = rows
+        .first()
+        .map(|row| row.columns().iter().map(|c| c.name().to_string()).collect())
+        .unwrap_or_default();
+
     let mut json_rows: Vec<Value> = Vec::new();
     for row in &rows {
         let mut map = serde_json::Map::new();
@@ -534,6 +548,7 @@ pub async fn execute_readonly_query(
     Ok(ReadOnlyQueryResult {
         rows: json_rows,
         row_count,
+        columns,
     })
 }
 
@@ -626,6 +641,18 @@ mod tests {
             .expect("read-only SELECT must succeed");
         assert_eq!(res.row_count, 1);
         assert!(res.rows[0].get("n").is_some());
+
+        // Column order follows the SELECT statement (sqlx row description),
+        // NOT the alphabetically sorted JSON keys of the row objects (the
+        // dashboard Database page renders its headers from this list).
+        let ordered = execute_readonly_query(&pool, "SELECT 1 AS zz, 2 AS aa")
+            .await
+            .expect("ordered SELECT must succeed");
+        assert_eq!(
+            ordered.columns,
+            vec!["zz".to_string(), "aa".to_string()],
+            "columns must be in SELECT order, not alphabetical JSON key order"
+        );
 
         // Write attempt is rejected before touching the database.
         assert!(matches!(

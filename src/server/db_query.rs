@@ -43,7 +43,10 @@ fn error_response(err: &ReadOnlyQueryError) -> (StatusCode, Json<Value>) {
 /// `POST /db/query` - run a read-only SQL statement against the agent database.
 ///
 /// Body: `{"sql": "SELECT ..."}` -> `{"success": true, "rows": [...],
-/// "row_count": N}`. The statement is guarded by
+/// "columns": [...], "row_count": N}` where `columns` is the result column
+/// list in STATEMENT order (sqlx `Row::columns()`); the row objects' JSON keys
+/// are alphabetical and MUST NOT be used to reconstruct the SELECT order. The
+/// statement is guarded by
 /// [`crate::db::readonly::execute_readonly_query`]: read-only transaction,
 /// SELECT/WITH only, write/DDL keywords rejected, 8 s statement timeout,
 /// 1000-row cap.
@@ -71,6 +74,7 @@ pub(crate) async fn db_query_handler(
             StatusCode::OK,
             Json(json!({
                 "success": true,
+                "columns": result.columns,
                 "rows": result.rows,
                 "row_count": result.row_count,
             })),
