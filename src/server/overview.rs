@@ -218,7 +218,7 @@ async fn overview_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
             LEFT(COALESCE(m.content, ''), 200) AS content_preview,
             COALESCE(t.status, 'unknown') AS status,
             t.duration_ms AS processing_time_ms,
-            (t.input_tokens + t.output_tokens) AS total_tokens,
+            (t.input_tokens + t.cached_tokens + t.output_tokens) AS total_tokens,
             COALESCE(t.created_at, NOW()) AS created_at,
             COALESCE(t.channel_id, 'unknown') AS channel_name,
             t.model,
@@ -341,9 +341,9 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
         r#"
         SELECT
             g::date::text AS day,
-            COALESCE(SUM(t.input_tokens + t.output_tokens), 0)::bigint AS tokens,
+            COALESCE(SUM(t.input_tokens + t.cached_tokens + t.output_tokens), 0)::bigint AS tokens,
             COALESCE(SUM(t.cached_tokens), 0)::bigint AS input_cache_hit,
-            COALESCE(SUM(GREATEST(t.input_tokens - t.cached_tokens, 0)), 0)::bigint AS input_cache_miss,
+            COALESCE(SUM(t.input_tokens), 0)::bigint AS input_cache_miss,
             COALESCE(SUM(t.output_tokens), 0)::bigint AS output_tokens
         FROM generate_series(
             (NOW() - INTERVAL '13 days')::date,
@@ -366,7 +366,7 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
             LEFT(COALESCE(m.content, ''), 200) AS content_preview,
             COALESCE(t.status, 'unknown') AS status,
             t.duration_ms AS processing_time_ms,
-            (t.input_tokens + t.output_tokens) AS total_tokens,
+            (t.input_tokens + t.cached_tokens + t.output_tokens) AS total_tokens,
             COALESCE(t.created_at, NOW()) AS created_at,
             COALESCE(t.channel_id, 'unknown') AS channel_name,
             t.model,

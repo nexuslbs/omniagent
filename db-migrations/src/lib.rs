@@ -880,6 +880,16 @@ async fn create_tables(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await
         .ok();
+    // `full_cost` (operator UPDATE 2026-10-02, telegram threads 3916/3917):
+    // `threads.cost` holds the OMNIAGENT-only cost and `full_cost` the FULL
+    // cost (omniagent + external/sub-agent dsh). Additive + defaulted, so no
+    // data migration is needed; new threads carry the split.
+    sqlx::query(
+        "ALTER TABLE threads ADD COLUMN IF NOT EXISTS full_cost DOUBLE PRECISION DEFAULT 0;",
+    )
+    .execute(pool)
+    .await
+    .ok();
 
     // ── Kanban dependencies ───────────────────────────────────────────────
     sqlx::query(
@@ -1675,32 +1685,62 @@ async fn backfill_thread_end_usage_messages(pool: &PgPool) -> Result<()> {
 /// The sums come from the usage-message content (the usage ARRAY itself), since
 /// the backfilled messages carry no `token_usage` aggregates, and are
 /// min-clamped against the thread's bare totals exactly like the runtime
-/// `usage_entries::aggregate_fields` clamp. Migrations are declarative and run
-/// at every startup, so this is idempotent: a column that is already non-zero is
-/// left untouched, and Skipped/Merged threads are never touched.
+/// `usage_entries::aggregate_fields` clamp.
+///
+/// SEMANTIC REWRITE (2026-10-02, operator threads 3915/3916/3917): the same
+/// backfill rewrites pre-change terminal rows onto the NEW column semantics -
+/// `input_tokens` = cache-MISS input only (was cache hit + miss), `cost` = the
+/// omniagent-only share (was the combined cost) and the new `full_cost` =
+/// omniagent + dsh. A row counts as pre-change while `full_cost = 0` (the
+/// column did not exist before and the write path always fills it). Migrations
+/// are declarative and run at every startup, so this is idempotent: once
+/// `full_cost > 0` the row is left untouched, and Skipped/Merged threads are
+/// never touched.
 async fn backfill_terminal_thread_usage_aggregates(pool: &PgPool) -> Result<()> {
     sqlx::query(
         r#"
         UPDATE threads t
-        SET full_input_tokens = CASE WHEN COALESCE(t.full_input_tokens, 0) > 0 THEN t.full_input_tokens
-                                     ELSE LEAST(COALESCE(t.input_tokens, 0)::bigint, s.sum_input)::int END,
-            full_cached_tokens = CASE WHEN COALESCE(t.full_cached_tokens, 0) > 0 THEN t.full_cached_tokens
-                                      ELSE LEAST(COALESCE(t.cached_tokens, 0)::bigint, s.sum_cached)::int END,
-            full_output_tokens = CASE WHEN COALESCE(t.full_output_tokens, 0) > 0 THEN t.full_output_tokens
-                                      ELSE LEAST(COALESCE(t.output_tokens, 0)::bigint, s.sum_output)::int END,
-            full_reasoning_tokens = CASE WHEN COALESCE(t.full_reasoning_tokens, 0) > 0 THEN t.full_reasoning_tokens
+        SET input_tokens = CASE WHEN COALESCE(t.full_cost, 0) = 0
+                                THEN LEAST(COALESCE(t.input_tokens, 0)::bigint, s.sum_omni_input)::int
+                                ELSE t.input_tokens END,
+            full_input_tokens = CASE WHEN COALESCE(t.full_cost, 0) > 0 THEN t.full_input_tokens
+                                     ELSE (s.sum_omni_input + s.sum_dsh_input)::int END,
+            full_cached_tokens = CASE WHEN COALESCE(t.full_cost, 0) > 0 THEN t.full_cached_tokens
+                                      ELSE s.sum_cached::int END,
+            full_output_tokens = CASE WHEN COALESCE(t.full_cost, 0) > 0 THEN t.full_output_tokens
+                                      ELSE s.sum_output::int END,
+            full_reasoning_tokens = CASE WHEN COALESCE(t.full_cost, 0) > 0 THEN t.full_reasoning_tokens
                                          ELSE s.sum_reasoning::int END,
-            cost = CASE WHEN COALESCE(t.cost, 0) > 0 THEN t.cost ELSE s.sum_cost END
+            cost = CASE WHEN COALESCE(t.full_cost, 0) > 0 THEN t.cost
+                        WHEN s.sum_omni_cost > 0 THEN s.sum_omni_cost
+                        ELSE t.cost END,
+            full_cost = CASE WHEN COALESCE(t.full_cost, 0) > 0 THEN t.full_cost
+                             WHEN s.sum_cost > 0 THEN s.sum_cost
+                             ELSE t.cost END
         FROM (
             SELECT m.thread_id AS thread_id,
-                   COALESCE(SUM(CASE WHEN jsonb_typeof(e.item -> 'input_tokens') = 'number'
-                                     THEN (e.item ->> 'input_tokens')::bigint ELSE 0 END), 0) AS sum_input,
+                   COALESCE(SUM(CASE WHEN COALESCE(e.item ->> 'omniagent', 'false') = 'true'
+                                     THEN GREATEST(
+                                         COALESCE(CASE WHEN jsonb_typeof(e.item -> 'input_tokens') = 'number'
+                                                       THEN (e.item ->> 'input_tokens')::bigint ELSE 0 END, 0)
+                                         - COALESCE(CASE WHEN jsonb_typeof(e.item -> 'cached_input_tokens') = 'number'
+                                                         THEN (e.item ->> 'cached_input_tokens')::bigint ELSE 0 END, 0), 0)
+                                     ELSE 0 END), 0) AS sum_omni_input,
+                   COALESCE(SUM(CASE WHEN COALESCE(e.item ->> 'omniagent', 'false') <> 'true'
+                                     THEN COALESCE(CASE WHEN jsonb_typeof(e.item -> 'input_tokens') = 'number'
+                                                       THEN (e.item ->> 'input_tokens')::bigint ELSE 0 END, 0)
+                                     ELSE 0 END), 0) AS sum_dsh_input,
                    COALESCE(SUM(CASE WHEN jsonb_typeof(e.item -> 'cached_input_tokens') = 'number'
                                      THEN (e.item ->> 'cached_input_tokens')::bigint ELSE 0 END), 0) AS sum_cached,
                    COALESCE(SUM(CASE WHEN jsonb_typeof(e.item -> 'output_tokens') = 'number'
                                      THEN (e.item ->> 'output_tokens')::bigint ELSE 0 END), 0) AS sum_output,
                    COALESCE(SUM(CASE WHEN jsonb_typeof(e.item -> 'reasoning_tokens') = 'number'
                                      THEN (e.item ->> 'reasoning_tokens')::bigint ELSE 0 END), 0) AS sum_reasoning,
+                   COALESCE(SUM(CASE WHEN COALESCE(e.item ->> 'omniagent', 'false') = 'true'
+                                      AND jsonb_typeof(e.item -> 'cost') = 'object'
+                                      AND jsonb_typeof((e.item -> 'cost') -> 'amount_usd') = 'number'
+                                     THEN ((e.item -> 'cost') ->> 'amount_usd')::double precision
+                                     ELSE 0 END), 0) AS sum_omni_cost,
                    COALESCE(SUM(CASE WHEN jsonb_typeof(e.item -> 'cost') = 'object'
                                       AND jsonb_typeof((e.item -> 'cost') -> 'amount_usd') = 'number'
                                      THEN ((e.item -> 'cost') ->> 'amount_usd')::double precision
@@ -1710,11 +1750,13 @@ async fn backfill_terminal_thread_usage_aggregates(pool: &PgPool) -> Result<()> 
                 CASE WHEN m.content LIKE '[%' THEN m.content::jsonb ELSE '[]'::jsonb END
             ) AS e(item)
             WHERE m.msg_type = 'usage'
+              AND COALESCE(e.item -> 'details' ->> 'kind', 'llm-call') = 'llm-call'
             GROUP BY m.thread_id
         ) s
         WHERE t.id = s.thread_id
           AND t.status IN ('completed', 'interrupted', 'failed')
-          AND (COALESCE(t.full_input_tokens, 0) = 0
+          AND (COALESCE(t.full_cost, 0) = 0
+               OR COALESCE(t.full_input_tokens, 0) = 0
                OR COALESCE(t.full_cached_tokens, 0) = 0
                OR COALESCE(t.full_output_tokens, 0) = 0)
         "#,

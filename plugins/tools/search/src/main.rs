@@ -1058,7 +1058,7 @@ async fn aggregate_metrics(
             t.profile,
             t.provider,
             t.model,
-            SUM(t.input_tokens)::bigint AS total_prompt_tokens,
+            SUM(t.input_tokens + COALESCE(t.cached_tokens, 0))::bigint AS total_prompt_tokens,
             SUM(t.output_tokens)::bigint AS total_completion_tokens,
             SUM(t.duration_ms)::bigint AS total_processing_ms,
             COUNT(*)::bigint AS message_count,

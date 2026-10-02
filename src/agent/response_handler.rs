@@ -589,8 +589,12 @@ fn thread_usage_stats(
 ) -> CompleteThreadStats {
     let agg = crate::agent::usage_entries::aggregate_fields(usage_entries, cumulative_usage);
     CompleteThreadStats {
+        // `threads.input_tokens` is the omniagent's CACHE-MISS input only
+        // (operator UPDATE 2026-10-02, telegram thread 3915: "input_tokens is
+        // only cache miss"); the provider's `prompt_tokens` is the TOTAL input
+        // with the cache hit included, so the hit is subtracted here.
         input_tokens: cumulative_usage
-            .map(|u| u.prompt_tokens as i32)
+            .map(|u| u.prompt_tokens.saturating_sub(u.cached_tokens.unwrap_or(0)) as i32)
             .unwrap_or(0),
         cached_tokens: cumulative_usage
             .map(|u| u.cached_tokens.unwrap_or(0) as i32)
@@ -603,7 +607,9 @@ fn thread_usage_stats(
         full_cached_tokens: agg.full_cached_tokens as i32,
         full_output_tokens: agg.full_output_tokens as i32,
         full_reasoning_tokens: agg.full_reasoning_tokens as i32,
-        cost: agg.cost,
+        // `cost` = omniagent-only, `full_cost` = omniagent + dsh (3916/3917).
+        cost: agg.omniagent_cost,
+        full_cost: agg.cost,
     }
 }
 
@@ -682,7 +688,8 @@ pub(crate) async fn insert_thread_usage_message_at(
             "full_cached_tokens": agg.full_cached_tokens,
             "full_output_tokens": agg.full_output_tokens,
             "full_reasoning_tokens": agg.full_reasoning_tokens,
-            "cost": agg.cost,
+            "cost": agg.omniagent_cost,
+            "full_cost": agg.cost,
         }),
     };
     let metadata_val: serde_json::Value =

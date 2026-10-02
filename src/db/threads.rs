@@ -945,6 +945,7 @@ pub async fn complete_thread(
                 full_reasoning_tokens = CASE WHEN :full_reasoning_tokens > 0 THEN :full_reasoning_tokens
                                              ELSE usage_agg.full_reasoning_tokens END,
                 cost = CASE WHEN :cost::float8 > 0 THEN :cost::float8 ELSE usage_agg.cost END,
+                full_cost = CASE WHEN :full_cost::float8 > 0 THEN :full_cost::float8 ELSE usage_agg.full_cost END,
                 duration_ms = GREATEST(
                     0,
                     :duration_ms,
@@ -960,19 +961,21 @@ pub async fn complete_thread(
                 terminal = true
             FROM (
                 SELECT
-                    COALESCE(SUM(COALESCE((m.token_usage->>'prompt_tokens')::bigint, 0)), 0)::int AS input_tokens,
+                    COALESCE(SUM(GREATEST(COALESCE((m.token_usage->>'prompt_tokens')::bigint, 0)
+                                       - COALESCE((m.token_usage->>'cached_tokens')::bigint, 0), 0)), 0)::int AS input_tokens,
                     COALESCE(SUM(COALESCE((m.token_usage->>'cached_tokens')::bigint, 0)), 0)::int AS cached_tokens,
                     COALESCE(SUM(COALESCE((m.token_usage->>'completion_tokens')::bigint, 0)), 0)::int AS output_tokens,
                     COALESCE(SUM(COALESCE((m.token_usage->>'full_input_tokens')::bigint, 0)), 0)::int AS full_input_tokens,
                     COALESCE(SUM(COALESCE((m.token_usage->>'full_cached_tokens')::bigint, 0)), 0)::int AS full_cached_tokens,
                     COALESCE(SUM(COALESCE((m.token_usage->>'full_output_tokens')::bigint, 0)), 0)::int AS full_output_tokens,
                     COALESCE(SUM(COALESCE((m.token_usage->>'full_reasoning_tokens')::bigint, 0)), 0)::int AS full_reasoning_tokens,
-                    COALESCE(SUM(COALESCE((m.token_usage->>'cost')::double precision, 0)), 0)::double precision AS cost
+                    COALESCE(SUM(COALESCE((m.token_usage->>'cost')::double precision, 0)), 0)::double precision AS cost,
+                    COALESCE(SUM(COALESCE((m.token_usage->>'full_cost')::double precision, 0)), 0)::double precision AS full_cost
                 FROM messages m
                 WHERE m.thread_id = :id AND m.msg_type <> 'error'
             ) usage_agg
             WHERE t.id = :id AND NOT t.terminal"#,
-        ( :status = status, :id = thread_id, :input_tokens = stats.input_tokens, :cached_tokens = stats.cached_tokens, :output_tokens = stats.output_tokens, :full_input_tokens = stats.full_input_tokens, :full_cached_tokens = stats.full_cached_tokens, :full_output_tokens = stats.full_output_tokens, :full_reasoning_tokens = stats.full_reasoning_tokens, :cost = stats.cost, :duration_ms = stats.duration_ms )
+        ( :status = status, :id = thread_id, :input_tokens = stats.input_tokens, :cached_tokens = stats.cached_tokens, :output_tokens = stats.output_tokens, :full_input_tokens = stats.full_input_tokens, :full_cached_tokens = stats.full_cached_tokens, :full_output_tokens = stats.full_output_tokens, :full_reasoning_tokens = stats.full_reasoning_tokens, :cost = stats.cost, :full_cost = stats.full_cost, :duration_ms = stats.duration_ms )
     )
     .execute(pool)
     .await?;
@@ -1029,22 +1032,25 @@ pub async fn update_thread_usage_aggregates(
                                           ELSE usage_agg.full_output_tokens END,
                 full_reasoning_tokens = CASE WHEN :full_reasoning_tokens > 0 THEN :full_reasoning_tokens
                                              ELSE usage_agg.full_reasoning_tokens END,
-                cost = CASE WHEN :cost::float8 > 0 THEN :cost::float8 ELSE usage_agg.cost END
+                cost = CASE WHEN :cost::float8 > 0 THEN :cost::float8 ELSE usage_agg.cost END,
+                full_cost = CASE WHEN :full_cost::float8 > 0 THEN :full_cost::float8 ELSE usage_agg.full_cost END
             FROM (
                 SELECT
-                    COALESCE(SUM(COALESCE((m.token_usage->>'prompt_tokens')::bigint, 0)), 0)::int AS input_tokens,
+                    COALESCE(SUM(GREATEST(COALESCE((m.token_usage->>'prompt_tokens')::bigint, 0)
+                                       - COALESCE((m.token_usage->>'cached_tokens')::bigint, 0), 0)), 0)::int AS input_tokens,
                     COALESCE(SUM(COALESCE((m.token_usage->>'cached_tokens')::bigint, 0)), 0)::int AS cached_tokens,
                     COALESCE(SUM(COALESCE((m.token_usage->>'completion_tokens')::bigint, 0)), 0)::int AS output_tokens,
                     COALESCE(SUM(COALESCE((m.token_usage->>'full_input_tokens')::bigint, 0)), 0)::int AS full_input_tokens,
                     COALESCE(SUM(COALESCE((m.token_usage->>'full_cached_tokens')::bigint, 0)), 0)::int AS full_cached_tokens,
                     COALESCE(SUM(COALESCE((m.token_usage->>'full_output_tokens')::bigint, 0)), 0)::int AS full_output_tokens,
                     COALESCE(SUM(COALESCE((m.token_usage->>'full_reasoning_tokens')::bigint, 0)), 0)::int AS full_reasoning_tokens,
-                    COALESCE(SUM(COALESCE((m.token_usage->>'cost')::double precision, 0)), 0)::double precision AS cost
+                    COALESCE(SUM(COALESCE((m.token_usage->>'cost')::double precision, 0)), 0)::double precision AS cost,
+                    COALESCE(SUM(COALESCE((m.token_usage->>'full_cost')::double precision, 0)), 0)::double precision AS full_cost
                 FROM messages m
                 WHERE m.thread_id = :id AND m.msg_type <> 'error'
             ) usage_agg
             WHERE t.id = :id"#,
-        ( :id = thread_id, :input_tokens = stats.input_tokens, :cached_tokens = stats.cached_tokens, :output_tokens = stats.output_tokens, :full_input_tokens = stats.full_input_tokens, :full_cached_tokens = stats.full_cached_tokens, :full_output_tokens = stats.full_output_tokens, :full_reasoning_tokens = stats.full_reasoning_tokens, :cost = stats.cost )
+        ( :id = thread_id, :input_tokens = stats.input_tokens, :cached_tokens = stats.cached_tokens, :output_tokens = stats.output_tokens, :full_input_tokens = stats.full_input_tokens, :full_cached_tokens = stats.full_cached_tokens, :full_output_tokens = stats.full_output_tokens, :full_reasoning_tokens = stats.full_reasoning_tokens, :cost = stats.cost, :full_cost = stats.full_cost )
     )
     .execute(pool)
     .await?;
@@ -3127,6 +3133,7 @@ mod tests {
             full_output_tokens: 0,
             full_reasoning_tokens: 0,
             cost: 0.0,
+            full_cost: 0.0,
         };
         // Fail-thread tool: it finalizes the row FIRST (row becomes terminal).
         complete_thread(&pool, thread_id, "failed", zero_stats)
@@ -3144,6 +3151,7 @@ mod tests {
             full_output_tokens: 0,
             full_reasoning_tokens: 0,
             cost: 0.0,
+            full_cost: 0.0,
         };
         update_thread_usage_aggregates(&pool, thread_id, &with_usage)
             .await
@@ -3214,6 +3222,7 @@ mod tests {
                 full_output_tokens: 0,
                 full_reasoning_tokens: 0,
                 cost: 0.0,
+                full_cost: 0.0,
             };
             update_thread_progress(&pool, thread_id, i, stats)
                 .await
@@ -3272,6 +3281,7 @@ mod tests {
             full_output_tokens: 0,
             full_reasoning_tokens: 0,
             cost: 0.0,
+            full_cost: 0.0,
         };
         complete_thread(&pool, thread_id, "completed", final_stats)
             .await
@@ -3362,8 +3372,10 @@ mod tests {
         }
 
         // Failure path passes ZERO stats: the fallback must persist the REAL
-        // aggregated usage (100+150 prompt, 30+40 cached, 20+25 completion)
-        // and the real LLM call count (iterations = 2).
+        // aggregated usage - cache-MISS input only ((100-30)+(150-40) = 180),
+        // 30+40 cached, 20+25 completion - and the real LLM call count
+        // (iterations = 2). Operator 2026-10-02 (thread 3915): every stored
+        // `input_tokens` figure is cache-miss only.
         complete_thread(
             &pool,
             thread_id,
@@ -3378,6 +3390,7 @@ mod tests {
                 full_output_tokens: 0,
                 full_reasoning_tokens: 0,
                 cost: 0.0,
+                full_cost: 0.0,
             },
         )
         .await
@@ -3397,7 +3410,7 @@ mod tests {
         .await
         .expect("fetch terminal row");
         assert_eq!(iterations, 2, "real LLM call count");
-        assert_eq!(input_tokens, 250, "fallback prompt sum");
+        assert_eq!(input_tokens, 180, "fallback prompt sum (cache-miss only)");
         assert_eq!(cached_tokens, 70, "fallback cached sum");
         assert_eq!(output_tokens, 45, "fallback completion sum");
         assert!(terminal, "terminal flag must be set");
@@ -3506,6 +3519,7 @@ mod tests {
                 full_output_tokens: 0,
                 full_reasoning_tokens: 0,
                 cost: 0.0,
+                full_cost: 0.0,
             },
         )
         .await
@@ -3524,6 +3538,7 @@ mod tests {
                 full_output_tokens: 0,
                 full_reasoning_tokens: 0,
                 cost: 0.0,
+                full_cost: 0.0,
             },
         )
         .await
@@ -3566,6 +3581,7 @@ mod tests {
                 full_output_tokens: 0,
                 full_reasoning_tokens: 0,
                 cost: 0.0,
+                full_cost: 0.0,
             },
         )
         .await

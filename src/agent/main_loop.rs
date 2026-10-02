@@ -51,6 +51,7 @@ fn thread_progress_stats(
         full_output_tokens: 0,
         full_reasoning_tokens: 0,
         cost: 0.0,
+        full_cost: 0.0,
     }
 }
 

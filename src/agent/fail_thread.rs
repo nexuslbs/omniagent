@@ -93,6 +93,7 @@ pub(crate) async fn fail_thread(
             full_output_tokens: 0,
             full_reasoning_tokens: 0,
             cost: 0.0,
+            full_cost: 0.0,
         },
     )
     .await
@@ -816,6 +817,7 @@ pub(crate) async fn fail_thread_tool(
             full_output_tokens: 0,
             full_reasoning_tokens: 0,
             cost: 0.0,
+            full_cost: 0.0,
         },
     )
     .await

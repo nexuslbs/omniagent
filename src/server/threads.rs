@@ -73,8 +73,12 @@ pub struct ThreadEntry {
     pub full_cached_tokens: Option<i64>,
     pub full_output_tokens: Option<i64>,
     pub full_reasoning_tokens: Option<i64>,
-    /// Sum of the usage-array `cost.amount_usd` items (USD).
+    /// omniagent-only cost (USD): the omniagent's OWN LLM calls
+    /// (operator UPDATE 2026-10-02 threads 3916/3917).
     pub cost: Option<f64>,
+    /// FULL cost (USD): omniagent + external/sub-agent (dsh) LLM calls
+    /// (operator UPDATE 2026-10-02 threads 3916/3917).
+    pub full_cost: Option<f64>,
     pub iterations: Option<i64>,
     pub parent_id: Option<i64>,
     pub merged_into_thread_id: Option<i64>,
@@ -142,6 +146,7 @@ struct ThreadListRow {
     full_output_tokens: Option<i32>,
     full_reasoning_tokens: Option<i32>,
     cost: Option<f64>,
+    full_cost: Option<f64>,
     iterations: Option<i32>,
     parent_id: Option<i64>,
     merged_into_thread_id: Option<i64>,
@@ -249,6 +254,7 @@ async fn list_threads_handler(
                 t.full_output_tokens,
                 t.full_reasoning_tokens,
                 t.cost,
+                t.full_cost,
                 t.iterations,
                 t.parent_id,
                 t.plan,
@@ -289,6 +295,7 @@ async fn list_threads_handler(
             t.full_output_tokens,
             t.full_reasoning_tokens,
             t.cost,
+            t.full_cost,
             t.iterations,
             t.parent_id,
             mi.thread_id AS merged_into_thread_id,
@@ -394,6 +401,7 @@ async fn list_threads_handler(
                 full_output_tokens: r.full_output_tokens.map(|v| v as i64),
                 full_reasoning_tokens: r.full_reasoning_tokens.map(|v| v as i64),
                 cost: r.cost,
+                full_cost: r.full_cost,
                 iterations: r.iterations.map(|v| v as i64),
                 parent_id: r.parent_id,
                 merged_into_thread_id: r.merged_into_thread_id,

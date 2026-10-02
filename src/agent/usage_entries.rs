@@ -151,13 +151,24 @@ pub fn omniagent_usage_entry(usage: &Usage, provider: &str, model: &str, agent: 
 }
 
 /// Sums over the usage array items (missing fields count as 0).
+///
+/// FIELD SEMANTICS (operator UPDATE 2026-10-02, telegram threads 3915/3916/
+/// 3917): every `input` figure is CACHE-MISS (fresh) input only, never
+/// cache-hit + miss. `full_*` = the omniagent's own numbers + the
+/// sub-agent/dsh numbers for that same field.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct UsageAggregates {
+    /// omniagent cache-miss input + dsh cache-miss input.
     pub full_input_tokens: u64,
     pub full_cached_tokens: u64,
     pub full_output_tokens: u64,
     pub full_reasoning_tokens: u64,
+    /// FULL cost (USD): omniagent + dsh/sub-agent LLM calls.
     pub cost: f64,
+    /// omniagent-only cost (USD) - the `threads.cost` column value.
+    pub omniagent_cost: f64,
+    /// omniagent cache-MISS input only - the `threads.input_tokens` value.
+    pub omniagent_input_tokens: u64,
 }
 
 fn item_u64(item: &Value, key: &str) -> u64 {
@@ -245,41 +256,69 @@ fn sum_usage_items_where(entries: &[Value], want: bool) -> UsageAggregates {
 /// end exactly like `input_tokens` / `cached_tokens` / `output_tokens` are
 /// today).
 ///
-/// Semantics (operator, telegram thread 3887): `full_*` = omniagent + dsh
-/// agents. The min-clamp against the omniagent's own bare totals (requirement
-/// 8 of the original request) therefore applies to the OMNIAGENT SUB-TOTAL
-/// only - the omniagent's recorded totals (threads.input_tokens etc., fed from
-/// `cumulative_usage`) are the authoritative billed numbers for the omniagent
-/// entries, and the non-omniagent (dsh) items are always added on top:
-/// `full_input_tokens = min(input_tokens, omniagent_sum) + dsh_sum`. Clamping
-/// the whole array would swallow every dsh token+call, which is what real
-/// threads showed before this fix (`full_input_tokens == input_tokens` with the
-/// dsh entries never counted). `cost` has no bare counterpart (the agent never
-/// estimates cost), so it is the plain sum over ALL items.
+/// Semantics (operator, telegram threads 3887 + 3915/3916/3917): `full_*` =
+/// omniagent + dsh agents, and every `input` figure is CACHE-MISS only.
+///
+/// The two item kinds do NOT report `input_tokens` the same way, verified on
+/// real dev thread 3899 (2026-10-02):
+///   * the OMNIAGENT entries carry the provider's `prompt_tokens`, i.e. TOTAL
+///     input with the cache hit INCLUDED (33 items summed to 1,928,385 with
+///     1,567,488 cached);
+///   * the dsh/workstation entries carry the FRESH (cache-miss) input and the
+///     hit in `cached_input_tokens` (112 items summed to 398,032 input +
+///     5,025,024 cached, and `total_tokens` = input + cached + output held
+///     exactly).
+///
+/// So the omniagent sub-total is min-clamped against the omniagent's own
+/// cumulative totals (still authoritative) and its cache hit is SUBTRACTED to
+/// obtain the miss-only figure; the dsh sub-total needs no subtraction (its
+/// input is already miss-only). Result:
+/// `full_input_tokens = (min(input, cum.prompt) - min(cached, cum.cached)) +
+///  dsh_input`.
+///
+/// `cost` is the FULL cost (omniagent + dsh) and `omniagent_cost` the
+/// omniagent-only share (operator threads 3916/3917: `threads.cost` is the
+/// omniagent-only cost, the new `threads.full_cost` is the combined one).
 pub fn aggregate_fields(entries: &[Value], cumulative: Option<&Usage>) -> UsageAggregates {
-    let Some(cum) = cumulative else {
-        return sum_usage_items(entries);
-    };
     let omniagent_sum = sum_usage_items_where(entries, true);
     let dsh_sum = sum_usage_items_where(entries, false);
+    let (omniagent_total_input, omniagent_cached, omniagent_output, omniagent_reasoning) =
+        match cumulative {
+            Some(cum) => (
+                omniagent_sum
+                    .full_input_tokens
+                    .min(cum.prompt_tokens as u64),
+                omniagent_sum
+                    .full_cached_tokens
+                    .min(cum.cached_tokens.unwrap_or(0) as u64),
+                omniagent_sum
+                    .full_output_tokens
+                    .min(cum.completion_tokens as u64),
+                omniagent_sum
+                    .full_reasoning_tokens
+                    .min(cum.reasoning_tokens.unwrap_or(0) as u64),
+            ),
+            None => (
+                omniagent_sum.full_input_tokens,
+                omniagent_sum.full_cached_tokens,
+                omniagent_sum.full_output_tokens,
+                omniagent_sum.full_reasoning_tokens,
+            ),
+        };
+    let omniagent_miss_input = omniagent_total_input.saturating_sub(omniagent_cached);
+    // dsh entries report cache-MISS `input_tokens` already (verified on dev
+    // thread 3899: `total_tokens` == input + cached + output for all 112 dsh
+    // items), so subtracting their (much larger) cache hit would collapse the
+    // dsh share to 0.
+    let dsh_miss_input = dsh_sum.full_input_tokens;
     UsageAggregates {
-        full_input_tokens: omniagent_sum
-            .full_input_tokens
-            .min(cum.prompt_tokens as u64)
-            .saturating_add(dsh_sum.full_input_tokens),
-        full_cached_tokens: omniagent_sum
-            .full_cached_tokens
-            .min(cum.cached_tokens.unwrap_or(0) as u64)
-            .saturating_add(dsh_sum.full_cached_tokens),
-        full_output_tokens: omniagent_sum
-            .full_output_tokens
-            .min(cum.completion_tokens as u64)
-            .saturating_add(dsh_sum.full_output_tokens),
-        full_reasoning_tokens: omniagent_sum
-            .full_reasoning_tokens
-            .min(cum.reasoning_tokens.unwrap_or(0) as u64)
-            .saturating_add(dsh_sum.full_reasoning_tokens),
+        full_input_tokens: omniagent_miss_input.saturating_add(dsh_miss_input),
+        full_cached_tokens: omniagent_cached.saturating_add(dsh_sum.full_cached_tokens),
+        full_output_tokens: omniagent_output.saturating_add(dsh_sum.full_output_tokens),
+        full_reasoning_tokens: omniagent_reasoning.saturating_add(dsh_sum.full_reasoning_tokens),
         cost: omniagent_sum.cost + dsh_sum.cost,
+        omniagent_cost: omniagent_sum.cost,
+        omniagent_input_tokens: omniagent_miss_input,
     }
 }
 
@@ -565,11 +604,54 @@ mod tests {
         let entries: Vec<Value> = serde_json::from_value(entries).unwrap();
         let cum = usage(100, 20, Some(60), Some(5));
         let agg = aggregate_fields(&entries, Some(&cum));
-        assert_eq!(agg.full_input_tokens, 600, "min(100, 100) + 500");
+        // input is CACHE-MISS only (operator thread 3915): omniagent
+        // min(100,100) - min(60,60) = 40; the dsh item's input is already
+        // miss-only, so it is added as-is (no cache subtraction).
+        assert_eq!(
+            agg.full_input_tokens, 540,
+            "omniagent miss 40 + dsh miss 500"
+        );
+        assert_eq!(agg.omniagent_input_tokens, 40);
         assert_eq!(agg.full_output_tokens, 120, "min(20, 20) + 100");
         assert_eq!(agg.full_cached_tokens, 460, "min(60, 60) + 400");
         assert_eq!(agg.full_reasoning_tokens, 55, "min(5, 5) + 50");
         assert!((agg.cost - 0.6).abs() < 1e-9, "cost is the plain sum");
+        assert!(
+            (agg.omniagent_cost - 0.1).abs() < 1e-9,
+            "omniagent-only share"
+        );
+    }
+
+    #[test]
+    fn thread_3899_real_numbers_split_miss_only_input_and_the_two_costs() {
+        // Raw data from the omnidev dev DB, thread 3899 (2026-10-02):
+        //   33 omniagent items: input 1,928,385 (cached 1,567,488), cost 0.175425228
+        //   112 dsh llm-call items: input 398,032 (miss), cached 5,025,024,
+        //   output 101,612, cost 0.271494144 (the old COMBINED `cost` column
+        //   held 0.446919372 = omniagent + dsh).
+        let entries = json!([
+            {"omniagent": true, "input_tokens": 1928385, "cached_input_tokens": 1567488, "output_tokens": 48126, "cost": {"amount_usd": 0.175425228}},
+            {"agent": "researcher", "input_tokens": 398032, "cached_input_tokens": 5025024, "output_tokens": 101612, "cost": {"amount_usd": 0.271494144}, "details": {"kind": "llm-call"}}
+        ]);
+        let entries: Vec<Value> = serde_json::from_value(entries).unwrap();
+        let cum = usage(1928385, 48126, Some(1567488), Some(0));
+        let agg = aggregate_fields(&entries, Some(&cum));
+        assert_eq!(agg.omniagent_input_tokens, 360_897, "1,928,385 - 1,567,488");
+        assert_eq!(
+            agg.full_input_tokens, 758_929,
+            "omniagent miss 360,897 + dsh miss 398,032"
+        );
+        assert_eq!(agg.full_cached_tokens, 6_592_512);
+        assert_eq!(agg.full_output_tokens, 149_738);
+        assert!(
+            (agg.omniagent_cost - 0.175425228).abs() < 1e-9,
+            "got {}",
+            agg.omniagent_cost
+        );
+        assert!(
+            (agg.cost - 0.446919372).abs() < 1e-9,
+            "full cost = omniagent + dsh"
+        );
     }
 
     #[test]
@@ -643,6 +725,8 @@ mod tests {
         ]);
         let entries: Vec<Value> = serde_json::from_value(entries).unwrap();
         let agg = aggregate_fields(&entries, None);
+        // A marker-less item is treated as a dsh item (missing `omniagent`
+        // flag == false), whose `input_tokens` is already miss-only.
         assert_eq!(agg.full_input_tokens, 10);
         assert_eq!(agg.full_output_tokens, 2);
         assert_eq!(agg.full_cached_tokens, 8);

@@ -238,10 +238,15 @@ pub struct CompleteThreadStats {
     pub full_output_tokens: i32,
     #[allow(dead_code)]
     pub full_reasoning_tokens: i32,
-    /// Sum of `cost.amount_usd` over the usage array items (no bare
-    /// counterpart: the agent never estimates cost).
+    /// Sum of `cost.amount_usd` over the OMNIAGENT's own LLM-call entries
+    /// (operator UPDATE 2026-10-02 threads 3916/3917: `threads.cost` is the
+    /// omniagent-only cost, no bare-provider counterpart).
     #[allow(dead_code)]
     pub cost: f64,
+    /// FULL cost (USD): omniagent + external/sub-agent (dsh) LLM calls
+    /// (NEW `threads.full_cost` column, threads 3917).
+    #[allow(dead_code)]
+    pub full_cost: f64,
 }
 
 /// Parameters for [`create_thread_with_cause`]. Collects all fields beyond
