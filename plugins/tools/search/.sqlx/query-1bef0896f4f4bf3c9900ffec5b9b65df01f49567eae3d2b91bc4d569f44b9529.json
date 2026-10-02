@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        WITH page AS MATERIALIZED (\n            SELECT\n                t.id,\n                t.channel_id,\n                t.status,\n                t.cause,\n                t.profile,\n                t.provider,\n                t.model,\n                t.created_at,\n                t.ended_at,\n                t.duration_ms,\n                t.input_tokens,\n                t.output_tokens,\n                t.cached_tokens,\n                t.iterations,\n                t.parent_id,\n                t.plan,\n                t.started_at,\n                t.task_id,\n                t.schedule_task_id,\n                t.workflow_step,\n                t.workflow_id,\n                t.toolset\n            FROM threads t\n            WHERE 1=1\n              AND ($1 = '' OR t.status = ANY(string_to_array($2, ',')))\n              AND ($3 = '' OR t.cause = $4)\n              AND ($5 = '' OR t.channel_id = $6)\n              AND ($7 = '' OR t.profile = $8)\n              AND ($9 = 0::bigint OR t.id = $10)\n              AND ($11 = 0::bigint OR t.parent_id = $12)\n            ORDER BY t.id DESC\n            LIMIT $13 OFFSET $14\n        )\n        SELECT\n            t.id,\n            t.channel_id,\n            t.channel_id AS channel_name,\n            t.status,\n            t.cause,\n            t.profile,\n            t.provider,\n            t.model,\n            t.created_at,\n            t.ended_at,\n            t.duration_ms,\n            t.input_tokens,\n            t.output_tokens,\n            t.cached_tokens,\n            t.iterations,\n            t.parent_id,\n            mi.thread_id AS merged_into_thread_id,\n            t.plan,\n            t.started_at,\n            m0.content AS cause_content_preview,\n            m0.msg_type AS cause_msg_type,\n            m0.msg_subtype AS cause_msg_subtype,\n            t.task_id,\n            t.schedule_task_id,\n            t.workflow_step,\n            t.workflow_id AS workflow_id,\n            m0.external_id,\n            t.toolset,\n            kt.board AS kanban_board,\n            COALESCE(cnt.msg_count, 0) AS msg_count,\n            lm.content AS last_message\n        FROM page t\n        LEFT JOIN LATERAL (\n            SELECT m.content, m.msg_type, m.msg_subtype, m.external_id\n            FROM messages m\n            WHERE m.thread_id = t.id AND m.thread_sequence = 0\n            LIMIT 1\n        ) m0 ON true\n        LEFT JOIN LATERAL (\n            SELECT sc.thread_id\n            FROM messages sc\n            WHERE sc.msg_type = 'sub_cause' AND sc.original_thread_id = t.id\n            LIMIT 1\n        ) mi ON true\n        LEFT JOIN LATERAL (\n            SELECT COUNT(*) AS msg_count\n            FROM messages sub\n            WHERE sub.thread_id = t.id\n        ) cnt ON true\n        LEFT JOIN LATERAL (\n            SELECT s2.content\n            FROM messages s2\n            WHERE s2.thread_id = t.id\n            ORDER BY s2.id DESC\n            LIMIT 1\n        ) lm ON true\n        LEFT JOIN kanban_tasks kt ON kt.id = t.task_id\n        ORDER BY t.id DESC\n        ",
+  "query": "\n        WITH page AS MATERIALIZED (\n            SELECT\n                t.id,\n                t.channel_id,\n                t.status,\n                t.cause,\n                t.profile,\n                t.provider,\n                t.model,\n                t.created_at,\n                t.ended_at,\n                t.duration_ms,\n                t.input_tokens,\n                t.output_tokens,\n                t.cached_tokens,\n                t.full_input_tokens,\n                t.full_cached_tokens,\n                t.full_output_tokens,\n                t.full_reasoning_tokens,\n                t.cost,\n                t.iterations,\n                t.parent_id,\n                t.plan,\n                t.started_at,\n                t.task_id,\n                t.schedule_task_id,\n                t.workflow_step,\n                t.workflow_id,\n                t.toolset\n            FROM threads t\n            WHERE 1=1\n              AND ($1 = '' OR t.status = ANY(string_to_array($2, ',')))\n              AND ($3 = '' OR t.cause = $4)\n              AND ($5 = '' OR t.channel_id = $6)\n              AND ($7 = '' OR t.profile = $8)\n              AND ($9 = 0::bigint OR t.id = $10)\n              AND ($11 = 0::bigint OR t.parent_id = $12)\n            ORDER BY t.id DESC\n            LIMIT $13 OFFSET $14\n        )\n        SELECT\n            t.id,\n            t.channel_id,\n            t.channel_id AS channel_name,\n            t.status,\n            t.cause,\n            t.profile,\n            t.provider,\n            t.model,\n            t.created_at,\n            t.ended_at,\n            t.duration_ms,\n            t.input_tokens,\n            t.output_tokens,\n            t.cached_tokens,\n            t.full_input_tokens,\n            t.full_cached_tokens,\n            t.full_output_tokens,\n            t.full_reasoning_tokens,\n            t.cost,\n            t.iterations,\n            t.parent_id,\n            mi.thread_id AS merged_into_thread_id,\n            t.plan,\n            t.started_at,\n            m0.content AS cause_content_preview,\n            m0.msg_type AS cause_msg_type,\n            m0.msg_subtype AS cause_msg_subtype,\n            t.task_id,\n            t.schedule_task_id,\n            t.workflow_step,\n            t.workflow_id AS workflow_id,\n            m0.external_id,\n            t.toolset,\n            kt.board AS kanban_board,\n            COALESCE(cnt.msg_count, 0) AS msg_count,\n            lm.content AS last_message\n        FROM page t\n        LEFT JOIN LATERAL (\n            SELECT m.content, m.msg_type, m.msg_subtype, m.external_id\n            FROM messages m\n            WHERE m.thread_id = t.id AND m.thread_sequence = 0\n            LIMIT 1\n        ) m0 ON true\n        LEFT JOIN LATERAL (\n            SELECT sc.thread_id\n            FROM messages sc\n            WHERE sc.msg_type = 'sub_cause' AND sc.original_thread_id = t.id\n            LIMIT 1\n        ) mi ON true\n        LEFT JOIN LATERAL (\n            SELECT COUNT(*) AS msg_count\n            FROM messages sub\n            WHERE sub.thread_id = t.id\n        ) cnt ON true\n        LEFT JOIN LATERAL (\n            SELECT s2.content\n            FROM messages s2\n            WHERE s2.thread_id = t.id\n            ORDER BY s2.id DESC\n            LIMIT 1\n        ) lm ON true\n        LEFT JOIN kanban_tasks kt ON kt.id = t.task_id\n        ORDER BY t.id DESC\n        ",
   "describe": {
     "columns": [
       {
@@ -159,6 +159,61 @@
       },
       {
         "ordinal": 14,
+        "name": "full_input_tokens",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "full_input_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "full_cached_tokens",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "full_cached_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "full_output_tokens",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "full_output_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
+        "name": "full_reasoning_tokens",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "full_reasoning_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 18,
+        "name": "cost",
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "cost"
+          }
+        }
+      },
+      {
+        "ordinal": 19,
         "name": "iterations",
         "type_info": "Int4",
         "origin": {
@@ -169,7 +224,7 @@
         }
       },
       {
-        "ordinal": 15,
+        "ordinal": 20,
         "name": "parent_id",
         "type_info": "Int8",
         "origin": {
@@ -180,7 +235,7 @@
         }
       },
       {
-        "ordinal": 16,
+        "ordinal": 21,
         "name": "merged_into_thread_id",
         "type_info": "Int8",
         "origin": {
@@ -191,7 +246,7 @@
         }
       },
       {
-        "ordinal": 17,
+        "ordinal": 22,
         "name": "plan",
         "type_info": "Bool",
         "origin": {
@@ -202,7 +257,7 @@
         }
       },
       {
-        "ordinal": 18,
+        "ordinal": 23,
         "name": "started_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -213,7 +268,7 @@
         }
       },
       {
-        "ordinal": 19,
+        "ordinal": 24,
         "name": "cause_content_preview",
         "type_info": "Text",
         "origin": {
@@ -224,7 +279,7 @@
         }
       },
       {
-        "ordinal": 20,
+        "ordinal": 25,
         "name": "cause_msg_type",
         "type_info": "Text",
         "origin": {
@@ -235,7 +290,7 @@
         }
       },
       {
-        "ordinal": 21,
+        "ordinal": 26,
         "name": "cause_msg_subtype",
         "type_info": "Text",
         "origin": {
@@ -246,7 +301,7 @@
         }
       },
       {
-        "ordinal": 22,
+        "ordinal": 27,
         "name": "task_id",
         "type_info": "Text",
         "origin": {
@@ -257,7 +312,7 @@
         }
       },
       {
-        "ordinal": 23,
+        "ordinal": 28,
         "name": "schedule_task_id",
         "type_info": "Text",
         "origin": {
@@ -268,7 +323,7 @@
         }
       },
       {
-        "ordinal": 24,
+        "ordinal": 29,
         "name": "workflow_step",
         "type_info": "Text",
         "origin": {
@@ -279,7 +334,7 @@
         }
       },
       {
-        "ordinal": 25,
+        "ordinal": 30,
         "name": "workflow_id",
         "type_info": "Text",
         "origin": {
@@ -290,7 +345,7 @@
         }
       },
       {
-        "ordinal": 26,
+        "ordinal": 31,
         "name": "external_id",
         "type_info": "Text",
         "origin": {
@@ -301,7 +356,7 @@
         }
       },
       {
-        "ordinal": 27,
+        "ordinal": 32,
         "name": "toolset",
         "type_info": "Text",
         "origin": {
@@ -312,7 +367,7 @@
         }
       },
       {
-        "ordinal": 28,
+        "ordinal": 33,
         "name": "kanban_board",
         "type_info": "Text",
         "origin": {
@@ -323,13 +378,13 @@
         }
       },
       {
-        "ordinal": 29,
+        "ordinal": 34,
         "name": "msg_count",
         "type_info": "Int8",
         "origin": "Expression"
       },
       {
-        "ordinal": 30,
+        "ordinal": 35,
         "name": "last_message",
         "type_info": "Text",
         "origin": {
@@ -373,6 +428,11 @@
       true,
       true,
       true,
+      true,
+      true,
+      true,
+      true,
+      true,
       false,
       true,
       false,
@@ -392,5 +452,5 @@
       false
     ]
   },
-  "hash": "fd07026bf2431fa7254f6d89ee328cdfd4ffde4be194dd464df35f9f58c5c0a5"
+  "hash": "1bef0896f4f4bf3c9900ffec5b9b65df01f49567eae3d2b91bc4d569f44b9529"
 }

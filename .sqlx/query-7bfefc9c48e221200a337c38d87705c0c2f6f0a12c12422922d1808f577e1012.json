@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "        UPDATE threads t\n            SET input_tokens = CASE WHEN $1 > 0 THEN $2\n                                    ELSE usage_agg.input_tokens END,\n                cached_tokens = CASE WHEN $3 > 0 THEN $4\n                                     ELSE usage_agg.cached_tokens END,\n                output_tokens = CASE WHEN $5 > 0 THEN $6\n                                     ELSE usage_agg.output_tokens END,\n                full_input_tokens = CASE WHEN $7 > 0 THEN $8\n                                         ELSE usage_agg.full_input_tokens END,\n                full_cached_tokens = CASE WHEN $9 > 0 THEN $10\n                                          ELSE usage_agg.full_cached_tokens END,\n                full_output_tokens = CASE WHEN $11 > 0 THEN $12\n                                          ELSE usage_agg.full_output_tokens END,\n                full_reasoning_tokens = CASE WHEN $13 > 0 THEN $14\n                                             ELSE usage_agg.full_reasoning_tokens END,\n                cost = CASE WHEN $15::float8 > 0 THEN $16::float8 ELSE usage_agg.cost END\n            FROM (\n                SELECT\n                    COALESCE(SUM(COALESCE((m.token_usage->>'prompt_tokens')::bigint, 0)), 0)::int AS input_tokens,\n                    COALESCE(SUM(COALESCE((m.token_usage->>'cached_tokens')::bigint, 0)), 0)::int AS cached_tokens,\n                    COALESCE(SUM(COALESCE((m.token_usage->>'completion_tokens')::bigint, 0)), 0)::int AS output_tokens,\n                    COALESCE(SUM(COALESCE((m.token_usage->>'full_input_tokens')::bigint, 0)), 0)::int AS full_input_tokens,\n                    COALESCE(SUM(COALESCE((m.token_usage->>'full_cached_tokens')::bigint, 0)), 0)::int AS full_cached_tokens,\n                    COALESCE(SUM(COALESCE((m.token_usage->>'full_output_tokens')::bigint, 0)), 0)::int AS full_output_tokens,\n                    COALESCE(SUM(COALESCE((m.token_usage->>'full_reasoning_tokens')::bigint, 0)), 0)::int AS full_reasoning_tokens,\n                    COALESCE(SUM(COALESCE((m.token_usage->>'cost')::double precision, 0)), 0)::double precision AS cost\n                FROM messages m\n                WHERE m.thread_id = $17 AND m.msg_type <> 'error'\n            ) usage_agg\n            WHERE t.id = $18",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Float8",
+        "Float8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7bfefc9c48e221200a337c38d87705c0c2f6f0a12c12422922d1808f577e1012"
+}

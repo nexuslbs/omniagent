@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO messages (\n            thread_id, role, content, thread_sequence, external_id,\n            metadata, embedding, summary_text, is_summary,\n            msg_type, msg_subtype, original_thread_id, iteration_number,\n            duration_ms, token_usage, channel_id\n        )\n        VALUES ($1, $2, $3, $4, NULLIF($5, '')::text,\n            $6, NULLIF($7, '')::text, NULLIF($8, '')::text, $9,\n            $10, NULLIF($11, '')::text, NULLIF($12, -1::bigint)::bigint, $13,\n            $14, COALESCE(NULLIF($15, '')::jsonb, '{}'::jsonb),\n            (SELECT channel_id FROM threads WHERE id = $16))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Int4",
+        "Text",
+        "Jsonb",
+        "Text",
+        "Text",
+        "Bool",
+        "Text",
+        "Text",
+        "Int8",
+        "Int4",
+        "Int4",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "41de489f03cf8c6428c387a9df735d94b322663d34b06a3dbecb626b36020de7"
+}
