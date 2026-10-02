@@ -30,6 +30,9 @@
 //!    OMNIAGENT sub-total only, because the operator's semantics are
 //!    `full_*` = omniagent + dsh agents (thread 3887): the dsh items are added
 //!    on top, `full_input_tokens = min(input_tokens, omniagent_sum) + dsh_sum`.
+//!    Only REAL LLM calls are summed: a dsh `details.kind = "agent-aggregate"`
+//!    roll-up (the session summary of the same calls) is skipped so its
+//!    tokens/cost are not counted a second time (review thread 3890).
 //!
 //! RAW RESULTS ONLY: none of these fields are ever changed by agents - they
 //! are raw provider and tool results. Cost is never estimated by the agent:
@@ -161,12 +164,43 @@ fn item_u64(item: &Value, key: &str) -> u64 {
     item.get(key).and_then(|v| v.as_u64()).unwrap_or(0)
 }
 
-/// Sum the respective fields over the usage array items. `full_*` fields
-/// default to 0 when the array is empty or the items carry no such field;
-/// `cost` sums `cost.amount_usd` (missing = 0).
+/// True when a usage item counts toward the aggregates: a real LLM call, or
+/// an item that carries no call-kind marker at all.
+///
+/// The workstation's dsh layer emits, besides one item per LLM call
+/// (`details.kind == "llm-call"`), a per-session ROLL-UP item
+/// (`details.kind == "agent-aggregate"`, carrying `llm_calls` / `tool_calls`)
+/// whose tokens and cost are the SUM of those same call items. Counting both
+/// counted every dsh call twice (review thread 3890 on dev thread 3912:
+/// `full_input_tokens` 154381 instead of 138086, `cost` 0.026022 instead of
+/// 0.020250), while the operator semantics are "omniagent LLM calls + dsh LLM
+/// calls" (telegram 3887) - a roll-up of calls already in the array is not
+/// another call. Items without `details.kind` (the omniagent's own entries,
+/// and any shape that carries no marker) are counted as before.
+fn is_llm_call_item(item: &Value) -> bool {
+    match item
+        .get("details")
+        .and_then(|d| d.get("kind"))
+        .and_then(|k| k.as_str())
+    {
+        Some(kind) => kind == "llm-call",
+        None => true,
+    }
+}
+
+/// Sum the respective fields over the LLM-call usage array items. `full_*`
+/// fields default to 0 when the array is empty or the items carry no such
+/// field; `cost` sums `cost.amount_usd` (missing = 0). Roll-up items
+/// (`details.kind` present and not `"llm-call"`, see [`is_llm_call_item`])
+/// are skipped so a dsh session aggregate never double counts the calls it
+/// summarizes. The items themselves stay in the Usage message array (they are
+/// raw tool output) - only the aggregates skip them.
 pub fn sum_usage_items(entries: &[Value]) -> UsageAggregates {
     let mut agg = UsageAggregates::default();
     for item in entries {
+        if !is_llm_call_item(item) {
+            continue;
+        }
         agg.full_input_tokens = agg
             .full_input_tokens
             .saturating_add(item_u64(item, "input_tokens"));
@@ -453,6 +487,70 @@ mod tests {
         assert_eq!(agg, UsageAggregates::default());
         assert_eq!(agg.full_input_tokens, 0);
         assert_eq!(agg.cost, 0.0);
+    }
+
+    #[test]
+    fn agent_aggregate_rollup_is_not_counted_twice() {
+        // Shape observed on the omnidev dev stack (dev thread 3912, review
+        // 3890): one `llm-call` item plus the `agent-aggregate` roll-up of
+        // that very call. Summing both counted the dsh call twice.
+        let entries: Vec<Value> = serde_json::from_value(json!([
+            {
+                "agent": "researcher",
+                "input_tokens": 14646,
+                "output_tokens": 20,
+                "cost": {"amount_usd": 0.0044658},
+                "details": {"kind": "llm-call", "message_id": "m1"}
+            },
+            {
+                "agent": "researcher",
+                "input_tokens": 14646,
+                "output_tokens": 20,
+                "cost": {"amount_usd": 0.0044658},
+                "details": {"kind": "agent-aggregate", "llm_calls": 1, "tool_calls": 2}
+            }
+        ]))
+        .unwrap();
+        let agg = sum_usage_items(&entries);
+        assert_eq!(
+            agg.full_input_tokens, 14646,
+            "the roll-up is not another call"
+        );
+        assert_eq!(agg.full_output_tokens, 20);
+        assert!((agg.cost - 0.0044658).abs() < 1e-12, "got {}", agg.cost);
+        // The roll-up itself stays IN the Usage message array (raw tool
+        // output); only the aggregates skip it.
+        assert_eq!(usage_message_content(&entries).as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn llm_call_kind_and_markerless_items_are_counted() {
+        let entries: Vec<Value> = serde_json::from_value(json!([
+            {"agent": "dsh", "input_tokens": 100, "details": {"kind": "llm-call"}},
+            {"input_tokens": 5},
+            {"agent": "dsh", "input_tokens": 7, "details": {"kind": "tool-call"}}
+        ]))
+        .unwrap();
+        let agg = sum_usage_items(&entries);
+        assert_eq!(agg.full_input_tokens, 105, "llm-call + markerless only");
+    }
+
+    #[test]
+    fn dsh_rollup_is_excluded_from_the_clamped_aggregate_fields() {
+        // full_* = omniagent LLM calls + dsh LLM calls, never the dsh roll-up.
+        let entries: Vec<Value> = serde_json::from_value(json!([
+            {"omniagent": true, "input_tokens": 100, "output_tokens": 20, "cost": {"amount_usd": 0.1}},
+            {"agent": "researcher", "input_tokens": 500, "output_tokens": 100, "cost": {"amount_usd": 0.5},
+             "details": {"kind": "llm-call"}},
+            {"agent": "researcher", "input_tokens": 500, "output_tokens": 100, "cost": {"amount_usd": 0.5},
+             "details": {"kind": "agent-aggregate", "llm_calls": 1}}
+        ]))
+        .unwrap();
+        let cum = usage(100, 20, Some(60), Some(5));
+        let agg = aggregate_fields(&entries, Some(&cum));
+        assert_eq!(agg.full_input_tokens, 600, "min(100,100) + 500");
+        assert_eq!(agg.full_output_tokens, 120, "min(20,20) + 100");
+        assert!((agg.cost - 0.6).abs() < 1e-9, "got {}", agg.cost);
     }
 
     #[test]
