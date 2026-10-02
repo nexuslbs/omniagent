@@ -18,8 +18,15 @@ pub(crate) async fn fail_thread(
     content: String,
     subtype: &str,
 ) -> AppResult<Message> {
-    let seq = *next_seq;
-    *next_seq += 1;
+    // Thread-end Usage message FIRST: the Error message below must be the LAST
+    // row of the thread (operator correction 2026-10-02, telegram thread 3883),
+    // so the Usage message is created before it, at the sequence the Error
+    // message would otherwise have used. No existing row is mutated.
+    let seq = crate::agent::response_handler::usage_message_seq_for_thread(
+        &cfg.pool, thread.id, *next_seq,
+    )
+    .await;
+    *next_seq = seq + 1;
 
     // Real token usage already spent by this thread, aggregated from its
     // messages (the error message itself carries the same aggregate so
@@ -59,20 +66,8 @@ pub(crate) async fn fail_thread(
 
     let saved = queries::create_message(&cfg.pool, &err_msg).await?;
 
-    // Thread-end Usage message (operator UPDATE 2026-10-01): every terminated
-    // non-skipped thread carries it as its 2nd-last message. This early
-    // failure path never ran the loop, so the entries are empty (the message
-    // content is the empty array).
-    if let Err(e) =
-        crate::agent::response_handler::insert_thread_usage_message(&cfg.pool, thread.id, &[], None)
-            .await
-    {
-        tracing::warn!(
-            "[usage] Failed to insert thread-end usage message for thread {}: {:?}",
-            thread.id,
-            e
-        );
-    }
+    // The thread-end Usage message was inserted ABOVE, before this Error
+    // message, so the Error message stays the LAST row of the thread.
 
     // Fetch the channel for reaction delivery; finalize_thread resolves a
     // REAL cause-message target and enqueues the status reaction.
@@ -740,6 +735,13 @@ pub(crate) async fn fail_thread_tool(
     let usage = crate::db::threads::aggregate_thread_token_usage(&ctx.pool, thread.id)
         .await
         .unwrap_or((0, 0, 0));
+    // Ordering (operator correction 2026-10-02, telegram thread 3883): this tool
+    // runs inside the tool-calling loop, which appends the tool's own
+    // `tool-result` message AFTER the tool returns - and that message is the
+    // thread's LAST row (it repeats the reason, i.e. the summary). So the
+    // Error-type message is written FIRST and the thread-end Usage message
+    // SECOND (at `next_seq + 1`, see below): Usage ends up 2nd-last and the
+    // loop's tool-result last. No existing row is ever mutated.
     let content = reason.unwrap_or_else(|| DEFAULT_FAIL_REASON.to_string());
     let err_msg = MessageNew {
         thread_id: thread.id,
@@ -774,6 +776,19 @@ pub(crate) async fn fail_thread_tool(
         }),
     };
     let saved = crate::db::messages::create_message(&ctx.pool, &err_msg).await?;
+
+    // Thread-end Usage message at `next_seq + 1`: created BEFORE the loop
+    // appends its own tool-result row for this call, so the Usage message is the
+    // thread's 2nd-last message and the tool-result (which carries the reason)
+    // is the last one. Carries the usage entries the loop published for this
+    // thread (the collector vector is not in scope inside the tool dispatch); a
+    // thread whose loop never published any gets the empty array.
+    let _ = crate::agent::response_handler::usage_message_seq_for_thread(
+        &ctx.pool,
+        thread.id,
+        next_seq + 1,
+    )
+    .await;
 
     // Fetch the channel for reaction delivery; finalize_thread resolves a
     // REAL cause-message target and enqueues the "failed" reaction.

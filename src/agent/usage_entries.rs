@@ -24,12 +24,17 @@
 //!    they never appear on the Usage message.
 //!
 //! RAW RESULTS ONLY: none of these fields are ever changed by agents - they
-//! are raw provider and tool results. Cost is never estimated by the agent
-//! (the omniagent's own entries carry `cost: null`; only a service-side price
-//! table could fill it, which is out of scope here).
+//! are raw provider and tool results. Cost is never estimated by the agent:
+//! the omniagent's own entries carry the cost block computed SERVICE-SIDE from
+//! the fixed price table in [`crate::agent::pricing`] (operator correction
+//! 2026-10-02, telegram thread 3882: the hardcoded `cost: null` left
+//! `threads.cost` at 0 for the whole database). A route the table does not
+//! price keeps `cost: null` - an unknown price is never fabricated as 0.
 
 use crate::llm::Usage;
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 
 /// Strip a top-level `_meta` key from a tool result payload and collect its
 /// `_meta.usage` array items (in order) into `collector`.
@@ -58,11 +63,20 @@ pub fn strip_meta_and_collect(content: &str, collector: &mut Vec<Value>) -> Stri
 /// dsh-agent field set.
 ///
 /// `omniagent: true` and `agent` are filled by the MAIN LOOP (never by the
-/// provider); token counts come from the provider usage result; `cost` is
-/// `null` because the agent never estimates cost (a service-side price table
-/// is out of scope). `cache_write_tokens` is not tracked by the core provider
-/// parsing today, so it stays `null`.
+/// provider); token counts come from the provider usage result; `cost` is the
+/// SERVICE-SIDE price-table block ([`crate::agent::pricing::cost_block`]) -
+/// never agent estimation - and stays `null` for a route the table does not
+/// price. `cache_write_tokens` is not tracked by the core provider parsing
+/// today, so it stays `null` (and is priced as 0).
 pub fn omniagent_usage_entry(usage: &Usage, provider: &str, model: &str, agent: &str) -> Value {
+    let cost = crate::agent::pricing::cost_block(
+        provider,
+        model,
+        u64::from(usage.prompt_tokens),
+        u64::from(usage.cached_tokens.unwrap_or(0)),
+        u64::from(usage.completion_tokens),
+        0,
+    );
     json!({
         "omniagent": true,
         "agent": agent,
@@ -72,7 +86,7 @@ pub fn omniagent_usage_entry(usage: &Usage, provider: &str, model: &str, agent: 
         "cached_input_tokens": usage.cached_tokens,
         "cache_write_tokens": Value::Null,
         "reasoning_tokens": usage.reasoning_tokens,
-        "cost": Value::Null,
+        "cost": cost,
         "provider": provider,
         "model": model,
     })
@@ -159,6 +173,51 @@ pub fn usage_message_content(entries: &[Value]) -> Value {
     Value::Array(entries.to_vec())
 }
 
+/// Per-thread snapshot of the usage entries collected so far by the running
+/// loop.
+///
+/// WHY: the thread-end Usage message must be CREATED before the thread's final
+/// message (operator correction 2026-10-02, thread 3883: the Usage message is
+/// the 2nd-last message and the summary - or the fail-thread tool result - is
+/// last), and the builtin fail-thread tool persists that final message from
+/// inside the tool dispatch, where the loop's `usage_entries` vector is not in
+/// scope. The loop publishes its entries before every tool round; the fail
+/// tool reads the snapshot so a Failed thread's Usage message still carries
+/// the real per-call array instead of an empty one.
+static THREAD_USAGE: LazyLock<Mutex<HashMap<i64, Vec<Value>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Publish the entries collected so far for `thread_id`. An empty list clears
+/// the slot.
+pub fn publish_thread_usage(thread_id: i64, entries: &[Value]) {
+    let mut map = THREAD_USAGE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if entries.is_empty() {
+        map.remove(&thread_id);
+    } else {
+        map.insert(thread_id, entries.to_vec());
+    }
+}
+
+/// The entries published for `thread_id` (empty when none were published).
+pub fn thread_usage_snapshot(thread_id: i64) -> Vec<Value> {
+    THREAD_USAGE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .get(&thread_id)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Drop the published entries of a terminal thread (no leak across threads).
+pub fn clear_thread_usage(thread_id: i64) {
+    THREAD_USAGE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .remove(&thread_id);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,9 +302,42 @@ mod tests {
         assert_eq!(entry["cached_input_tokens"], 60);
         assert!(entry["cache_write_tokens"].is_null());
         assert_eq!(entry["reasoning_tokens"], 5);
-        assert!(entry["cost"].is_null(), "agent never estimates cost");
+        // `deepseek-v4.1` is not a priced route: an unknown price stays null
+        // instead of being fabricated as 0.
+        assert!(entry["cost"].is_null(), "unknown route -> null cost");
         assert_eq!(entry["provider"], "deepseek");
         assert_eq!(entry["model"], "deepseek-v4.1");
+    }
+
+    #[test]
+    fn omniagent_entry_prices_a_known_route_service_side() {
+        let entry = omniagent_usage_entry(
+            &usage(1_000_000, 200_000, Some(500_000), Some(5)),
+            "deepseek",
+            "deepseek-v4-flash",
+            "omni",
+        );
+        let cost = &entry["cost"];
+        assert!(!cost.is_null(), "known route must carry a cost block");
+        assert_eq!(cost["is_estimate"], true);
+        assert_eq!(cost["source"], crate::agent::pricing::PRICE_TABLE_VERSION);
+        assert_eq!(cost["pricing_ref"], crate::agent::pricing::PRICE_TABLE_REF);
+        let amount = cost["amount_usd"].as_f64().expect("amount_usd is numeric");
+        assert!((amount - 0.543).abs() < 1e-9, "got {}", amount);
+    }
+
+    #[test]
+    fn thread_usage_registry_round_trips_and_clears() {
+        let entries = json!([{"agent": "dsh", "input_tokens": 7}]);
+        let entries: Vec<Value> = serde_json::from_value(entries).unwrap();
+        assert!(thread_usage_snapshot(9_999_999).is_empty());
+        publish_thread_usage(9_999_999, &entries);
+        assert_eq!(thread_usage_snapshot(9_999_999).len(), 1);
+        publish_thread_usage(9_999_999, &[]);
+        assert!(thread_usage_snapshot(9_999_999).is_empty());
+        publish_thread_usage(9_999_999, &entries);
+        clear_thread_usage(9_999_999);
+        assert!(thread_usage_snapshot(9_999_999).is_empty());
     }
 
     // ── aggregates ─────────────────────────────────────────────────────────

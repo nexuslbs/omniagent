@@ -49,10 +49,20 @@ pub(crate) async fn handle_response(
                 .await?
                 .unwrap_or_else(|| cause_msg.clone());
             // The fail-thread tool already persisted its Error-type last
-            // message: insert the thread-end Usage message just before it.
-            if let Err(e) = insert_thread_usage_message(
+            // message AND inserted the thread-end Usage message just before it
+            // (it inserts the Usage message first, then its Error message one
+            // sequence later). This call is therefore normally a no-op; it only
+            // fires when a thread was marked FAILED without going through that
+            // tool, in which case the Usage message is appended after the last
+            // message (best effort, never a silent absence). Existing rows are
+            // never mutated.
+            let last_seq = crate::db::threads::get_max_thread_sequence(&cfg.pool, thread.id)
+                .await
+                .unwrap_or(0);
+            if let Err(e) = insert_thread_usage_message_at(
                 &cfg.pool,
                 thread.id,
+                last_seq + 1,
                 usage_entries,
                 cumulative_usage.as_ref(),
             )
@@ -224,6 +234,16 @@ pub(crate) async fn handle_response(
         } else {
             summary_text = hygiene.cleaned;
         }
+        // Usage message first: the final (summary) message must be the LAST row
+        // of the thread (operator correction 2026-10-02, telegram thread 3883).
+        let next_seq = usage_then_final_seq(
+            &cfg.pool,
+            thread.id,
+            next_seq,
+            usage_entries,
+            cumulative_usage.as_ref(),
+        )
+        .await;
         let summary_msg = MessageNew {
             thread_id: thread.id,
             role: "agent".to_string(),
@@ -328,6 +348,16 @@ pub(crate) async fn handle_response(
             } else {
                 summary_text = hygiene.cleaned;
             }
+            // Usage message first: the final (summary) message must be the
+            // LAST row of the thread.
+            let next_seq = usage_then_final_seq(
+                &cfg.pool,
+                thread.id,
+                next_seq,
+                usage_entries,
+                cumulative_usage.as_ref(),
+            )
+            .await;
             let summary_msg = MessageNew {
                 thread_id: thread.id,
                 role: "agent".to_string(),
@@ -371,6 +401,16 @@ pub(crate) async fn handle_response(
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "unknown".to_string())
         );
+            // Usage message first: the error message must be the LAST row of
+            // the thread.
+            let next_seq = usage_then_final_seq(
+                &cfg.pool,
+                thread.id,
+                next_seq,
+                usage_entries,
+                cumulative_usage.as_ref(),
+            )
+            .await;
             let agent_msg = MessageNew {
                 thread_id: thread.id,
                 role: "agent".to_string(),
@@ -428,6 +468,16 @@ pub(crate) async fn handle_response(
         } else {
             hygiene.cleaned
         };
+        // Usage message first: the final message must be the LAST row of the
+        // thread (operator correction 2026-10-02, telegram thread 3883).
+        let next_seq = usage_then_final_seq(
+            &cfg.pool,
+            thread.id,
+            next_seq,
+            usage_entries,
+            cumulative_usage.as_ref(),
+        )
+        .await;
         let agent_msg = MessageNew {
             thread_id: thread.id,
             role: "agent".to_string(),
@@ -490,25 +540,12 @@ pub(crate) async fn handle_response(
     // Recompute final status after post-loop enforcement
     let final_status = post_loop_final_status(*force_failed, limit_reached);
 
-    // Thread-end Usage message: insert just before the thread's last message,
-    // carrying the concatenated usage array (all `_meta.usage` items from tool
-    // call results in call order + the omniagent's own LLM-call entries). The
-    // message content is the array itself; the aggregate fields are written
-    // to the threads table below (operator UPDATE 2026-09-30 threads
-    // 3702/3705/3707/3709).
-    if let Err(e) = insert_thread_usage_message(
-        &cfg.pool,
-        thread.id,
-        usage_entries,
-        cumulative_usage.as_ref(),
-    )
-    .await
-    {
-        warn!(
-            "[usage] Failed to insert thread-end usage message for thread {}: {:?}",
-            thread.id, e
-        );
-    }
+    // Thread-end Usage message: inserted BEFORE the final message by
+    // `usage_then_final_seq` at each branch above, carrying the concatenated
+    // usage array (all `_meta.usage` items from tool call results in call
+    // order + the omniagent's own LLM-call entries). The message content is
+    // the array itself; the aggregate fields are written to the threads table
+    // below (operator UPDATE 2026-09-30 threads 3702/3705/3707/3709).
 
     // Threads-table aggregate columns (operator UPDATE 2026-09-30): sums over
     // the usage array items, min-clamped against the omniagent's own bare
@@ -570,40 +607,54 @@ fn thread_usage_stats(
     }
 }
 
-/// Insert the thread-end "Usage"-type message just before the thread's last
-/// message.
+/// Insert the thread-end "Usage"-type message at an EXPLICIT
+/// `thread_sequence`, WITHOUT mutating any already-persisted message row.
 ///
 /// The message content is the usage ARRAY itself (all `_meta.usage` items
 /// from tool call results in call order + the omniagent's own LLM-call
 /// entries) - no wrapper object, no `full_*` keys (operator UPDATE 2026-09-30
-/// threads 3705/3707/3709). The aggregate fields are carried in the message's
+/// threads 3705/3707/3709). The aggregate fields ride in the message's
 /// `token_usage` metadata so `complete_thread`'s fallback aggregation can sum
 /// them on fail/interrupt paths; the live path also writes them to the
-/// threads table columns via `CompleteThreadStats` in `handle_response` - see
+/// threads table columns via `CompleteThreadStats` - see
 /// [`crate::agent::usage_entries`].
 ///
-/// Placement: the last message's `thread_sequence` is bumped by one and the
-/// Usage message takes the freed slot, so it ends up immediately before the
-/// thread's final message.
+/// PLACEMENT (operator correction 2026-10-02, telegram thread 3883): the call
+/// site inserts the Usage message at the sequence the thread's FINAL message
+/// will use, so the final message lands one sequence later and the Usage
+/// message is the thread's 2nd-last message - LAST IN CREATION ORDER TOO (the
+/// Usage row's `id`/`created_at` are LOWER than the final row's). The previous
+/// implementation inserted it after the final message and shifted that row's
+/// `thread_sequence` backwards (append-only exception), which made the Usage
+/// row the newest row of the thread; that seq-shift UPDATE is gone.
 ///
-/// The append-only trigger (`prevent_message_mutation`, db-migrations)
-/// forbids changing `thread_sequence` on existing rows, so the bump runs
-/// inside a transaction that sets the scoped session variable
-/// `omniagent.allow_message_seq_shift` - the trigger permits the seq shift
-/// ONLY while that variable is set (incident 2026-10-01: without it the
-/// UPDATE raised P0001, the caller only warn-logged, and no Usage message was
-/// ever inserted on any thread). Skipped when the thread has no messages at
-/// all (max_seq == 0); a thread with no usage entries still gets the message
-/// with an empty array, so every terminated non-skipped thread carries it.
-pub(crate) async fn insert_thread_usage_message(
+/// Returns `true` when the message was inserted. Skipped (`false`) when the
+/// thread has no messages at all or when it already carries a
+/// `msg_type = 'usage'` message - idempotent across the terminal paths that
+/// can both reach a thread (the builtin fail-thread tool inserts it before its
+/// Error message; `handle_response` inserts it before the final message).
+pub(crate) async fn insert_thread_usage_message_at(
     pool: &sqlx::PgPool,
     thread_id: i64,
+    seq: i32,
     entries: &[serde_json::Value],
     cumulative_usage: Option<&Usage>,
-) -> AppResult<()> {
+) -> AppResult<bool> {
     let max_seq = crate::db::threads::get_max_thread_sequence(pool, thread_id).await?;
-    if max_seq == 0 {
-        return Ok(());
+    if max_seq == 0 || seq <= 0 {
+        return Ok(false);
+    }
+    // NOTE: `$1` (sqlx placeholder), not `:thread_id` - a raw sqlx query is not
+    // rewritten by `sql_forge!`, so a named placeholder reaches Postgres
+    // literally and fails with a 42601 syntax error at the ':'.
+    let already: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM messages WHERE thread_id = $1 AND msg_type = 'usage' LIMIT 1",
+    )
+    .bind(thread_id)
+    .fetch_optional(pool)
+    .await?;
+    if already.is_some() {
+        return Ok(false);
     }
     // The message content is the usage ARRAY itself (operator UPDATE 3709);
     // the aggregates ride in the message's token_usage metadata, which
@@ -615,7 +666,7 @@ pub(crate) async fn insert_thread_usage_message(
         thread_id,
         role: "agent".to_string(),
         content: serde_json::to_string(&content).unwrap_or_else(|_| "[]".to_string()),
-        thread_sequence: max_seq,
+        thread_sequence: seq,
         external_id: None,
         metadata: serde_json::json!({ "is_usage": true }),
         embedding: None,
@@ -636,19 +687,10 @@ pub(crate) async fn insert_thread_usage_message(
     };
     let metadata_val: serde_json::Value =
         serde_json::from_str(&msg.metadata.to_string()).unwrap_or_default();
-    let mut tx = pool.begin().await?;
-    sqlx::query("SET LOCAL omniagent.allow_message_seq_shift = 'on'")
-        .execute(&mut *tx)
-        .await?;
-    sql_forge!(
-        r#"UPDATE messages SET thread_sequence = thread_sequence + 1
-           WHERE thread_id = :thread_id AND thread_sequence = :seq"#,
-        ( :thread_id = thread_id, :seq = max_seq )
-    )
-    .execute(&mut *tx)
-    .await?;
-    // Inlined create_message INSERT (no new_message hook: the Usage message
-    // is internal bookkeeping, never delivered to the platform).
+    // Plain INSERT into the append-only messages table: nothing is updated, so
+    // no trigger exception is required and no existing row is touched. It is
+    // inlined (no new_message hook): the Usage message is internal
+    // bookkeeping, never delivered to the platform.
     sql_forge!(
         r#"INSERT INTO messages (
             thread_id, role, content, thread_sequence, external_id,
@@ -663,10 +705,49 @@ pub(crate) async fn insert_thread_usage_message(
             (SELECT channel_id FROM threads WHERE id = :thread_id))"#,
         ( :thread_id = msg.thread_id, :role = &msg.role, :content = &msg.content, :thread_sequence = msg.thread_sequence, :external_id = msg.external_id.as_deref().unwrap_or(""), :metadata = &metadata_val, :embedding = msg.embedding.as_deref().unwrap_or(""), :summary_text = msg.summary_text.as_deref().unwrap_or(""), :is_summary = msg.is_summary, :msg_type = &msg.msg_type, :msg_subtype = msg.msg_subtype.as_deref().unwrap_or(""), :original_thread_id = msg.original_thread_id.unwrap_or(-1i64), :iteration_number = msg.iteration_number, :duration_ms = msg.duration_ms, :token_usage = &msg.token_usage.to_string() )
     )
-    .execute(&mut *tx)
+    .execute(pool)
     .await?;
-    tx.commit().await?;
-    Ok(())
+    Ok(true)
+}
+
+/// Insert the thread-end Usage message at `next_seq` and answer the sequence
+/// the thread's FINAL message must use: `next_seq + 1` when the Usage message
+/// was inserted (so the final message lands after it), `next_seq` otherwise.
+///
+/// A failed insertion is logged and never blocks finalization.
+pub(crate) async fn usage_then_final_seq(
+    pool: &sqlx::PgPool,
+    thread_id: i64,
+    next_seq: i32,
+    entries: &[serde_json::Value],
+    cumulative_usage: Option<&Usage>,
+) -> i32 {
+    match insert_thread_usage_message_at(pool, thread_id, next_seq, entries, cumulative_usage).await
+    {
+        Ok(true) => next_seq + 1,
+        Ok(false) => next_seq,
+        Err(e) => {
+            warn!(
+                "[usage] Failed to insert thread-end usage message for thread {}: {:?}",
+                thread_id, e
+            );
+            next_seq
+        }
+    }
+}
+
+/// Convenience wrapper for the early/supervisor finalize paths that have no
+/// usage collector in scope: takes the per-thread usage snapshot published by
+/// the loop, inserts the thread-end Usage message at `next_seq` and answers the
+/// sequence the final (error) message must use, so the Usage message is the
+/// thread's 2nd-last message and the error message is LAST.
+pub(crate) async fn usage_message_seq_for_thread(
+    pool: &sqlx::PgPool,
+    thread_id: i64,
+    next_seq: i32,
+) -> i32 {
+    let entries = crate::agent::usage_entries::thread_usage_snapshot(thread_id);
+    usage_then_final_seq(pool, thread_id, next_seq, &entries, None).await
 }
 
 /// Final thread status after the executor loop (pure, unit-tested).

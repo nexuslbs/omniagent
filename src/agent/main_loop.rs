@@ -2578,6 +2578,13 @@ Previous plan:\n{}",
 
         let pool = cfg.pool.clone();
         // mcp_registry removed - use cfg.plugin_manager instead
+        // Publish the usage entries collected so far for this thread. The
+        // builtin fail-thread tool runs in the dispatch below and persists the
+        // thread's LAST message from inside the tool, where this collector is
+        // not in scope; it reads this snapshot to build the thread-end Usage
+        // message it inserts BEFORE its Error message (so the Error message
+        // stays the thread's last row, operator correction 2026-10-02).
+        crate::agent::usage_entries::publish_thread_usage(thread.id, &usage_entries);
         let mut join_set = JoinSet::new();
 
         let mut tool_results: Vec<Option<(String, String, String)>> =

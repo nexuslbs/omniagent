@@ -724,6 +724,10 @@ pub(crate) async fn finalize_thread(
     status: &str,
     stats: CompleteThreadStats,
 ) -> crate::error::AppResult<()> {
+    // The thread is terminal from here on: drop the usage snapshot the loop
+    // published for it (see usage_entries::publish_thread_usage), so the
+    // per-thread registry never grows with dead threads.
+    crate::agent::usage_entries::clear_thread_usage(thread_id);
     // Usage aggregates FIRST, unconditionally: `complete_thread` performs the
     // terminal transition under `AND NOT t.terminal`, so on a thread the
     // fail-thread tool already finalized mid-loop (before the thread-end usage

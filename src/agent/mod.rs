@@ -24,6 +24,7 @@ pub mod helpers;
 pub mod kanban_updater;
 pub(crate) mod main_loop;
 pub mod plugin_manager;
+pub(crate) mod pricing;
 pub(crate) mod prompt_sections;
 pub mod recovery;
 pub(crate) mod response_handler;
@@ -815,6 +816,13 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                             debug!("Thread {} has no cause message, skipping", thread.id);
                             // Insert an error message so the user sees what happened
                             let next_seq = queries::get_max_thread_sequence(&cfg.pool, thread.id).await.unwrap_or(0) + 1;
+                            // Thread-end Usage message FIRST: the error message below
+                            // must be the LAST row of the thread (operator correction
+                            // 2026-10-02, telegram thread 3883).
+                            let next_seq = crate::agent::response_handler::usage_message_seq_for_thread(
+                                &cfg.pool, thread.id, next_seq,
+                            )
+                            .await;
                             let err_msg = queries::MessageNew {
                                 thread_id: thread.id,
                                 role: "agent".to_string(),
@@ -835,18 +843,6 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                             if let Err(e) = queries::create_message(&cfg.pool, &err_msg).await {
                                 tracing::warn!("[supervisor] Failed to create no-cause error msg for thread {}: {:?}", thread.id, e);
                             }
-                            // Thread-end Usage message (operator UPDATE 2026-10-01): every
-                            // terminated non-skipped thread carries it as its 2nd-last message.
-                            if let Err(e) = crate::agent::response_handler::insert_thread_usage_message(
-                                &cfg.pool, thread.id, &[], None,
-                            )
-                            .await
-                            {
-                                tracing::warn!(
-                                    "[usage] Failed to insert thread-end usage message for thread {}: {:?}",
-                                    thread.id, e
-                                );
-                            }
                             // Mark thread as failed
                             let channel = crate::db::channels::get_channel_by_id(&cfg.pool, &thread.channel_id).await.ok().flatten();
                             if let Err(e) = crate::agent::helpers::finalize_thread(&cfg.ctx, &cfg.pool, thread.id, None, channel.as_ref(), "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: crate::agent::helpers::elapsed_ms_since_start(thread), full_input_tokens: 0, full_cached_tokens: 0, full_output_tokens: 0, full_reasoning_tokens: 0, cost: 0.0 }).await {
@@ -860,6 +856,13 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                         Err(e) => {
                             error!("Failed to get cause message for thread {}: {:?}", thread.id, e);
                             let next_seq = queries::get_max_thread_sequence(&cfg.pool, thread.id).await.unwrap_or(0) + 1;
+                            // Thread-end Usage message FIRST: the error message below
+                            // must be the LAST row of the thread (operator correction
+                            // 2026-10-02, telegram thread 3883).
+                            let next_seq = crate::agent::response_handler::usage_message_seq_for_thread(
+                                &cfg.pool, thread.id, next_seq,
+                            )
+                            .await;
                             let err_msg = queries::MessageNew {
                                 thread_id: thread.id,
                                 role: "agent".to_string(),
@@ -879,18 +882,6 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                             };
                             if let Err(e) = queries::create_message(&cfg.pool, &err_msg).await {
                                 tracing::warn!("[supervisor] Failed to create error msg for thread {}: {:?}", thread.id, e);
-                            }
-                            // Thread-end Usage message (operator UPDATE 2026-10-01): every
-                            // terminated non-skipped thread carries it as its 2nd-last message.
-                            if let Err(e) = crate::agent::response_handler::insert_thread_usage_message(
-                                &cfg.pool, thread.id, &[], None,
-                            )
-                            .await
-                            {
-                                tracing::warn!(
-                                    "[usage] Failed to insert thread-end usage message for thread {}: {:?}",
-                                    thread.id, e
-                                );
                             }
                             let channel = crate::db::channels::get_channel_by_id(&cfg.pool, &thread.channel_id).await.ok().flatten();
                             if let Err(e) = crate::agent::helpers::finalize_thread(&cfg.ctx, &cfg.pool, thread.id, None, channel.as_ref(), "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: crate::agent::helpers::elapsed_ms_since_start(thread), full_input_tokens: 0, full_cached_tokens: 0, full_output_tokens: 0, full_reasoning_tokens: 0, cost: 0.0 }).await {
@@ -982,6 +973,13 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                         error!("Failed to process thread {}: {:?}", thread.id, e);
                         // Insert an error message with details
                         let next_seq = queries::get_max_thread_sequence(&cfg.pool, thread.id).await.unwrap_or(0) + 1;
+                        // Thread-end Usage message FIRST: the error message below
+                        // must be the LAST row of the thread (operator correction
+                        // 2026-10-02, telegram thread 3883).
+                        let next_seq = crate::agent::response_handler::usage_message_seq_for_thread(
+                            &cfg.pool, thread.id, next_seq,
+                        )
+                        .await;
                         let err_msg = queries::MessageNew {
                             thread_id: thread.id,
                             role: "agent".to_string(),
@@ -1001,18 +999,6 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                                                 };
                         if let Err(e) = queries::create_message(&cfg.pool, &err_msg).await {
                             tracing::warn!("[supervisor] Failed to create error msg for failed thread {}: {:?}", thread.id, e);
-                        }
-                        // Thread-end Usage message (operator UPDATE 2026-10-01): every
-                        // terminated non-skipped thread carries it as its 2nd-last message.
-                        if let Err(e) = crate::agent::response_handler::insert_thread_usage_message(
-                            &cfg.pool, thread.id, &[], None,
-                        )
-                        .await
-                        {
-                            tracing::warn!(
-                                "[usage] Failed to insert thread-end usage message for thread {}: {:?}",
-                                thread.id, e
-                            );
                         }
                         // Mark thread as failed
                         let channel = crate::db::channels::get_channel_by_id(&cfg.pool, &thread.channel_id).await.ok().flatten();
