@@ -150,8 +150,11 @@ mod tests {
 
     #[test]
     fn known_route_is_priced_with_the_documented_formula() {
-        // 1,000,000 uncached input + 500,000 cached input + 200,000 output on
-        // the DeepSeek flash rate: 0.30 + 0.003 + 0.24 = 0.543 USD.
+        // 1,000,000 prompt tokens of which 500,000 are cache hits (500,000
+        // uncached) + 200,000 output on the DeepSeek flash rate:
+        // 0.15 + 0.003 + 0.24 = 0.393 USD.
+        // See the deployment price table comment above: the cached bucket is
+        // subtracted from the input bucket instead of being billed twice.
         let cost = cost_block(
             "deepseek",
             "deepseek-v4-flash",
@@ -165,7 +168,7 @@ mod tests {
         assert_eq!(cost["source"], PRICE_TABLE_VERSION);
         assert_eq!(cost["pricing_ref"], PRICE_TABLE_REF);
         let amount = cost["amount_usd"].as_f64().expect("amount_usd is a number");
-        assert!((amount - 0.543).abs() < 1e-9, "got {}", amount);
+        assert!((amount - 0.393).abs() < 1e-9, "got {}", amount);
     }
 
     #[test]

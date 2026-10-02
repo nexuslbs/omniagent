@@ -323,7 +323,10 @@ mod tests {
         assert_eq!(cost["source"], crate::agent::pricing::PRICE_TABLE_VERSION);
         assert_eq!(cost["pricing_ref"], crate::agent::pricing::PRICE_TABLE_REF);
         let amount = cost["amount_usd"].as_f64().expect("amount_usd is numeric");
-        assert!((amount - 0.543).abs() < 1e-9, "got {}", amount);
+        // 1,000,000 prompt tokens of which 500,000 are cache hits (500,000
+        // uncached) + 200,000 output at the DeepSeek flash rate:
+        // 0.15 + 0.003 + 0.24 = 0.393 USD.
+        assert!((amount - 0.393).abs() < 1e-9, "got {}", amount);
     }
 
     #[test]
