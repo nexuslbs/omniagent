@@ -292,7 +292,7 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
                 WHERE created_at >= date_trunc('day', NOW())), 0)::bigint AS threads_today,
             COALESCE((SELECT AVG(duration_ms)::bigint FROM threads
                 WHERE status = 'completed' AND ended_at >= date_trunc('day', NOW())), 0) AS avg_response_time,
-            COALESCE((SELECT SUM(input_tokens + output_tokens) FROM threads
+            COALESCE((SELECT SUM(input_tokens + COALESCE(cached_tokens, 0) + output_tokens) FROM threads
                 WHERE created_at >= date_trunc('day', NOW())), 0)::bigint AS tokens_today,
             COALESCE((SELECT COUNT(DISTINCT channel_id) FROM threads
                 WHERE created_at >= date_trunc('day', NOW() - INTERVAL '1 day')), 0)::bigint AS active_channels,
@@ -303,7 +303,7 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
                 WHERE status = 'completed'
                   AND ended_at >= date_trunc('day', NOW() - INTERVAL '1 day')
                   AND ended_at < date_trunc('day', NOW())), 0) AS avg_response_yesterday,
-            COALESCE((SELECT SUM(input_tokens + output_tokens) FROM threads
+            COALESCE((SELECT SUM(input_tokens + COALESCE(cached_tokens, 0) + output_tokens) FROM threads
                 WHERE created_at >= date_trunc('day', NOW() - INTERVAL '1 day')
                   AND created_at < date_trunc('day', NOW())), 0)::bigint AS tokens_yesterday
         "#,

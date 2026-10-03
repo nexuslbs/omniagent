@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            t.id,\n            t.channel_id,\n            t.id AS thread_id,\n            LEFT(COALESCE(m.content, ''), 200) AS content_preview,\n            COALESCE(t.status, 'unknown') AS status,\n            t.duration_ms AS processing_time_ms,\n            (t.input_tokens + t.output_tokens) AS total_tokens,\n            COALESCE(t.created_at, NOW()) AS created_at,\n            COALESCE(t.channel_id, 'unknown') AS channel_name,\n            t.model,\n            (SELECT COUNT(*) FROM messages sub WHERE sub.thread_id = t.id) AS thread_count\n        FROM threads t\n        JOIN messages m ON m.thread_id = t.id AND m.thread_sequence = 0\n        ORDER BY t.id DESC\n        LIMIT 10\n        ",
+  "query": "\n        SELECT\n            t.id,\n            t.channel_id,\n            t.id AS thread_id,\n            LEFT(COALESCE(m.content, ''), 200) AS content_preview,\n            COALESCE(t.status, 'unknown') AS status,\n            t.duration_ms AS processing_time_ms,\n            (t.input_tokens + t.cached_tokens + t.output_tokens) AS total_tokens,\n            COALESCE(t.created_at, NOW()) AS created_at,\n            COALESCE(t.channel_id, 'unknown') AS channel_name,\n            t.model,\n            (SELECT COUNT(*) FROM messages sub WHERE sub.thread_id = t.id) AS thread_count\n        FROM threads t\n        JOIN messages m ON m.thread_id = t.id AND m.thread_sequence = 0\n        ORDER BY t.id DESC\n        LIMIT 10\n        ",
   "describe": {
     "columns": [
       {
@@ -112,5 +112,5 @@
       null
     ]
   },
-  "hash": "fb99406bd4943ecca450337850e2eb933174ab91b8b224cf1d19d7ad4e01585b"
+  "hash": "42b97969d7e92a83f151c38db607ca2b35792591e0b04bff37ae8df8cbdef7da"
 }
