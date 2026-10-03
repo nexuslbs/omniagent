@@ -34,8 +34,10 @@ fn stub_handler() -> McpToolHandler {
 }
 
 fn tool(server: &str, raw_name: &str, dispatch: Option<&str>) -> McpTool {
-    let mut behavior = ToolBehavior::default();
-    behavior.dispatch = dispatch.map(str::to_string);
+    let behavior = ToolBehavior {
+        dispatch: dispatch.map(str::to_string),
+        ..Default::default()
+    };
     McpTool {
         name: tool_qualify(server, raw_name),
         description: format!("Tool: {}", raw_name),
