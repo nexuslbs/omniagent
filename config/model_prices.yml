@@ -3,8 +3,7 @@
 # SINGLE source of truth for LLM token pricing, shared by the omniagent core
 # (`src/agent/pricing.rs`) and the dsh/workstation cost accounting
 # (`workstation-plugins/shared/usage.ts`). Editing a rate here changes future
-# costs with NO rebuild, NO release and NO restart restart: the file is
-# re-read on every cost computation (see pricing.rs "RELOAD SEMANTICS").
+# costs with NO rebuild, NO release and NO restart: the file is re-read on every
 #
 # SHAPE: providers -> provider -> model -> canonical rates.
 #
