@@ -45,8 +45,16 @@ use crate::workflows::{Workflow, WorkflowConfigError, WorkflowsFile};
 // ---------------------------------------------------------------------------
 
 const VALID_STATUSES: &[&str] = &[
-    "backlog", "todo", "running", "testing", "review", "blocked", "done",
+    "backlog", "todo", "running", "testing", "review", "blocked", "done", "released",
 ];
+
+// NOTE on `released`: it is a purely MANUAL, terminal parking status placed
+// AFTER `done` on the board (old/finished tasks are parked there so the Done
+// panel does not fill up). It has no workflow role: the dispatcher only ever
+// scans `todo` (src/kanban_dispatch.rs), `kanban_step_actionable` returns
+// false for it (src/db/threads.rs), and `is_terminal_status` /
+// `is_parked_status` (src/agent/fail_thread.rs) make it non-dispatchable and
+// immune to automated transitions out of it.
 
 /// Sentinel used for optional integer fields (channel, priority) to
 /// signal "keep existing value" inside a static UPDATE statement.
@@ -3582,6 +3590,8 @@ mod tests {
         assert!(validate_status("review"));
         assert!(validate_status("blocked"));
         assert!(validate_status("done"));
+        // Manual-only parking status after `done` (no workflow role).
+        assert!(validate_status("released"));
     }
 
     #[test]

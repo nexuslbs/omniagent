@@ -556,7 +556,7 @@ pub async fn manual_review_decision(
 /// spawns a new thread and never transitions again (no-op guards in
 /// engine_transition and manual_review_decision).
 pub(crate) fn is_terminal_status(status: &str) -> bool {
-    matches!(status, "blocked" | "done")
+    matches!(status, "blocked" | "done" | "released")
 }
 
 /// Parked / operator-owned kanban statuses: no workflow thread may move a task
@@ -571,7 +571,7 @@ pub(crate) fn is_terminal_status(status: &str) -> bool {
 /// parked must stay parked; a late/derived workflow transition for a thread
 /// that was already in flight must be dropped, never re-applied.
 pub(crate) fn is_parked_status(status: &str) -> bool {
-    matches!(status, "backlog" | "todo" | "blocked" | "done")
+    matches!(status, "backlog" | "todo" | "blocked" | "done" | "released")
 }
 
 /// Does the step thread (`caller_step` = `threads.workflow_step`) still own the
@@ -1919,6 +1919,9 @@ mod tests {
 fn is_terminal_status_blocks_terminal_statuses() {
     assert!(is_terminal_status("blocked"));
     assert!(is_terminal_status("done"));
+    // `released` is the manual-only parking column after `done`: no workflow
+    // thread ever runs in it and no automated transition may leave it.
+    assert!(is_terminal_status("released"));
 }
 
 #[test]
@@ -1937,7 +1940,7 @@ fn is_terminal_status_allows_active_and_retired_statuses() {
 
 #[test]
 fn is_parked_status_pins_backlog_todo_and_terminal_statuses() {
-    for s in ["backlog", "todo", "blocked", "done"] {
+    for s in ["backlog", "todo", "blocked", "done", "released"] {
         assert!(is_parked_status(s), "status {s:?} must be parked");
     }
     for s in ["running", "testing", "review", "ready", ""] {
@@ -1951,7 +1954,7 @@ fn is_parked_status_pins_backlog_todo_and_terminal_statuses() {
 /// engine_transition / route_step_completion must drop the transition.
 #[test]
 fn step_thread_owns_status_rejects_every_parked_or_terminal_target() {
-    for status in ["backlog", "todo", "blocked", "done"] {
+    for status in ["backlog", "todo", "blocked", "done", "released"] {
         for step in [
             None,
             Some(""),
