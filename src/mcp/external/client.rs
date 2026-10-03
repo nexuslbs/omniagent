@@ -2202,9 +2202,22 @@ echo "fake-mcp exiting" >&2
         assert!(logged.contains(&exit.status), "got: {logged}");
 
         // (b) The supervisor restarts the child (bounded backoff, attempt 1 = 1s).
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        //
+        // The deadline must cover the supervisor's OWN bounded schedule, not
+        // just attempt 1: MAX_RESTART_ATTEMPTS (5) with 1+2+4+8+16 = 31s of
+        // backoff, and every attempt re-runs the handshake under the configured
+        // 20s timeout. The previous 30s deadline sat BELOW that schedule, so a
+        // single slow handshake under CI load (release build, whole workspace
+        // suite in parallel) failed the test while the supervisor was still
+        // working as designed (CI run 37115094983, job "Build omniagent").
+        // The assertion below is still a real one: a supervisor that GIVES UP
+        // trips the `Failed` arm immediately, and the deadline is only the
+        // backstop for a supervisor that neither restarts nor gives up.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+        let mut last = "no supervision state recorded".to_string();
         loop {
             if let Some(s) = supervisor::runtime_status(server) {
+                last = format!("{s:?}");
                 if s.state == supervisor::LivenessState::Running && s.restarts >= 1 {
                     break;
                 }
@@ -2214,7 +2227,7 @@ echo "fake-mcp exiting" >&2
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "the crashed MCP child was never restarted"
+                "the crashed MCP child was never restarted (last state: {last})"
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
