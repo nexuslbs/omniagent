@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT m.id, m.content\n        FROM messages m\n        JOIN threads t ON t.id = m.thread_id\n        WHERE t.channel_id = $1\n          AND m.thread_sequence = 0\n        ORDER BY m.id DESC\n        LIMIT 1\n        ",
+  "query": "\n        SELECT m.id, m.content, m.iteration_number\n        FROM messages m\n        JOIN threads t ON t.id = m.thread_id\n        WHERE t.channel_id = $1\n          AND m.thread_sequence = 0\n        ORDER BY m.id DESC\n        LIMIT 1\n        ",
   "describe": {
     "columns": [
       {
@@ -24,6 +24,17 @@
             "name": "content"
           }
         }
+      },
+      {
+        "ordinal": 2,
+        "name": "iteration_number",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "iteration_number"
+          }
+        }
       }
     ],
     "parameters": {
@@ -33,8 +44,9 @@
     },
     "nullable": [
       false,
+      false,
       false
     ]
   },
-  "hash": "c00276a49436fd5ddda89aef355c6e18dcdd1749f0a029826313c9a3d45b39d9"
+  "hash": "d5f9981d6f03091e720c6c5c0283650609228b683fe89d1039e8034436f2cad6"
 }
