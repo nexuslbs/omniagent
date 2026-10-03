@@ -135,3 +135,39 @@ fn unknown_declaration_falls_back_to_the_list() {
         DispatchMode::Threshold
     );
 }
+
+/// The SHIPPED manifests declare the dispatch policy of their long-running
+/// tools, so those tools no longer depend on the core's legacy name list.
+#[test]
+fn shipped_manifests_declare_their_dispatch_policy() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("plugins/tools");
+    let read = |rel: &str| -> Vec<omniagent::mcp::behavior::ToolManifestEntry> {
+        let text = std::fs::read_to_string(root.join(rel)).expect("manifest present");
+        let value: Value = serde_json::from_str(&text).expect("manifest is JSON");
+        serde_json::from_value(value["tools"].clone()).expect("tools array parses")
+    };
+
+    let docker = read("docker/plugin.json");
+    let compose = docker
+        .iter()
+        .find(|e| e.name == "compose")
+        .expect("docker compose entry present");
+    assert_eq!(
+        compose.resolved().dispatch.as_deref(),
+        Some("immediate"),
+        "docker compose must declare its dispatch policy in its own manifest"
+    );
+
+    let git = read("git/plugin.json");
+    for name in ["run_command", "git_sync"] {
+        let entry = git
+            .iter()
+            .find(|e| e.name == name)
+            .unwrap_or_else(|| panic!("git entry '{name}' present"));
+        assert_eq!(
+            entry.resolved().dispatch.as_deref(),
+            Some("immediate"),
+            "{name} must declare its dispatch policy in its own manifest"
+        );
+    }
+}

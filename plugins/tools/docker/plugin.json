@@ -36,6 +36,6 @@
     "transport": "stdio"
   },
   "tools": [
-    { "name": "compose", "behavior": { "affects_own_stack": true } }
+    { "name": "compose", "behavior": { "affects_own_stack": true }, "dispatch": "immediate" }
   ]
 }

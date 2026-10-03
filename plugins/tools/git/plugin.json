@@ -57,7 +57,7 @@
   },
   "tools": [
     { "name": "status", "behavior": { "read_only": true } },
-    { "name": "run_command", "behavior": { "read_only": true } },
-    { "name": "git_sync" }
+    { "name": "run_command", "behavior": { "read_only": true }, "dispatch": "immediate" },
+    { "name": "git_sync", "dispatch": "immediate" }
   ]
 }
