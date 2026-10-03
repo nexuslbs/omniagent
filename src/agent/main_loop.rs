@@ -1322,6 +1322,22 @@ Previous plan:\n{}",
     // cannot shrink further: the fixed prefix alone does not fit the hard
     // budget, so every iteration compacts - a state, not a per-span error.
     let mut warned_unreducible = false;
+    // Last `over_budget` verdict the prompt plugin returned (thread 3998): true
+    // means the condense pass RAN and could not bring the prompt under its own
+    // target; false means the pass saw the prompt fitting its target, so an
+    // over-budget provider bill means the prompt crossed the budget AFTER the
+    // condensation (the local estimate lagged). It is what makes the overshoot
+    // ERROR truthful instead of unconditionally claiming that condensation
+    // failed to reduce a prompt the plugin never had to reduce.
+    let mut condense_over_budget = false;
+    // Once-per-span guard for the overshoot ERROR. It used to be the plugin's
+    // own `over_budget` verdict, which conflated the log guard with the verdict.
+    let mut over_budget_logged = false;
+    // Provider-billed excess over the hard budget of the LAST call, handed back
+    // to the prompt plugin on the next condense pass: its reduction target is
+    // derived from the PREVIOUS request's billed/measured pair, so an observed
+    // overshoot is exactly the amount that estimate was short (thread 3998).
+    let mut last_overshoot_tokens: u64 = 0;
     for _turn in 0..max_llm_calls {
         current_iter += 1; // increment before each LLM call
 
@@ -1547,6 +1563,11 @@ Previous plan:\n{}",
                     // so the provider bills UNDER the hard budget.
                     "billed_prompt_tokens": last_billed_prompt_tokens.unwrap_or(0),
                     "measured_tokens": last_measured_tokens.unwrap_or(0),
+                    // Feedback of the last provider overshoot (thread 3998): the
+                    // plugin tightens its reduction target by exactly this much,
+                    // so a prompt that grew past the hard budget between two
+                    // condense passes cannot repeat the same overshoot forever.
+                    "observed_overshoot_tokens": last_overshoot_tokens,
                 }),
                 id: String::new(),
             };
@@ -1594,6 +1615,7 @@ Previous plan:\n{}",
                             warned_unreducible = false;
                         }
                         prev_over_budget = plugin_over_budget;
+                        condense_over_budget = plugin_over_budget;
                         // Contract: the tool returns the compacted messages array
                         // (apply it) OR null/absent (no change). The core is
                         // deliberately AGNOSTIC: it applies whatever the tool
@@ -2105,14 +2127,37 @@ Previous plan:\n{}",
         cumulative_tools_share_tokens =
             cumulative_tools_share_tokens.saturating_add(tools_share_tokens);
         if billed_over_hard_budget(billed_prompt, eff_model_cfg.token_budget_hard) {
-            if !prev_over_budget {
-                error!(
-                    "[context] Thread {}: provider billed {} prompt tokens > hard budget {} and condensation did not reduce it - forcing compaction on the next iteration",
-                    thread.id, billed_prompt, eff_model_cfg.token_budget_hard
-                );
+            if !over_budget_logged {
+                // TWO distinct causes, previously conflated by one fixed text
+                // ("condensation did not reduce it") that was FALSE whenever the
+                // plugin had measured the prompt as fitting its target and had
+                // nothing to reduce (thread 3998, thread 3978): report which one
+                // actually applies, with the numbers that make it diagnosable.
+                if condense_over_budget {
+                    error!(
+                        "[context] Thread {}: provider billed {} prompt tokens > hard budget {} and condensation COULD NOT REDUCE it (the plugin reported the prompt still over its target after its own passes; last measured {} tokens) - forcing compaction on the next iteration",
+                        thread.id,
+                        billed_prompt,
+                        eff_model_cfg.token_budget_hard,
+                        last_measured_tokens.unwrap_or(0),
+                    );
+                } else {
+                    error!(
+                        "[context] Thread {}: provider billed {} prompt tokens > hard budget {} - the prompt crossed the budget AFTER condensation (the plugin's target is derived from the previous request's billed/measured pair and it measured {} tokens as fitting, so nothing was reducible) - forcing compaction on the next iteration",
+                        thread.id,
+                        billed_prompt,
+                        eff_model_cfg.token_budget_hard,
+                        last_measured_tokens.unwrap_or(0),
+                    );
+                }
+                over_budget_logged = true;
             }
+            last_overshoot_tokens =
+                overshoot_feedback_tokens(billed_prompt, eff_model_cfg.token_budget_hard);
             prev_over_budget = true;
         } else {
+            over_budget_logged = false;
+            last_overshoot_tokens = 0;
             prev_over_budget = false;
         }
 
@@ -3407,6 +3452,19 @@ fn effective_max_tokens(escalated: Option<u32>, base: Option<u32>) -> Option<u32
 /// runs; it must never be the condition that decides WHETHER compaction
 /// happens (operator, 2026-09-24, thread 3067). A `hard_budget` of 0 disables
 /// the escalation entirely.
+/// Provider-billed excess over the hard budget of one LLM call, in tokens
+/// (thread 3998). The core hands it back to the condense tool so the next
+/// reduction target accounts for the drift the previous request revealed.
+/// Zero when the call fit: the feedback only ever TIGHTENS the internal
+/// reduction target, it can never relax an operator-configured budget.
+fn overshoot_feedback_tokens(billed_prompt_tokens: usize, hard_budget: usize) -> u64 {
+    if billed_over_hard_budget(billed_prompt_tokens, hard_budget) {
+        (billed_prompt_tokens - hard_budget) as u64
+    } else {
+        0
+    }
+}
+
 fn billed_over_hard_budget(billed_prompt_tokens: usize, hard_budget: usize) -> bool {
     hard_budget > 0 && billed_prompt_tokens > hard_budget
 }
@@ -3431,6 +3489,18 @@ mod budget_gate_tests {
         assert!(billed_over_hard_budget(hard + 1, hard));
         // A disabled hard budget (0) never escalates.
         assert!(!billed_over_hard_budget(1_000_000, 0));
+    }
+
+    /// Thread 3998 (thread 3978's 201637-billed call): the observed overshoot is
+    /// exactly the billed excess, and it is ZERO whenever the call fit - so the
+    /// feedback to the condense tool can only tighten its target.
+    #[test]
+    fn overshoot_feedback_is_the_billed_excess_and_zero_when_fitting() {
+        assert_eq!(overshoot_feedback_tokens(201_637, 200_000), 1_637);
+        assert_eq!(overshoot_feedback_tokens(300_000, 200_000), 100_000);
+        assert_eq!(overshoot_feedback_tokens(200_000, 200_000), 0);
+        assert_eq!(overshoot_feedback_tokens(150_000, 200_000), 0);
+        assert_eq!(overshoot_feedback_tokens(1_000_000, 0), 0);
     }
 }
 

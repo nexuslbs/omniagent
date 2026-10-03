@@ -2151,6 +2151,15 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
     // (279 error-level overshoots / 24h, 2026-09-20).
     let billed_prompt_tokens = args["billed_prompt_tokens"].as_u64().unwrap_or(0) as usize;
     let measured_tokens = args["measured_tokens"].as_u64().unwrap_or(0) as usize;
+    // Observed provider overshoot of the PREVIOUS request (thread 3998, the
+    // 201637 > 200000 call of thread 3978): the provider billed MORE than this
+    // plugin's target allowed by adding tokens after our measure. The
+    // billed/measured pair is inherently one request old, so the excess is
+    // exactly how much the overhead estimate was short - carrying it into the
+    // headroom makes the NEXT reduction account for it instead of repeating the
+    // same overshoot. One-directional: it can only TIGHTEN the internal
+    // reduction target, never relax an operator-configured budget.
+    let observed_overshoot = args["observed_overshoot_tokens"].as_u64().unwrap_or(0) as usize;
     // A billing baseline exists when the core paired a provider-billed prompt
     // token count with the plugin's measured size of the SAME request. The
     // difference is the invisible overhead (tool schemas, chat template, the
@@ -2173,11 +2182,21 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
     // Headroom absorbs tokenizer drift and the per-iteration system injections
     // the compaction gate cannot measure; applied whenever a billing baseline
     // exists (the estimate comes from the PREVIOUS request, the next one drifts).
+    // The observed overshoot of that previous request is ADDED to it: the core
+    // reports how many tokens the provider billed over the hard budget even
+    // though this plugin had measured the prompt as fitting, so the next target
+    // is tightened by exactly that measured drift.
     let headroom = if overhead > 0 {
         cfg.compact_headroom_tokens
     } else {
         0
-    };
+    } + observed_overshoot;
+    if observed_overshoot > 0 {
+        tracing::info!(
+            "[prompt] observed provider overshoot {} tokens fed back: reduction target tightened to fit the hard budget",
+            observed_overshoot
+        );
+    }
     // Size our own measure must reach so the provider bills under the hard
     // budget. Never above the hard budget; the soft budget stays the stricter
     // reduction target whenever it already sits below it.
@@ -2187,7 +2206,7 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
     // The size the provider needs: whenever a billing baseline exists, the
     // unmeasurable overhead has to come out of our own measure as well -
     // otherwise the provider bills over while the plugin still sees "under".
-    let must_fit_target = if overhead > 0 {
+    let must_fit_target = if overhead > 0 || observed_overshoot > 0 {
         hard_target
     } else {
         hard_budget
@@ -2298,6 +2317,7 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
         "before_count": before,
         "after_count": after,
         "measured_tokens": after_size,
+        "observed_overshoot_tokens": observed_overshoot,
         "effective_target": effective_target,
         "truncate_target": must_fit_target,
         "over_budget": still_over,
@@ -2467,6 +2487,10 @@ async fn main() -> Result<()> {
                         "hard_budget": {
                             "type": "integer",
                             "description": "Required hard token budget: compaction/pruning triggers when the context exceeds it"
+                        },
+                        "observed_overshoot_tokens": {
+                            "type": "integer",
+                            "description": "Tokens the provider billed OVER the hard budget on the previous request (0 when it fit): fed back by the omniagent so the reduction target is tightened by the measured drift"
                         }
                     },
                     "required": ["messages", "soft_budget", "hard_budget"]
@@ -3728,6 +3752,106 @@ mod token_counting_tests {
         assert!(
             tool_msg["content"].as_str().unwrap().chars().count() < 200_000,
             "retained tool result must be truncated"
+        );
+    }
+
+    // Thread 3998 (thread 3978's 201637-token call): the core feeds the observed
+    // provider overshoot back, so a prompt this plugin measured as FITTING its
+    // target (nothing reducible, which is exactly when the old "condensation did
+    // not reduce it" error fired) IS reduced once the previous request proved the
+    // estimate was short. Without the feedback the gate stays open.
+    #[tokio::test]
+    async fn observed_overshoot_tightens_the_gate_and_reduces() {
+        let cfg = compact_cfg("");
+        let mut msgs = vec![ChatMessage {
+            role: "system".to_string(),
+            content: "SYSTEM PROMPT MUST SURVIVE".to_string(),
+            tool_call_id: None,
+            tool_calls: None,
+            name: None,
+        }];
+        for _ in 0..5 {
+            msgs.push(tool_call_msg("filesystem_read", "{}", "reading"));
+            msgs.push(tool_result("filesystem_read", &"X".repeat(200_000)));
+        }
+        msgs.push(user_msg("CURRENT USER TURN MUST SURVIVE"));
+        msgs.push(assistant_msg("working"));
+
+        // Budgets derived from the fixture (no magic numbers): the previous
+        // request billed `overhead` more than we measured for it.
+        let measured = measure_size(&msgs, "");
+        let overhead = 5_000usize;
+        let hard = measured + overhead + cfg.compact_headroom_tokens + 1_000;
+        let soft = 50_000usize;
+        // The previous request overshot the hard budget by exactly this much.
+        let overshoot = 2_000usize;
+        assert!(
+            measured < hard,
+            "fixture must fit the RAW hard budget: {measured} vs {hard}"
+        );
+
+        let args_for = |billed: usize, measured_prev: usize, observed: usize| {
+            json!({
+                "messages": msgs
+                    .iter()
+                    .map(|m| serde_json::to_value(m).unwrap())
+                    .collect::<Vec<_>>(),
+                "keep_recent": 3,
+                "soft_budget": soft,
+                "hard_budget": hard,
+                "billed_prompt_tokens": billed,
+                "measured_tokens": measured_prev,
+                "observed_overshoot_tokens": observed,
+            })
+        };
+
+        // CONTROL: the previous request really billed OVER the hard budget, but
+        // no overshoot feedback is passed (the pre-fix behaviour). The gate
+        // (hard - overhead - headroom) is still above our measured size, so
+        // nothing is reduced and the plugin keeps reporting over_budget=false -
+        // exactly the stale-estimate blindness behind thread 3978's
+        // "201637 > 200000 and condensation did not reduce it".
+        let billed_prev = hard + overshoot;
+        assert!(
+            billed_prev > hard,
+            "the previous request really billed over the hard budget"
+        );
+        let (out, is_error) =
+            handle_compact_messages(&args_for(billed_prev, billed_prev - overhead, 0), &cfg)
+                .await
+                .unwrap();
+        assert!(!is_error, "compaction must not error: {out}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v["was_compacted"], false,
+            "without the feedback the gate stays open: {v}"
+        );
+        assert_eq!(
+            v["over_budget"], false,
+            "the plugin still believes the prompt fits: {v}"
+        );
+
+        // WITH the observed overshoot the target is tightened by exactly that
+        // much: the gate fires and the prompt is reduced under what fits.
+        let (out, is_error) = handle_compact_messages(
+            &args_for(billed_prev, billed_prev - overhead, overshoot),
+            &cfg,
+        )
+        .await
+        .unwrap();
+        assert!(!is_error, "compaction must not error: {out}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["observed_overshoot_tokens"], overshoot as u64, "{v}");
+        assert_eq!(
+            v["was_compacted"], true,
+            "the fed-back overshoot must trigger the reduction: {v}"
+        );
+        assert_eq!(v["over_budget"], false, "still over the target: {v}");
+        let truncate_target = v["truncate_target"].as_u64().unwrap();
+        assert_eq!(truncate_target, (measured - 1_000) as u64, "{v}");
+        assert!(
+            v["measured_tokens"].as_u64().unwrap() <= truncate_target,
+            "the reduction must reach the tightened target: {v}"
         );
     }
 
