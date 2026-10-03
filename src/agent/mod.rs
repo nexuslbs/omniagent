@@ -24,7 +24,7 @@ pub mod helpers;
 pub mod kanban_updater;
 pub(crate) mod main_loop;
 pub mod plugin_manager;
-pub(crate) mod pricing;
+pub mod pricing;
 pub(crate) mod prompt_sections;
 pub mod recovery;
 pub(crate) mod response_handler;
