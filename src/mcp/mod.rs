@@ -231,6 +231,7 @@ pub fn spill_tool_result(
 }
 
 pub mod behavior;
+pub mod envelope;
 pub mod external;
 pub mod task_tools;
 pub use behavior::ToolBehavior;
@@ -998,7 +999,26 @@ impl McpRegistry {
         // Try exact match first
         if let Some(tool) = self.get(&call.name) {
             let tool = tool.clone();
-            let args = call.arguments.clone();
+            // Bridge tools (`{plugin}__tool`: the workstation/workbench MCP
+            // wrappers) forward to an inner tool by name. Some models repeat
+            // the whole `{tool, params}` envelope INSIDE `params`, which the
+            // bridge then delivers to the inner tool as its own params (thread
+            // 3908). Repair the self-nested envelope before the call leaves
+            // the omniagent: the bridge receives the INNER params, the plain
+            // `{tool, params}` HTTP body is unchanged.
+            let args = match crate::mcp::envelope::repair_self_nested_envelope(
+                &tool.input_schema,
+                &call.arguments,
+            ) {
+                Some(inner) => {
+                    tracing::warn!(
+                        tool = %tool.name,
+                        "bridge tool call carried a self-nested tool+params envelope: repaired to the inner params"
+                    );
+                    inner
+                }
+                None => call.arguments.clone(),
+            };
             let result = (tool.handler)(args.clone(), ctx).await;
             return match result {
                 Ok(r) => {
