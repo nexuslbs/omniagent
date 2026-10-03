@@ -447,6 +447,9 @@ mod tests {
 
     #[test]
     fn omniagent_entry_has_dsh_field_set_with_main_loop_filled_fields() {
+        // A valid `config/model_prices.yml` is present (pricing.rs tests seed
+        // one): an unknown ROUTE stays null - it is never fabricated as 0.
+        let _ = crate::agent::pricing::test_support::seeded_data_dir();
         let entry = omniagent_usage_entry(
             &usage(100, 25, Some(60), Some(5)),
             "deepseek",
@@ -470,6 +473,7 @@ mod tests {
 
     #[test]
     fn omniagent_entry_prices_a_known_route_service_side() {
+        let _ = crate::agent::pricing::test_support::seeded_data_dir();
         let entry = omniagent_usage_entry(
             &usage(1_000_000, 200_000, Some(500_000), Some(5)),
             "deepseek",
@@ -479,8 +483,14 @@ mod tests {
         let cost = &entry["cost"];
         assert!(!cost.is_null(), "known route must carry a cost block");
         assert_eq!(cost["is_estimate"], true);
-        assert_eq!(cost["source"], crate::agent::pricing::PRICE_TABLE_VERSION);
-        assert_eq!(cost["pricing_ref"], crate::agent::pricing::PRICE_TABLE_REF);
+        assert_eq!(cost["source"], crate::agent::pricing::PRICING_SOURCE);
+        let pricing_ref = cost["pricing_ref"]
+            .as_str()
+            .expect("pricing_ref is a string");
+        assert!(
+            pricing_ref.starts_with("config/model_prices.yml@"),
+            "provenance must name the external file: {pricing_ref}"
+        );
         let amount = cost["amount_usd"].as_f64().expect("amount_usd is numeric");
         // 1,000,000 prompt tokens of which 500,000 are cache hits (500,000
         // uncached) + 200,000 output at the DeepSeek flash rate:

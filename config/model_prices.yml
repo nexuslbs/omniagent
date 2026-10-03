@@ -1,0 +1,77 @@
+# model_prices.yml - USD per 1,000,000 tokens.
+#
+# SINGLE source of truth for LLM token pricing, shared by the omniagent core
+# (`src/agent/pricing.rs`) and the dsh/workstation cost accounting
+# (`workstation-plugins/shared/usage.ts`). Editing a rate here changes future
+# costs with NO rebuild, NO release and NO restart restart: the file is
+# re-read on every cost computation (see pricing.rs "RELOAD SEMANTICS").
+#
+# SHAPE: providers -> provider -> model -> canonical rates.
+#
+# Canonical keys (EXACT names, no aliases), USD per 1,000,000 tokens:
+#   input         uncached input tokens
+#   cached_input  cache-READ (cache-hit) tokens. This is the canonical name,
+#                 matching the `cached_input_tokens` field both sides already
+#                 emit. The dsh-internal spelling `cache_read` is NOT a valid
+#                 key here.
+#   output        output tokens
+#   cache_write   cache-write tokens
+#   reasoning     OPTIONAL reasoning tokens; when absent, reasoning is billed
+#                 inside `output`, exactly as the core does today (no separate
+#                 reasoning term).
+#
+# Unknown keys (top-level, per-provider, per-model or per-rate) are IGNORED, so
+# a newer file stays readable by an older binary (forward compatible: the
+# peak/off-peak fields task adds `off_peak_factor` / window fields here).
+#
+# ABSENT / EMPTY / INVALID FILE: never an error, never a startup failure -
+# every computed cost is the plain number 0.
+#
+# `aliases:` maps a provider spelling to the provider key that carries its
+# prices. A route absent from the file is UNPRICED -> cost null (never a
+# fabricated 0).
+#
+# Seeded 2026-10-03 with `price_table_v1` (omniagent c0fd501 + 8341e90 and
+# workstation-plugins `shared/usage.ts` PRICE_TABLE), moved out of the compiled
+# constants so an operator can update a price by editing this one file.
+
+version: price_table_v1
+
+providers:
+  deepseek:
+    deepseek-flash:
+      input: 0.30
+      cached_input: 0.006
+      output: 1.20
+      cache_write: 0.30
+      reasoning: 1.20
+    deepseek-v4-flash:
+      input: 0.30
+      cached_input: 0.006
+      output: 1.20
+      cache_write: 0.30
+      reasoning: 1.20
+    deepseek-v4.1-flash:
+      input: 0.30
+      cached_input: 0.006
+      output: 1.20
+      cache_write: 0.30
+      reasoning: 1.20
+    deepseek-v4-pro:
+      input: 1.32
+      cached_input: 0.044
+      output: 3.96
+      cache_write: 1.32
+      reasoning: 3.96
+  google:
+    gemini-2.5-flash:
+      input: 0.30
+      cached_input: 0.03
+      output: 2.50
+      cache_write: 0.30
+
+# Provider spellings that carry no rates of their own: they resolve to the
+# provider key that does.
+aliases:
+  deepseek-official: deepseek
+  opencode-go: deepseek

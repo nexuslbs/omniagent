@@ -195,6 +195,10 @@ async fn run_server() -> AppResult<()> {
     // global data dir so the yml store is reachable from every channel query.
     omniagent::channels_yaml::set_data_dir(&data_dir);
     omniagent::profiles_yaml::set_data_dir(&data_dir);
+    // Token pricing lives in {data_dir}/config/model_prices.yml (an external,
+    // updatable file, like models.yml). Unlike models.yml a malformed file is
+    // NOT fatal: absent/empty/invalid -> every cost is 0, never an error.
+    omniagent::agent::pricing::set_data_dir(&data_dir);
 
     let default_profile = profile::default_profile_name();
     tracing::info!("Default profile: {}", default_profile);
