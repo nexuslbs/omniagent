@@ -84,6 +84,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use chrono::{DateTime, Datelike, SecondsFormat, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -125,12 +126,182 @@ pub fn prices_path(data_dir: &str) -> PathBuf {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PricesFile {
-    /// Informational version cited in `pricing_ref` (e.g. `price_table_v1`).
+    /// Informational version cited in `pricing_ref` (e.g. `price_table_v2`).
     pub version: Option<String>,
+    /// The PEAK -> OFF-PEAK calendar (WHEN the per-route off-peak factor
+    /// applies). Absent block => every call is priced at peak.
+    pub off_peak: Option<OffPeakBlock>,
     /// provider -> model -> rates.
     pub providers: BTreeMap<String, BTreeMap<String, PriceEntry>>,
     /// alias provider -> canonical provider (`deepseek-official: deepseek`).
     pub aliases: BTreeMap<String, String>,
+}
+
+/// The file-level `off_peak:` block: the CALENDAR only.
+///
+/// The discount itself is PER ROUTE ([`PriceEntry::off_peak_factor`]), so a
+/// flat-priced provider (Google) simply omits it and is never discounted.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OffPeakBlock {
+    /// Informational (`UTC`); the computation is ALWAYS UTC.
+    pub timezone: Option<String>,
+    /// The class used when NO window matches (`peak` | `off-peak`).
+    /// Empty => `peak`.
+    pub default_class: String,
+    /// When true, Saturday and Sunday are always `default_class`.
+    pub weekdays_only: bool,
+    /// UTC `YYYY-MM-DD` dates forced to `default_class` (public holidays).
+    pub holiday_dates: Vec<String>,
+    /// `[start, end)` UTC windows, each with its own class.
+    pub windows: Vec<OffPeakWindow>,
+}
+
+/// One configured `[start, end)` UTC window (`HH:MM`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OffPeakWindow {
+    pub start: String,
+    pub end: String,
+    /// `peak` | `off-peak`.
+    pub class: String,
+}
+
+/// The applied rate class of one call, recorded on the cost block
+/// (`rate_class`) so a cost can be audited against its call time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateClass {
+    /// Standard (list) rate: every configured rate is used as written.
+    Peak,
+    /// Discounted rate: every rate is multiplied by `off_peak_factor`.
+    OffPeak,
+}
+
+impl RateClass {
+    /// The value recorded on the cost block.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RateClass::Peak => "peak",
+            RateClass::OffPeak => "off-peak",
+        }
+    }
+
+    /// Parse `peak` / `standard` / `off-peak` / `offpeak` / `off_peak`.
+    fn parse(raw: &str) -> Option<RateClass> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "peak" | "standard" => Some(RateClass::Peak),
+            "off-peak" | "offpeak" | "off_peak" => Some(RateClass::OffPeak),
+            _ => None,
+        }
+    }
+}
+
+/// A validated off-peak calendar (see [`OffPeakBlock`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OffPeakCalendar {
+    default_class: RateClass,
+    weekdays_only: bool,
+    holiday_dates: Vec<String>,
+    /// `(start_minute, end_minute, class)`; `start < end` except for a window
+    /// wrapping midnight, which is stored as `end <= start`.
+    windows: Vec<(u32, u32, RateClass)>,
+}
+
+/// `HH:MM` (UTC) -> minutes since midnight. Also accepts `H:MM`.
+fn parse_hhmm(raw: &str) -> Option<u32> {
+    let (hours, minutes) = raw.trim().split_once(':')?;
+    let hours: u32 = hours.trim().parse().ok()?;
+    let minutes: u32 = minutes.trim().parse().ok()?;
+    if hours > 23 || minutes > 59 {
+        return None;
+    }
+    Some(hours * 60 + minutes)
+}
+
+/// `YYYY-MM-DD` shape check (calendar validity is not needed: it is only ever
+/// compared to a formatted UTC date).
+fn looks_like_date(raw: &str) -> bool {
+    let raw = raw.trim();
+    raw.len() == 10
+        && raw.as_bytes().iter().enumerate().all(|(i, b)| {
+            if i == 4 || i == 7 {
+                *b == b'-'
+            } else {
+                b.is_ascii_digit()
+            }
+        })
+}
+
+impl OffPeakBlock {
+    /// Validate the block into a calendar. `None` (never an error) means the
+    /// block is unusable: every call is then priced at peak, exactly as if the
+    /// block were absent.
+    pub fn resolve(&self) -> Option<OffPeakCalendar> {
+        let default_class = if self.default_class.trim().is_empty() {
+            RateClass::Peak
+        } else {
+            match RateClass::parse(&self.default_class) {
+                Some(class) => class,
+                None => return None,
+            }
+        };
+        let mut windows = Vec::with_capacity(self.windows.len());
+        for window in &self.windows {
+            let start = match parse_hhmm(&window.start) {
+                Some(minute) => minute,
+                None => return None,
+            };
+            let end = match parse_hhmm(&window.end) {
+                Some(minute) => minute,
+                None => return None,
+            };
+            if start == end {
+                return None;
+            }
+            let class = match RateClass::parse(&window.class) {
+                Some(class) => class,
+                None => return None,
+            };
+            windows.push((start, end, class));
+        }
+        Some(OffPeakCalendar {
+            default_class,
+            weekdays_only: self.weekdays_only,
+            holiday_dates: self
+                .holiday_dates
+                .iter()
+                .filter(|date| looks_like_date(date))
+                .cloned()
+                .collect(),
+            windows,
+        })
+    }
+}
+
+impl OffPeakCalendar {
+    /// The rate class of a call made at `at` (UTC).
+    pub fn class_at(&self, at: DateTime<Utc>) -> RateClass {
+        if self.weekdays_only && at.weekday().num_days_from_monday() >= 5 {
+            return self.default_class;
+        }
+        let date = at.format("%Y-%m-%d").to_string();
+        if self.holiday_dates.iter().any(|holiday| holiday == &date) {
+            return self.default_class;
+        }
+        let minute = at.hour() * 60 + at.minute();
+        for (start, end, class) in &self.windows {
+            let hit = if start < end {
+                minute >= *start && minute < *end
+            } else {
+                // Wraps midnight: 16:30 -> 00:30.
+                minute >= *start || minute < *end
+            };
+            if hit {
+                return *class;
+            }
+        }
+        self.default_class
+    }
 }
 
 /// The canonical per-model rate set: USD per 1,000,000 tokens.
@@ -152,6 +323,10 @@ pub struct PriceEntry {
     pub cache_write: f64,
     /// Optional reasoning tokens (absent = billed inside `output`).
     pub reasoning: Option<f64>,
+    /// Optional OFF-PEAK multiplier for this route (e.g. `0.5` = half).
+    /// A route WITHOUT it is always billed at the peak rate, whatever the
+    /// calendar says (flat-priced providers such as Google).
+    pub off_peak_factor: Option<f64>,
 }
 
 /// One priced route as used by the cost formula.
@@ -162,6 +337,8 @@ pub struct ModelPrice {
     pub output: f64,
     pub cache_write: f64,
     pub reasoning: Option<f64>,
+    /// `Some(factor)` opts this route into off-peak pricing.
+    pub off_peak_factor: Option<f64>,
 }
 
 impl From<PriceEntry> for ModelPrice {
@@ -172,6 +349,7 @@ impl From<PriceEntry> for ModelPrice {
             output: e.output,
             cache_write: e.cache_write,
             reasoning: e.reasoning,
+            off_peak_factor: e.off_peak_factor,
         }
     }
 }
@@ -221,15 +399,24 @@ pub struct PriceTable {
     version: String,
     hash: String,
     file: PricesFile,
+    /// The validated `off_peak:` calendar, when the file carries a usable one.
+    off_peak: Option<OffPeakCalendar>,
 }
 
 impl PriceTable {
-    fn new(status: PricesStatus, version: String, hash: String, file: PricesFile) -> Self {
+    fn new(
+        status: PricesStatus,
+        version: String,
+        hash: String,
+        file: PricesFile,
+        off_peak: Option<OffPeakCalendar>,
+    ) -> Self {
         PriceTable {
             status,
             version,
             hash,
             file,
+            off_peak,
         }
     }
 
@@ -240,6 +427,7 @@ impl PriceTable {
             String::new(),
             String::new(),
             PricesFile::default(),
+            None,
         )
     }
 
@@ -250,6 +438,7 @@ impl PriceTable {
             String::new(),
             hash,
             PricesFile::default(),
+            None,
         )
     }
 
@@ -260,12 +449,14 @@ impl PriceTable {
             String::new(),
             hash,
             PricesFile::default(),
+            None,
         )
     }
 
     /// A valid definition file.
     pub fn loaded(file: PricesFile, version: String, hash: String) -> Self {
-        PriceTable::new(PricesStatus::Loaded, version, hash, file)
+        let off_peak = file.off_peak.as_ref().and_then(|block| block.resolve());
+        PriceTable::new(PricesStatus::Loaded, version, hash, file, off_peak)
     }
 
     /// True when the file exists and parsed: only then can a route be priced.
@@ -353,8 +544,42 @@ impl PriceTable {
         })
     }
 
+    /// The rate class applied to a call made at `at`, with the multiplier.
+    ///
+    /// A route WITHOUT `off_peak_factor` never opts into the discount: it is
+    /// always peak (factor 1.0), whatever the calendar says. No usable
+    /// calendar (block absent or invalid) also means peak.
+    pub fn applied_rate(&self, price: &ModelPrice, at: DateTime<Utc>) -> (RateClass, f64) {
+        let calendar_class = self
+            .off_peak
+            .as_ref()
+            .map(|calendar| calendar.class_at(at))
+            .unwrap_or(RateClass::Peak);
+        if calendar_class == RateClass::OffPeak {
+            if let Some(factor) = price.off_peak_factor {
+                return (RateClass::OffPeak, factor);
+            }
+        }
+        (RateClass::Peak, 1.0)
+    }
+
+    /// The rate class the given route is billed at for a call at `at`.
+    pub fn rate_class_at(&self, price: &ModelPrice, at: DateTime<Utc>) -> RateClass {
+        self.applied_rate(price, at).0
+    }
+
+    /// The validated off-peak calendar, when the file carries a usable one.
+    pub fn off_peak_calendar(&self) -> Option<&OffPeakCalendar> {
+        self.off_peak.as_ref()
+    }
+
     /// The priced `cost` block for one call, or `null` when the (valid) file
     /// does not price the route.
+    ///
+    /// The rates used are the file's PEAK rates, multiplied by the route's
+    /// `off_peak_factor` when the call time falls inside an off-peak class.
+    /// `rate_class` and `call_time` are always recorded so the cost can be
+    /// audited against the call time; `off_peak_factor` only when it applied.
     fn priced_cost_block(
         &self,
         price: ModelPrice,
@@ -362,20 +587,30 @@ impl PriceTable {
         cached_input_tokens: u64,
         output_tokens: u64,
         cache_write_tokens: u64,
+        at: DateTime<Utc>,
     ) -> Value {
+        let (class, factor) = self.applied_rate(&price, at);
         let uncached_input = input_tokens.saturating_sub(cached_input_tokens) as f64;
-        let amount = (uncached_input * price.input
-            + cached_input_tokens as f64 * price.cached_input
-            + output_tokens as f64 * price.output
-            + cache_write_tokens as f64 * price.cache_write)
+        let amount = (uncached_input * price.input * factor
+            + cached_input_tokens as f64 * price.cached_input * factor
+            + output_tokens as f64 * price.output * factor
+            + cache_write_tokens as f64 * price.cache_write * factor)
             / 1_000_000.0;
         let rounded = (amount * 1e9).round() / 1e9;
-        json!({
+        let mut block = json!({
             "amount_usd": rounded,
             "is_estimate": true,
             "source": PRICING_SOURCE,
             "pricing_ref": self.pricing_ref(),
-        })
+            "rate_class": class.as_str(),
+            "call_time": at.to_rfc3339_opts(SecondsFormat::Secs, true),
+        });
+        if class == RateClass::OffPeak {
+            if let Some(object) = block.as_object_mut() {
+                object.insert("off_peak_factor".to_string(), json!(factor));
+            }
+        }
+        block
     }
 }
 
@@ -512,7 +747,7 @@ pub fn cost_block(
     cache_write_tokens: u64,
 ) -> Value {
     match data_dir() {
-        Some(dir) => cost_block_in(
+        Some(dir) => cost_block_in_at(
             dir,
             provider,
             model,
@@ -520,6 +755,43 @@ pub fn cost_block(
             cached_input_tokens,
             output_tokens,
             cache_write_tokens,
+            Utc::now(),
+        ),
+        None => json!({
+            "amount_usd": 0.0,
+            "is_estimate": true,
+            "source": PRICING_SOURCE,
+            "pricing_ref": format!("config/{}#no-data-dir", PRICES_FILE),
+        }),
+    }
+}
+
+/// [`cost_block`] with an EXPLICIT call time (UTC).
+///
+/// The core ledger records no per-call timestamp, so [`cost_block`] uses the
+/// time the entry is built (the entry is built immediately after the provider
+/// call returns) - this variant makes the call time explicit for callers that
+/// do hold one, and for deterministic tests.
+#[allow(clippy::too_many_arguments)]
+pub fn cost_block_at(
+    provider: &str,
+    model: &str,
+    input_tokens: u64,
+    cached_input_tokens: u64,
+    output_tokens: u64,
+    cache_write_tokens: u64,
+    at: DateTime<Utc>,
+) -> Value {
+    match data_dir() {
+        Some(dir) => cost_block_in_at(
+            dir,
+            provider,
+            model,
+            input_tokens,
+            cached_input_tokens,
+            output_tokens,
+            cache_write_tokens,
+            at,
         ),
         None => json!({
             "amount_usd": 0.0,
@@ -531,7 +803,7 @@ pub fn cost_block(
 }
 
 /// [`cost_block`] against an explicit data dir (tests, and callers that hold
-/// the dir themselves).
+/// the dir themselves). Uses the current time as the call time.
 pub fn cost_block_in(
     data_dir: &str,
     provider: &str,
@@ -540,6 +812,31 @@ pub fn cost_block_in(
     cached_input_tokens: u64,
     output_tokens: u64,
     cache_write_tokens: u64,
+) -> Value {
+    cost_block_in_at(
+        data_dir,
+        provider,
+        model,
+        input_tokens,
+        cached_input_tokens,
+        output_tokens,
+        cache_write_tokens,
+        Utc::now(),
+    )
+}
+
+/// [`cost_block_in`] with an EXPLICIT call time (UTC). The rate class is
+/// selected from `at`, never from the machine's local time.
+#[allow(clippy::too_many_arguments)]
+pub fn cost_block_in_at(
+    data_dir: &str,
+    provider: &str,
+    model: &str,
+    input_tokens: u64,
+    cached_input_tokens: u64,
+    output_tokens: u64,
+    cache_write_tokens: u64,
+    at: DateTime<Utc>,
 ) -> Value {
     let table = load_table_for(data_dir);
     if !table.is_loaded() {
@@ -552,6 +849,7 @@ pub fn cost_block_in(
             cached_input_tokens,
             output_tokens,
             cache_write_tokens,
+            at,
         ),
         None => Value::Null,
     }
@@ -620,10 +918,10 @@ mod tests {
     #[test]
     fn shipped_seed_is_valid_and_prices_the_documented_routes() {
         let file = parse_prices(SEED).expect("shipped seed parses");
-        assert_eq!(file.version.as_deref(), Some("price_table_v1"));
+        assert_eq!(file.version.as_deref(), Some("price_table_v2"));
         let table = PriceTable::loaded(
             file,
-            "price_table_v1".to_string(),
+            "price_table_v2".to_string(),
             content_hash(SEED.as_bytes()),
         );
         assert!(table.is_loaded());
@@ -664,7 +962,7 @@ mod tests {
     fn valid_file_prices_a_known_route_with_provenance() {
         let dir = tmpdir("valid");
         write_prices(&dir, SEED);
-        let cost = cost_block_in(
+        let cost = cost_block_in_at(
             dir.to_str().unwrap(),
             "deepseek",
             "deepseek-v4-flash",
@@ -672,17 +970,20 @@ mod tests {
             500_000,
             200_000,
             0,
+            at("2026-10-05T02:00:00Z"),
         );
         assert!(!cost.is_null(), "known route must carry a cost block");
         assert_eq!(cost["is_estimate"], true);
         assert_eq!(cost["source"], PRICING_SOURCE);
+        assert_eq!(cost["rate_class"], "peak");
+        assert_eq!(cost["call_time"], "2026-10-05T02:00:00Z");
         // 500,000 uncached * 0.30 + 500,000 cached * 0.006 + 200,000 * 1.20
         // = 0.15 + 0.003 + 0.24 = 0.393 USD.
         let amount = cost["amount_usd"].as_f64().expect("amount_usd is numeric");
         assert!((amount - 0.393).abs() < 1e-9, "got {amount}");
         let pricing_ref = cost["pricing_ref"].as_str().expect("pricing_ref");
         assert!(
-            pricing_ref.starts_with("config/model_prices.yml@price_table_v1#"),
+            pricing_ref.starts_with("config/model_prices.yml@price_table_v2#"),
             "provenance must name the external file: {pricing_ref}"
         );
     }
@@ -693,7 +994,7 @@ mod tests {
         write_prices(&dir, SEED);
         // prompt_tokens INCLUDES the cache-hit tokens: 1,000,000 prompt of
         // which 1,000,000 are cache hits = only the cache rate.
-        let cost = cost_block_in(
+        let cost = cost_block_in_at(
             dir.to_str().unwrap(),
             "deepseek",
             "deepseek-v4-flash",
@@ -701,6 +1002,7 @@ mod tests {
             1_000_000,
             0,
             0,
+            at("2026-10-05T02:00:00Z"),
         );
         let amount = cost["amount_usd"].as_f64().unwrap();
         assert!((amount - 0.006).abs() < 1e-9, "got {amount}");
@@ -825,7 +1127,7 @@ mod tests {
     fn provider_aliases_and_the_model_fallback_keep_the_same_price() {
         let dir = tmpdir("aliases");
         write_prices(&dir, SEED);
-        let base = cost_block_in(
+        let base = cost_block_in_at(
             dir.to_str().unwrap(),
             "deepseek",
             "deepseek-v4-pro",
@@ -833,10 +1135,11 @@ mod tests {
             0,
             0,
             0,
+            at("2026-10-05T02:00:00Z"),
         );
         assert!(!base.is_null());
         for alias in ["deepseek-official", "opencode-go", "some-unlisted-gateway"] {
-            let cost = cost_block_in(
+            let cost = cost_block_in_at(
                 dir.to_str().unwrap(),
                 alias,
                 "deepseek-v4-pro",
@@ -844,6 +1147,7 @@ mod tests {
                 0,
                 0,
                 0,
+                at("2026-10-05T02:00:00Z"),
             );
             assert_eq!(cost["amount_usd"], base["amount_usd"], "alias {alias}");
         }
@@ -901,17 +1205,301 @@ mod tests {
     #[test]
     fn global_cost_block_reads_the_configured_data_dir() {
         let _ = test_support::seeded_data_dir();
-        let cost = cost_block(
+        let cost = cost_block_at(
             "deepseek",
             "deepseek-v4-flash",
             1_000_000,
             500_000,
             200_000,
             0,
+            at("2026-10-05T02:00:00Z"),
         );
         assert!(!cost.is_null());
         assert_eq!(cost["source"], PRICING_SOURCE);
+        assert_eq!(cost["rate_class"], "peak");
         let amount = cost["amount_usd"].as_f64().unwrap();
         assert!((amount - 0.393).abs() < 1e-9, "got {amount}");
+    }
+
+    /// A fixed UTC instant (2026-10-05 is a Monday, 2026-10-03 a Saturday).
+    fn at(iso: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(iso)
+            .unwrap_or_else(|e| panic!("bad test instant {iso}: {e}"))
+            .with_timezone(&Utc)
+    }
+
+    fn amount(cost: &Value) -> f64 {
+        cost["amount_usd"].as_f64().expect("amount_usd is numeric")
+    }
+
+    #[test]
+    fn off_peak_window_selects_the_rate_class_from_the_call_time() {
+        let dir = tmpdir("window");
+        write_prices(&dir, SEED);
+        let dir = dir.to_str().unwrap();
+        let peak = cost_block_in_at(
+            dir,
+            "deepseek",
+            "deepseek-v4-flash",
+            1_000_000,
+            0,
+            0,
+            0,
+            at("2026-10-05T02:00:00Z"),
+        );
+        assert_eq!(peak["rate_class"], "peak");
+        assert!((amount(&peak) - 0.3).abs() < 1e-9, "{peak}");
+        assert!(peak.get("off_peak_factor").is_none(), "{peak}");
+
+        let off = cost_block_in_at(
+            dir,
+            "deepseek",
+            "deepseek-v4-flash",
+            1_000_000,
+            0,
+            0,
+            0,
+            at("2026-10-05T20:00:00Z"),
+        );
+        assert_eq!(off["rate_class"], "off-peak");
+        assert_eq!(off["off_peak_factor"], 0.5);
+        assert_eq!(off["call_time"], "2026-10-05T20:00:00Z");
+        assert!((amount(&off) - 0.15).abs() < 1e-9, "{off}");
+
+        // EVERY rate bucket is discounted (input, cached_input, output,
+        // cache_write): 1M prompt of which 400k cached, 100k out, 200k write.
+        let mix = cost_block_in_at(
+            dir,
+            "deepseek",
+            "deepseek-v4-pro",
+            1_000_000,
+            400_000,
+            100_000,
+            200_000,
+            at("2026-10-05T20:00:00Z"),
+        );
+        let expected =
+            (600_000.0 * 1.32 + 400_000.0 * 0.044 + 100_000.0 * 3.96 + 200_000.0 * 1.32) * 0.5
+                / 1e6;
+        assert!((amount(&mix) - expected).abs() < 1e-9, "{mix}");
+    }
+
+    #[test]
+    fn window_boundaries_are_start_inclusive_end_exclusive() {
+        let dir = tmpdir("boundaries");
+        write_prices(&dir, SEED);
+        let dir = dir.to_str().unwrap();
+        let cases = [
+            ("2026-10-05T00:59:00Z", "off-peak"),
+            ("2026-10-05T01:00:00Z", "peak"),
+            ("2026-10-05T03:59:00Z", "peak"),
+            ("2026-10-05T04:00:00Z", "off-peak"),
+            ("2026-10-05T05:59:00Z", "off-peak"),
+            ("2026-10-05T06:00:00Z", "peak"),
+            ("2026-10-05T09:59:00Z", "peak"),
+            ("2026-10-05T10:00:00Z", "off-peak"),
+        ];
+        for (iso, expected) in cases {
+            let cost = cost_block_in_at(
+                dir,
+                "deepseek",
+                "deepseek-v4-flash",
+                1_000_000,
+                0,
+                0,
+                0,
+                at(iso),
+            );
+            assert_eq!(cost["rate_class"], expected, "at {iso}");
+        }
+    }
+
+    #[test]
+    fn weekends_and_holidays_are_always_off_peak() {
+        let dir = tmpdir("weekend");
+        write_prices(&dir, SEED);
+        let dir_str = dir.to_str().unwrap();
+        // Saturday 02:00 UTC is INSIDE a configured peak window, but DeepSeek
+        // bills weekends as off-peak in full.
+        let saturday = cost_block_in_at(
+            dir_str,
+            "deepseek",
+            "deepseek-v4-flash",
+            1_000_000,
+            0,
+            0,
+            0,
+            at("2026-10-03T02:00:00Z"),
+        );
+        assert_eq!(saturday["rate_class"], "off-peak");
+        assert_eq!(saturday["off_peak_factor"], 0.5);
+        // A configured public holiday is off-peak even on a weekday inside a
+        // window (Chinese holidays cannot be derived from the pricing page, so
+        // the list is operator-editable).
+        let holiday_seed = SEED.replace("  holiday_dates: []", "  holiday_dates: [\"2026-10-05\"]");
+        assert!(holiday_seed.contains("2026-10-05"));
+        write_prices(&dir, &holiday_seed);
+        let holiday = cost_block_in_at(
+            dir_str,
+            "deepseek",
+            "deepseek-v4-flash",
+            1_000_000,
+            0,
+            0,
+            0,
+            at("2026-10-05T02:00:00Z"),
+        );
+        assert_eq!(holiday["rate_class"], "off-peak");
+    }
+
+    #[test]
+    fn a_route_without_off_peak_factor_is_never_discounted() {
+        let dir = tmpdir("flat-provider");
+        write_prices(&dir, SEED);
+        // Google publishes no off-peak schedule: the calendar must not touch it.
+        let cost = cost_block_in_at(
+            dir.to_str().unwrap(),
+            "google",
+            "gemini-2.5-flash",
+            1_000_000,
+            0,
+            0,
+            0,
+            at("2026-10-05T20:00:00Z"),
+        );
+        assert_eq!(cost["rate_class"], "peak");
+        assert!((amount(&cost) - 0.3).abs() < 1e-9, "{cost}");
+    }
+
+    #[test]
+    fn the_vendor_policy_is_configuration_not_code() {
+        // A totally different policy (the historical single 16:30-00:30 UTC
+        // off-peak window) is expressible with NO code change.
+        let dir = tmpdir("policy");
+        write_prices(
+            &dir,
+            "off_peak:\n  default_class: peak\n  weekdays_only: false\n  windows:\n    - start: '16:30'\n      end: '00:30'\n      class: off-peak\nproviders:\n  deepseek:\n    m1:\n      input: 1.0\n      output: 1.0\n      off_peak_factor: 0.5\n",
+        );
+        let dir = dir.to_str().unwrap();
+        let inside = cost_block_in_at(
+            dir,
+            "deepseek",
+            "m1",
+            1_000_000,
+            0,
+            0,
+            0,
+            at("2026-10-05T20:00:00Z"),
+        );
+        assert_eq!(inside["rate_class"], "off-peak");
+        assert!((amount(&inside) - 0.5).abs() < 1e-9, "{inside}");
+        // The 16:30 start is inclusive, and the window wraps midnight.
+        let start = cost_block_in_at(
+            dir,
+            "deepseek",
+            "m1",
+            1_000_000,
+            0,
+            0,
+            0,
+            at("2026-10-05T16:30:00Z"),
+        );
+        assert_eq!(start["rate_class"], "off-peak");
+        let wrapped = cost_block_in_at(
+            dir,
+            "deepseek",
+            "m1",
+            1_000_000,
+            0,
+            0,
+            0,
+            at("2026-10-06T00:00:00Z"),
+        );
+        assert_eq!(wrapped["rate_class"], "off-peak");
+        // 00:30 is the exclusive end.
+        let end = cost_block_in_at(
+            dir,
+            "deepseek",
+            "m1",
+            1_000_000,
+            0,
+            0,
+            0,
+            at("2026-10-06T00:30:00Z"),
+        );
+        assert_eq!(end["rate_class"], "peak");
+        let outside = cost_block_in_at(
+            dir,
+            "deepseek",
+            "m1",
+            1_000_000,
+            0,
+            0,
+            0,
+            at("2026-10-05T12:00:00Z"),
+        );
+        assert_eq!(outside["rate_class"], "peak");
+        assert!((amount(&outside) - 1.0).abs() < 1e-9, "{outside}");
+    }
+
+    #[test]
+    fn an_unusable_off_peak_block_falls_back_to_peak_without_error() {
+        let dir = tmpdir("bad-block");
+        write_prices(
+            &dir,
+            "off_peak:\n  default_class: nope\n  windows:\n    - start: '01:00'\n      end: '04:00'\n      class: peak\nproviders:\n  deepseek:\n    m1:\n      input: 1.0\n      output: 1.0\n      off_peak_factor: 0.5\n",
+        );
+        let dir = dir.to_str().unwrap();
+        let table = load_table_for(dir);
+        assert!(
+            table.is_loaded(),
+            "a bad off_peak block never invalidates the RATES"
+        );
+        assert!(table.off_peak_calendar().is_none());
+        let cost = cost_block_in_at(
+            dir,
+            "deepseek",
+            "m1",
+            1_000_000,
+            0,
+            0,
+            0,
+            at("2026-10-05T20:00:00Z"),
+        );
+        assert_eq!(cost["rate_class"], "peak");
+        assert!((amount(&cost) - 1.0).abs() < 1e-9, "{cost}");
+    }
+
+    #[test]
+    fn editing_the_window_changes_the_cost_with_no_code_change() {
+        let dir = tmpdir("edit-window");
+        let patched = SEED.replace("  default_class: off-peak", "  default_class: peak");
+        assert!(patched.contains("default_class: peak"));
+        write_prices(&dir, &patched);
+        let before = cost_block_in_at(
+            dir.to_str().unwrap(),
+            "deepseek",
+            "deepseek-v4-flash",
+            1_000_000,
+            0,
+            0,
+            0,
+            at("2026-10-05T20:00:00Z"),
+        );
+        assert!((amount(&before) - 0.3).abs() < 1e-9, "{before}");
+        // Same file, one edited line, no rebuild / no restart.
+        write_prices(&dir, SEED);
+        let after = cost_block_in_at(
+            dir.to_str().unwrap(),
+            "deepseek",
+            "deepseek-v4-flash",
+            1_000_000,
+            0,
+            0,
+            0,
+            at("2026-10-05T20:00:00Z"),
+        );
+        assert!((amount(&after) - 0.15).abs() < 1e-9, "{after}");
+        assert_eq!(after["rate_class"], "off-peak");
     }
 }
