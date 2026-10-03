@@ -58,6 +58,8 @@
   "tools": [
     { "name": "status", "behavior": { "read_only": true } },
     { "name": "run_command", "behavior": { "read_only": true }, "dispatch": "immediate" },
-    { "name": "git_sync", "dispatch": "immediate" }
+    { "name": "git_sync", "dispatch": "immediate" },
+    { "name": "clone_repo", "dispatch": "immediate" },
+    { "name": "commit_and_push", "dispatch": "immediate" }
   ]
 }

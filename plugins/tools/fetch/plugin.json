@@ -4,6 +4,9 @@
   "version": "0.1.0",
   "description": "HTTP tool \u2014 fetch web pages and API responses (GET by default; optional method gated by allow_unsafe_methods; optional custom headers gated by allow_custom_headers with $env:/$secret: expansion)",
   "type": "mcp",
+  "tools": [
+    { "name": "fetch", "dispatch": "immediate" }
+  ],
   "entrypoint": {
     "command": "mcp-server-fetch",
     "args": [],

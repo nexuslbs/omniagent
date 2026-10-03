@@ -1149,7 +1149,12 @@ pub(crate) fn llm_transport_limits() -> LlmTransportLimits {
 /// - `pool_idle_timeout`: recycle keep-alive sockets after 90s idle so stale
 ///   connections closed by the peer are not reused for new requests.
 fn build_llm_http_client() -> reqwest::Client {
-    let limits = llm_transport_limits();
+    build_llm_http_client_with(llm_transport_limits())
+}
+
+/// The same hardened client with EXPLICIT limits, so a test can pin the
+/// configured timeout without touching the process-wide settings snapshot.
+fn build_llm_http_client_with(limits: LlmTransportLimits) -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(limits.total_timeout_secs))
         .connect_timeout(std::time::Duration::from_secs(limits.connect_timeout_secs))
@@ -1175,6 +1180,44 @@ mod transport_limit_tests {
         assert_eq!(l.retry_attempts, LLM_TRANSPORT_RETRY_ATTEMPTS);
         assert_eq!(l.retry_base_delay_ms, LLM_TRANSPORT_RETRY_BASE_DELAY_MS);
         assert_eq!(l.max_concurrent, ProviderThrottle::DEFAULT_MAX_CONCURRENT);
+    }
+
+    /// Acceptance (T6.3 / HV-B4): with an unreachable endpoint the CONFIGURED
+    /// total timeout is the one enforced. A listener that accepts and never
+    /// answers forces the client's own timeout; 1s is used instead of the
+    /// 300s default so the assertion stays fast.
+    #[tokio::test]
+    async fn unreachable_endpoint_enforces_the_configured_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        // Accept and HOLD the connection without ever responding.
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                drop(stream);
+            }
+        });
+
+        let mut limits = llm_transport_limits();
+        limits.total_timeout_secs = 1;
+        limits.connect_timeout_secs = 1;
+        let client = build_llm_http_client_with(limits);
+
+        let started = std::time::Instant::now();
+        let result = client.get(format!("http://{addr}/")).send().await;
+        let elapsed = started.elapsed();
+
+        assert!(result.is_err(), "a never-answering peer must time out");
+        assert!(
+            elapsed >= std::time::Duration::from_millis(900),
+            "the configured 1s timeout was not enforced (elapsed {elapsed:?})"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "the client did not use the configured timeout (elapsed {elapsed:?})"
+        );
     }
 }
 

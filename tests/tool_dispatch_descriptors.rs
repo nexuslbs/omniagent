@@ -159,7 +159,7 @@ fn shipped_manifests_declare_their_dispatch_policy() {
     );
 
     let git = read("git/plugin.json");
-    for name in ["run_command", "git_sync"] {
+    for name in ["run_command", "git_sync", "clone_repo", "commit_and_push"] {
         let entry = git
             .iter()
             .find(|e| e.name == name)

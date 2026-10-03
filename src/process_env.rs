@@ -7,10 +7,11 @@
 //!
 //! - the plugin's configured `env:` map (with `$env:` / `$secret:` refs
 //!   resolved by the core because the config explicitly declared them), and
-//! - an explicit `PATH` so the child can resolve its own grandchildren:
-//!   Rust's `Command::new` resolves bare program names via `execvp` using the
-//!   PARENT's environ `PATH`, so an env-cleared child would otherwise fail with
-//!   ENOENT on its own spawns.
+//! - an explicit `PATH` so the child can resolve its own grandchildren: a bare
+//!   program name is resolved by `execvp` against the environment the process
+//!   runs with, so an env-cleared child that itself spawns `git`, `docker` or
+//!   `cargo` fails with ENOENT unless the parent hands it its own `PATH`.
+//!   [`child_path`] is exactly that hand-off.
 //!
 //! No other variable is ever passed implicitly. There is NO whitelist.
 
@@ -83,5 +84,59 @@ mod tests {
     fn child_path_uses_the_parent_toolchain() {
         std::env::set_var("PATH", "/parent-only/bin");
         assert_eq!(child_path(), "/parent-only/bin");
+    }
+
+    /// Audit HV-C2 acceptance: an env-cleared child spawned with the composed
+    /// PATH resolves a program that lives OUTSIDE the five legacy directories
+    /// (a `$CARGO_HOME`, homebrew or NixOS toolchain), while the legacy fixed
+    /// list would not find it.
+    #[test]
+    fn child_resolves_a_program_outside_the_legacy_directories() {
+        let dir = std::env::temp_dir().join(format!("omni-path-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create probe dir");
+        let probe = dir.join("omni-path-probe");
+        std::fs::write(&probe, "#!/bin/sh\necho PROBE-OK\n").expect("write probe");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod probe");
+        }
+        let custom = dir.to_string_lossy().to_string();
+
+        // `/bin/sh` is spawned by ABSOLUTE path; the grandchild
+        // `omni-path-probe` is resolved by `sh` against exactly the PATH we
+        // hand the child (an env-cleared child resolves bare names with its
+        // OWN environment).
+        let with_parent_path = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("omni-path-probe")
+            .env_clear()
+            .env("PATH", compose_child_path(Some(&custom), None))
+            .output()
+            .expect("spawn sh");
+        assert_eq!(
+            String::from_utf8_lossy(&with_parent_path.stdout).trim(),
+            "PROBE-OK",
+            "the parent-derived PATH must reach the child"
+        );
+
+        // The pre-fix fixed list cannot find the probe: the old behaviour
+        // would fail this test.
+        let with_minimal_path = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("omni-path-probe")
+            .env_clear()
+            .env("PATH", MINIMAL_PATH)
+            .output()
+            .expect("spawn sh");
+        assert_ne!(with_minimal_path.status.code(), Some(0));
+        assert!(
+            !MINIMAL_PATH.split(':').any(|d| d == custom),
+            "the custom dir must be outside the legacy fixed list"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

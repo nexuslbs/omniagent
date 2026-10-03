@@ -575,14 +575,6 @@ pub async fn handle_fail_thread(args: Value, ctx: AppContext) -> AppResult<McpTo
         .get("reason")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    // The fail-thread tool result IS the last message of the thread, so the
-    // full reason must live in THIS single JSON message: one failure = one
-    // trailing JSON message carrying the reason (no separate ack that leaves
-    // the summary in an earlier message).
-    let reason_text = reason
-        .clone()
-        .unwrap_or_else(crate::agent::fail_thread::default_fail_reason);
-
     let thread = match crate::db::threads::get_thread_by_id(&ctx.pool, thread_id).await? {
         Some(t) => t,
         None => {
@@ -593,6 +585,15 @@ pub async fn handle_fail_thread(args: Value, ctx: AppContext) -> AppResult<McpTo
             });
         }
     };
+
+    // The fail-thread tool result IS the last message of the thread, so the
+    // full reason must live in THIS single JSON message: one failure = one
+    // trailing JSON message carrying the reason (no separate ack that leaves
+    // the summary in an earlier message). Precedence (audit HV-E3): explicit
+    // reason -> profile override -> operator setting -> code default.
+    let reason_text = reason.clone().unwrap_or_else(|| {
+        crate::agent::fail_thread::default_fail_reason_for_profile(Some(&thread.profile))
+    });
 
     let saved = crate::agent::fail_thread::fail_thread_tool(
         &ctx,

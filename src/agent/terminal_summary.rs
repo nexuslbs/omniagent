@@ -43,11 +43,11 @@ pub fn stop_reason_truncated(reason: Option<&str>) -> bool {
 }
 
 /// The STRUCTURED "not a usable final answer" decision (audit HV-E1): the
-/// provider's stop reason and the DSML envelope STRUCTURE of the text decide,
-/// never the wording of a phrase list. Empty content is unusable by
-/// definition.
+/// provider's own stop reason (a length cutoff) or "nothing coherent survives
+/// sanitizing" decides, never the wording of a phrase list. Markup ALONE does
+/// not: an envelope with prose keeps the prose.
 pub fn structurally_unusable(raw: &str, stop_reason: Option<&str>) -> bool {
-    stop_reason_truncated(stop_reason) || contains_dsml_markup(raw) || raw.trim().is_empty()
+    stop_reason_truncated(stop_reason) || sanitize_terminal_content(raw).trim().is_empty()
 }
 
 /// Phrase lists behind [`is_continuation_intent`], demoted to DATA (audit

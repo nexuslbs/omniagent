@@ -66,6 +66,19 @@ pub fn prompt_budget_default() -> usize {
     crate::runtime_settings::get_usize("profile_prompt_budget", PROMPT_BUDGET_DEFAULT)
 }
 
+/// Profile-level override of the fail-thread reason (audit HV-E3), read from
+/// `profiles.yml`. `None` when the profile declares none (or the file is
+/// absent/unreadable): the global `fail_thread_default_reason` operator
+/// setting and its documented code default then apply.
+pub fn fail_thread_reason_override(data_dir: &str, profile: &str) -> Option<String> {
+    let file = crate::profiles_yaml::load_profiles_from(data_dir).ok()?;
+    file.profiles
+        .get(profile)?
+        .fail_thread_reason
+        .clone()
+        .filter(|r| !r.trim().is_empty())
+}
+
 /// Legacy schema for `profiles/<name>/config.json` - KEPT for backward
 /// compat only (the file stays on disk, untouched, but is NOT read for
 /// resolution anymore).
@@ -343,6 +356,31 @@ mod tests {
         assert_eq!(p.plan, Some(true));
         assert_eq!(p.template.as_deref(), Some("researcher"));
         assert_eq!(p.toolset.as_deref(), Some("researcher_set"));
+    }
+
+    #[test]
+    fn fail_thread_reason_override_comes_from_the_profile() {
+        // Audit HV-E3: the PROFILE can override the fail-thread message; a
+        // profile that declares none falls through to the global default.
+        let dir = temp_dir("fail-reason");
+        std::fs::write(
+            dir.join("config").join("profiles.yml"),
+            "profiles:\n  omni:\n    fail_thread_reason: \"Custom profile failure text\"\n  bare: {}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            fail_thread_reason_override(dir.to_str().unwrap(), "omni").as_deref(),
+            Some("Custom profile failure text")
+        );
+        assert_eq!(
+            fail_thread_reason_override(dir.to_str().unwrap(), "bare"),
+            None
+        );
+        assert_eq!(
+            fail_thread_reason_override(dir.to_str().unwrap(), "missing"),
+            None
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

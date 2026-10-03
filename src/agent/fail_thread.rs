@@ -732,6 +732,20 @@ pub fn default_fail_reason() -> String {
     crate::runtime_settings::get_str("fail_thread_default_reason", DEFAULT_FAIL_REASON)
 }
 
+/// The fail-thread reason for a thread of `profile`: the PROFILE-level override
+/// declared in `profiles.yml` (`fail_thread_reason`, audit HV-E3) wins, else the
+/// operator setting / documented code default.
+pub fn default_fail_reason_for_profile(profile: Option<&str>) -> String {
+    if let Some(name) = profile {
+        if let Some(dir) = crate::runtime_settings::omni_dir() {
+            if let Some(reason) = crate::profile::fail_thread_reason_override(&dir, name) {
+                return reason;
+            }
+        }
+    }
+    default_fail_reason()
+}
+
 pub(crate) async fn fail_thread_tool(
     ctx: &crate::mcp::AppContext,
     thread: &crate::db::types::Thread,
@@ -764,7 +778,7 @@ pub(crate) async fn fail_thread_tool(
     // Error-type message is written FIRST and the thread-end Usage message
     // SECOND (at `next_seq + 1`, see below): Usage ends up 2nd-last and the
     // loop's tool-result last. No existing row is ever mutated.
-    let content = reason.unwrap_or_else(default_fail_reason);
+    let content = reason.unwrap_or_else(|| default_fail_reason_for_profile(Some(&thread.profile)));
     let err_msg = MessageNew {
         thread_id: thread.id,
         role: "system".to_string(),

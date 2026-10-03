@@ -121,6 +121,12 @@ pub struct ProfileDef {
     /// Temperature for this profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// Profile-level override of the message stored when a thread of this
+    /// profile is failed without an explicit reason (audit HV-E3). Omitted =
+    /// the operator setting `fail_thread_default_reason`, else the documented
+    /// code default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fail_thread_reason: Option<String>,
 }
 
 // ── Path / IO ───────────────────────────────────────────────────────────────
