@@ -240,28 +240,16 @@ impl OffPeakBlock {
         let default_class = if self.default_class.trim().is_empty() {
             RateClass::Peak
         } else {
-            match RateClass::parse(&self.default_class) {
-                Some(class) => class,
-                None => return None,
-            }
+            RateClass::parse(&self.default_class)?
         };
         let mut windows = Vec::with_capacity(self.windows.len());
         for window in &self.windows {
-            let start = match parse_hhmm(&window.start) {
-                Some(minute) => minute,
-                None => return None,
-            };
-            let end = match parse_hhmm(&window.end) {
-                Some(minute) => minute,
-                None => return None,
-            };
+            let start = parse_hhmm(&window.start)?;
+            let end = parse_hhmm(&window.end)?;
             if start == end {
                 return None;
             }
-            let class = match RateClass::parse(&window.class) {
-                Some(class) => class,
-                None => return None,
-            };
+            let class = RateClass::parse(&window.class)?;
             windows.push((start, end, class));
         }
         Some(OffPeakCalendar {
