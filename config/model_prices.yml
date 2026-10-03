@@ -1,92 +1,54 @@
-# model_prices.yml - USD per 1,000,000 tokens (PEAK / standard rates).
+# model_prices.yml - USD per 1,000,000 tokens, ONE price class per model.
 #
 # SINGLE source of truth for LLM token pricing, shared by the omniagent core
 # (`src/agent/pricing.rs`) and the dsh/workstation cost accounting
 # (`workstation-plugins/shared/pricing.ts` + `shared/usage.ts`). Editing a rate
-# or a window here changes FUTURE costs with NO rebuild, NO release and NO
-# restart: the file is re-read on every cost computation.
+# here changes FUTURE costs with NO rebuild, NO release and NO restart: the file
+# is re-read on every cost computation.
+#
+# ONE PRICE CLASS PER MODEL (operator, telegram 2026-10-03): the earlier
+# time-aware, vendor-coupled pricing layer was REMOVED. There is no time
+# dimension, no schedule, no window, no holiday calendar and no class selector:
+# a model has exactly one rate set and every call to that model is priced with
+# it.
 #
 # SHAPE: providers -> provider -> model -> canonical rates.
 #
 # Canonical keys (EXACT names, no aliases), USD per 1,000,000 tokens:
-#   input         uncached (cache-miss) input tokens, PEAK rate
-#   cached_input  cache-READ (cache-hit) tokens, PEAK rate. This is the
-#                 canonical name, matching the `cached_input_tokens` field both
-#                 sides already emit. The dsh-internal spelling `cache_read` is
-#                 NOT a valid key here.
-#   output        output tokens, PEAK rate
-#   cache_write   cache-write tokens, PEAK rate
+#   input         uncached (cache-miss) input tokens
+#   cached_input  cache-READ (cache-hit) tokens. This is the canonical name,
+#                 matching the `cached_input_tokens` field both sides already
+#                 emit. The dsh-internal spelling `cache_read` is NOT a valid
+#                 key here.
+#   output        output tokens
+#   cache_write   cache-write tokens
 #   reasoning     OPTIONAL reasoning tokens; when absent, reasoning is billed
 #                 inside `output`, exactly as the core does today (no separate
 #                 reasoning term).
-#   off_peak_factor
-#                 OPTIONAL per-route off-peak multiplier (e.g. 0.5 = half).
-#                 A route WITHOUT this key is ALWAYS priced at the peak rate,
-#                 whatever the calendar says - use that for flat-priced
-#                 providers (Google publishes no off-peak schedule).
-#                 See the `off_peak:` block for WHEN the multiplier applies.
 #
-# Unknown keys (top-level, per-provider, per-model or per-rate) are IGNORED, so
-# a newer file stays readable by an older binary.
+# STRICT SCHEMA (operator correction, telegram 2026-10-03): the schema above is
+# the ONLY schema. ANY other key - at the file level, the provider level, the
+# model level or the rate level - makes the file INVALID. In particular a file
+# that still carries any of the removed time-aware keys (the file-level
+# calendar block, the per-route discount multiplier, window / weekday / holiday
+# settings, any class selector) is REJECTED: it is never read with the extra
+# keys ignored, and no class selection may ever happen.
 #
-# ABSENT / EMPTY / INVALID FILE: never an error, never a startup failure -
-# every computed cost is the plain number 0. A route absent from a VALID file
-# is UNPRICED -> cost null (an unknown price is never fabricated as 0).
+# INVALID FILE -> COST NOT STORED, WARNING, NEVER A FAILED TASK: an invalid or
+# unparseable file never panics, never fails a task and never surfaces an error
+# to the agent or the user. The affected usage entries simply carry NO cost (it
+# is not stored) and a WARNING naming the reason is logged. An ABSENT or EMPTY
+# file is unchanged: every computed cost is the plain number 0, with the reason
+# recorded in `pricing_ref`. A route absent from a VALID file is UNPRICED ->
+# cost null (an unknown price is never fabricated as 0).
 #
 # `aliases:` maps a provider spelling to the provider key that carries its
 # prices (one hop, never a chain).
 #
-# ---------------------------------------------------------------------------
-# TIME-AWARE COST (peak / off-peak), added 2026-10-03
-# ---------------------------------------------------------------------------
-# The cost of a call depends on WHEN the call was made, in UTC (never the
-# container's local time). The applied class is recorded on every priced entry
-# as `rate_class: "peak" | "off-peak"`, together with `call_time`.
-#
-# DeepSeek's published schedule (verified on
-# https://api-docs.deepseek.com/quick_start/pricing, 2026-10-03):
-#   "Off-peak rates are half of the peak rates. Peak hours are 01:00 - 04:00
-#    and 06:00 - 10:00 UTC, Monday through Friday, excluding Chinese public
-#    holidays. All other hours are off-peak, including weekends and Chinese
-#    public holidays in full."
-#
-# The `off_peak:` block below expresses exactly that:
-#   default_class : the class used when NO window matches (here: off-peak)
-#   windows       : [start, end) UTC windows of the listed `class`; a window
-#                   whose end is <= its start wraps over midnight
-#   weekdays_only : true = windows apply Monday-Friday only; Saturday and
-#                   Sunday are always `default_class` (DeepSeek: off-peak)
-#   holiday_dates : UTC YYYY-MM-DD dates forced to `default_class`. Chinese
-#                   public holidays cannot be derived from the pricing page and
-#                   the list is intentionally empty (NOT modelled): add the
-#                   published dates here if exact holiday billing matters.
-#   timezone      : informational; the computation is ALWAYS UTC
-#
-# Both bounds are start-INCLUSIVE / end-EXCLUSIVE (01:00-04:00 means 01:00:00
-# through 03:59:59, and 04:00:00 is already off-peak).
-#
-# A different vendor policy (e.g. a single 16:30-00:30 off-peak window) is
-# expressible WITHOUT a code change, e.g.:
-#   default_class: peak
-#   weekdays_only: false
-#   windows: [ { start: "16:30", end: "00:30", class: off-peak } ]
-#
-# Seeded 2026-10-03 with `price_table_v2` (peak table + off-peak layer).
+# Seeded 2026-10-03 with `price_table_v3` (single-class table; the time-aware
+# `price_table_v2` layer was removed).
 
-version: price_table_v2
-
-off_peak:
-  timezone: UTC
-  default_class: off-peak
-  weekdays_only: true
-  holiday_dates: []
-  windows:
-    - start: "01:00"
-      end: "04:00"
-      class: peak
-    - start: "06:00"
-      end: "10:00"
-      class: peak
+version: price_table_v3
 
 providers:
   deepseek:
@@ -96,31 +58,25 @@ providers:
       output: 1.20
       cache_write: 0.30
       reasoning: 1.20
-      off_peak_factor: 0.5
     deepseek-v4-flash:
       input: 0.30
       cached_input: 0.006
       output: 1.20
       cache_write: 0.30
       reasoning: 1.20
-      off_peak_factor: 0.5
     deepseek-v4.1-flash:
       input: 0.30
       cached_input: 0.006
       output: 1.20
       cache_write: 0.30
       reasoning: 1.20
-      off_peak_factor: 0.5
     deepseek-v4-pro:
       input: 1.32
       cached_input: 0.044
       output: 3.96
       cache_write: 1.32
       reasoning: 3.96
-      off_peak_factor: 0.5
   google:
-    # Google publishes no peak/off-peak schedule: no `off_peak_factor`, so this
-    # route is always billed at the peak (list) rate.
     gemini-2.5-flash:
       input: 0.30
       cached_input: 0.03

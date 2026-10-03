@@ -123,36 +123,22 @@ fn strip_meta_deep(value: Value, collector: &mut Vec<Value>) -> (Value, bool) {
 /// `omniagent: true` and `agent` are filled by the MAIN LOOP (never by the
 /// provider); token counts come from the provider usage result; `cost` is the
 /// SERVICE-SIDE price-table block ([`crate::agent::pricing::cost_block`]) -
-/// never agent estimation - and stays `null` for a route the table does not
-/// price. `cache_write_tokens` is not tracked by the core provider parsing
-/// today, so it stays `null` (and is priced as 0).
+/// never agent estimation. There is NO time dimension: the cost is a PURE
+/// function of `(provider, model, tokens)` read from the model's ONE rate set
+/// in `{OMNI_DIR}/config/model_prices.yml`. `cost` stays `null` for a route the
+/// valid table does not price, and for an INVALID `model_prices.yml` the cost
+/// is simply NOT stored (`null`, no fabricated value) while the pricing module
+/// logs a WARNING - never an error, never a failed thread.
+/// `cache_write_tokens` is not tracked by the core provider parsing today, so
+/// it stays `null` (and is priced as 0).
 pub fn omniagent_usage_entry(usage: &Usage, provider: &str, model: &str, agent: &str) -> Value {
-    omniagent_usage_entry_at(usage, provider, model, agent, chrono::Utc::now())
-}
-
-/// [`omniagent_usage_entry`] with an EXPLICIT call time (UTC).
-///
-/// The rate class (peak / off-peak) of the recorded cost is chosen from `at`
-/// against the `off_peak:` calendar of `{OMNI_DIR}/config/model_prices.yml`
-/// (`crate::agent::pricing::cost_block_at`). The core ledger records no
-/// per-call timestamp, so the plain [`omniagent_usage_entry`] uses the time the
-/// entry is built - the entry is built immediately after the provider call
-/// returns.
-pub fn omniagent_usage_entry_at(
-    usage: &Usage,
-    provider: &str,
-    model: &str,
-    agent: &str,
-    at: chrono::DateTime<chrono::Utc>,
-) -> Value {
-    let cost = crate::agent::pricing::cost_block_at(
+    let cost = crate::agent::pricing::cost_block(
         provider,
         model,
         u64::from(usage.prompt_tokens),
         u64::from(usage.cached_tokens.unwrap_or(0)),
         u64::from(usage.completion_tokens),
         0,
-        at,
     );
     json!({
         "omniagent": true,
@@ -493,17 +479,20 @@ mod tests {
     #[test]
     fn omniagent_entry_prices_a_known_route_service_side() {
         let _ = crate::agent::pricing::test_support::seeded_data_dir();
-        let entry = omniagent_usage_entry_at(
+        let entry = omniagent_usage_entry(
             &usage(1_000_000, 200_000, Some(500_000), Some(5)),
             "deepseek",
             "deepseek-v4-flash",
             "omni",
-            peak_time(),
         );
         let cost = &entry["cost"];
         assert!(!cost.is_null(), "known route must carry a cost block");
         assert_eq!(cost["is_estimate"], true);
         assert_eq!(cost["source"], crate::agent::pricing::PRICING_SOURCE);
+        // ONE price class per model: no rate class, no call time, no factor.
+        assert!(cost.get("rate_class").is_none(), "{cost}");
+        assert!(cost.get("call_time").is_none(), "{cost}");
+        assert!(cost.get("off_peak_factor").is_none(), "{cost}");
         let pricing_ref = cost["pricing_ref"]
             .as_str()
             .expect("pricing_ref is a string");
@@ -516,53 +505,18 @@ mod tests {
         // uncached) + 200,000 output at the DeepSeek flash rate:
         // 0.15 + 0.003 + 0.24 = 0.393 USD.
         assert!((amount - 0.393).abs() < 1e-9, "got {}", amount);
-    }
-
-    /// 2026-10-05T02:00:00Z = a Monday inside the configured peak window.
-    fn peak_time() -> chrono::DateTime<chrono::Utc> {
-        chrono::DateTime::parse_from_rfc3339("2026-10-05T02:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc)
-    }
-
-    /// 2026-10-05T20:00:00Z = a Monday outside every peak window.
-    fn off_peak_time() -> chrono::DateTime<chrono::Utc> {
-        chrono::DateTime::parse_from_rfc3339("2026-10-05T20:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc)
-    }
-
-    #[test]
-    fn omniagent_entry_selects_the_rate_class_from_the_call_time() {
-        let _ = crate::agent::pricing::test_support::seeded_data_dir();
-        let tokens = usage(1_000_000, 200_000, Some(500_000), Some(5));
-        let peak = omniagent_usage_entry_at(
-            &tokens,
+        // The entry is built from the model's ONE rate set and carries NO
+        // timestamp input at all.
+        let again = omniagent_usage_entry(
+            &usage(1_000_000, 200_000, Some(500_000), Some(5)),
             "deepseek",
             "deepseek-v4-flash",
             "omni",
-            peak_time(),
         );
-        let off = omniagent_usage_entry_at(
-            &tokens,
-            "deepseek",
-            "deepseek-v4-flash",
-            "omni",
-            off_peak_time(),
+        assert_eq!(
+            entry["cost"], again["cost"],
+            "cost must not depend on the wall clock"
         );
-        assert_eq!(peak["cost"]["rate_class"], "peak");
-        assert_eq!(off["cost"]["rate_class"], "off-peak");
-        assert_eq!(off["cost"]["off_peak_factor"], 0.5);
-        assert_eq!(off["cost"]["call_time"], "2026-10-05T20:00:00Z");
-        let peak_amount = peak["cost"]["amount_usd"].as_f64().unwrap();
-        let off_amount = off["cost"]["amount_usd"].as_f64().unwrap();
-        assert!(
-            (off_amount - peak_amount / 2.0).abs() < 1e-9,
-            "off-peak must be half: peak={peak_amount} off={off_amount}"
-        );
-        // The token counts themselves never depend on the rate class.
-        assert_eq!(peak["input_tokens"], off["input_tokens"]);
-        assert_eq!(peak["total_tokens"], off["total_tokens"]);
     }
 
     #[test]
