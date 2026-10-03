@@ -184,10 +184,18 @@ pub fn log_code_defaults() {
 mod tests {
     use super::*;
 
+    /// The snapshot is process-wide: tests that replace it must not run
+    /// concurrently, or a parallel test overwrites the map mid-assert.
+    fn lock() -> std::sync::MutexGuard<'static, ()> {
+        static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        L.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// A configured value is used verbatim; an absent one falls back to the
     /// documented default (never a narrower one).
     #[test]
     fn configured_values_win_and_defaults_fill_the_gaps() {
+        let _g = lock();
         let mut map = HashMap::new();
         map.insert("db_readonly_max_rows".to_string(), "5000".to_string());
         map.insert("default_board".to_string(), "research".to_string());
@@ -205,6 +213,7 @@ mod tests {
     /// instead of silently becoming 0.
     #[test]
     fn unparseable_value_falls_back_to_default() {
+        let _g = lock();
         let mut map = HashMap::new();
         map.insert("db_readonly_timeout_ms".to_string(), "abc".to_string());
         set(map);
@@ -215,6 +224,7 @@ mod tests {
     /// `code_defaults_in_use` reports exactly the non-configured keys.
     #[test]
     fn tracked_defaults_and_missing_report() {
+        let _g = lock();
         let mut map = HashMap::new();
         map.insert("compose_cli".to_string(), "docker-compose".to_string());
         set(map);
