@@ -117,6 +117,33 @@ fn strip_meta_deep(value: Value, collector: &mut Vec<Value>) -> (Value, bool) {
     }
 }
 
+/// Collect `_meta.usage` from a tool result and ONLY THEN apply the per-result
+/// output cap - the cap must never be able to hide a usage item.
+///
+/// WHY (operator request 2026-10-03, telegram threads 4004/4005): the answer of
+/// a workstation agent-calling tool carries `_meta.usage` LAST, behind the
+/// agent's stdout/stderr tails, so a payload longer than the inline cap lost
+/// its usage items the moment the cap ran FIRST. Five of the twelve dsh
+/// sessions of thread 3999 (the four biggest by tokens plus the two vision
+/// children riding in them) never reached the thread-end Usage message; the
+/// operator's reference case is ~10.46M tokens while the DB recorded 4.50M.
+///
+/// The returned text is the `_meta`-free content, capped exactly like before:
+/// `max_inline_chars == 0` disables the cap. The stripped content never carries
+/// a `_meta` key, so neither the agent prompt nor a stored message can show it
+/// (requirement R3) - the caller only has to hand the collected items to the
+/// thread's usage collector.
+pub fn cap_after_collect(content: &str, max_inline_chars: usize) -> (String, Vec<Value>) {
+    let mut collected: Vec<Value> = Vec::new();
+    let stripped = strip_meta_and_collect(content, &mut collected);
+    let capped = if max_inline_chars == 0 || stripped.len() <= max_inline_chars {
+        stripped
+    } else {
+        crate::mcp::truncate_content(&stripped, max_inline_chars)
+    };
+    (capped, collected)
+}
+
 /// Build the omniagent's own usage entry for one LLM call, mirroring the
 /// dsh-agent field set.
 ///
@@ -380,6 +407,42 @@ pub fn clear_thread_usage(thread_id: i64) {
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .remove(&thread_id);
+    THREAD_DEFERRED_USAGE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .remove(&thread_id);
+}
+
+/// Usage items collected by a BACKGROUND tool task, parked per thread.
+///
+/// WHY: a backgrounded tool call is inspected inside the spawned task (see
+/// [`cap_after_collect`]), where the loop's own `usage_entries` vector is not in
+/// scope - and its usage items must be collected from the FULL payload BEFORE
+/// the per-result cap cuts the tail they sit in. The task parks them here; the
+/// loop drains them into `usage_entries` on its next round (and before it
+/// publishes the snapshot the fail-thread path reads).
+static THREAD_DEFERRED_USAGE: LazyLock<Mutex<HashMap<i64, Vec<Value>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Park usage items collected by a background task for `thread_id`.
+pub fn push_deferred_usage(thread_id: i64, entries: &[Value]) {
+    if entries.is_empty() {
+        return;
+    }
+    let mut map = THREAD_DEFERRED_USAGE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    map.entry(thread_id).or_default().extend_from_slice(entries);
+}
+
+/// Take the usage items parked for `thread_id` (empty when none were parked).
+/// Draining is destructive: a parked item is counted exactly once.
+pub fn drain_deferred_usage(thread_id: i64) -> Vec<Value> {
+    THREAD_DEFERRED_USAGE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .remove(&thread_id)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -784,5 +847,52 @@ mod tests {
         assert!(content.get("full_output_tokens").is_none());
         assert!(content.get("full_reasoning_tokens").is_none());
         assert!(content.get("cost").is_none());
+    }
+
+    #[test]
+    fn cap_after_collect_keeps_the_usage_that_sits_beyond_the_inline_cap() {
+        // Regression (operator telegram 4004/4005, thread 3999): the
+        // workstation result carries `_meta.usage` LAST, so a payload larger
+        // than the inline cap lost its usage items when the cap ran FIRST.
+        let filler = "x".repeat(4000);
+        let item = json!({
+            "agent": "tester",
+            "input_tokens": 2_192_341,
+            "cost": {"amount_usd": 1.5},
+            "details": {"kind": "llm-call", "session_id": "s-tester", "seq": 1}
+        });
+        let content = json!({
+            "tool": "workstation__tool",
+            "output": filler,
+            "_meta": {"usage": [item]}
+        })
+        .to_string();
+        assert!(content.len() > 1000);
+        let (capped, collected) = cap_after_collect(&content, 1000);
+        assert_eq!(collected.len(), 1, "usage beyond the cap is still collected");
+        assert_eq!(collected[0]["agent"], "tester");
+        assert_eq!(collected[0]["input_tokens"], 2_192_341);
+        assert!(!capped.contains("_meta"), "the capped text carries no _meta");
+        assert!(capped.len() < content.len(), "the cap still bounds the payload");
+        // The cap-disabled setting keeps the whole (still `_meta`-free) payload.
+        let (full, collected) = cap_after_collect(&content, 0);
+        assert_eq!(collected.len(), 1);
+        assert!(!full.contains("_meta"));
+    }
+
+    #[test]
+    fn deferred_usage_is_per_thread_and_drained_once() {
+        push_deferred_usage(4242, &[json!({"agent": "reddit"})]);
+        push_deferred_usage(4242, &[json!({"agent": "mattermost"})]);
+        push_deferred_usage(7, &[json!({"agent": "other"})]);
+        let drained = drain_deferred_usage(4242);
+        assert_eq!(drained.len(), 2, "both parked items come back in order");
+        assert_eq!(drained[0]["agent"], "reddit");
+        assert_eq!(drained[1]["agent"], "mattermost");
+        assert!(
+            drain_deferred_usage(4242).is_empty(),
+            "a parked item is counted exactly once"
+        );
+        assert_eq!(drain_deferred_usage(7).len(), 1, "queues are per thread");
     }
 }

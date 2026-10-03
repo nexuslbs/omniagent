@@ -2674,12 +2674,15 @@ Previous plan:\n{}",
 
         let pool = cfg.pool.clone();
         // mcp_registry removed - use cfg.plugin_manager instead
-        // Publish the usage entries collected so far for this thread. The
-        // builtin fail-thread tool runs in the dispatch below and persists the
-        // thread's LAST message from inside the tool, where this collector is
-        // not in scope; it reads this snapshot to build the thread-end Usage
+        // Drain what backgrounded tool tasks parked since the last round (their
+        // usage was collected from the FULL payload, before the per-result cap
+        // ran), then publish the usage entries collected so far for this thread.
+        // The builtin fail-thread tool runs in the dispatch below and persists
+        // the thread's LAST message from inside the tool, where this collector
+        // is not in scope; it reads this snapshot to build the thread-end Usage
         // message it inserts BEFORE its Error message (so the Error message
         // stays the thread's last row, operator correction 2026-10-02).
+        usage_entries.extend(crate::agent::usage_entries::drain_deferred_usage(thread.id));
         crate::agent::usage_entries::publish_thread_usage(thread.id, &usage_entries);
         let mut join_set = JoinSet::new();
 
@@ -3088,6 +3091,11 @@ Previous plan:\n{}",
                     tool_errors[idx] = is_error;
                     tool_results[idx] = Some((tc_id, tool_name, output));
                     usage_entries.extend(task_usage);
+                    // R2: also take what backgrounded tool tasks parked while this
+                    // round was running - their `_meta.usage` was collected from
+                    // the FULL payload, before the per-result cap could cut it.
+                    usage_entries
+                        .extend(crate::agent::usage_entries::drain_deferred_usage(thread.id));
                 }
                 Err(e) => {
                     // The per-tool catch_unwind above should make this
@@ -4329,12 +4337,16 @@ async fn dispatch_background_tool(
                 let elapsed = started.elapsed().as_secs_f64();
                 match result {
                     Ok(Ok(res)) => {
-                        // Tool-output cap: apply the configured per-result cap
-                        // (settings `max_inline_chars`) to backgrounded results
-                        // too. 0/off disables the cap: keep the full content.
-                        let truncated = if max_inline_chars == 0 {
-                            res.content.clone()
-                        } else if res.content.len() > max_inline_chars {
+                        // R2 (operator telegram 4004/4005, thread 3999): collect
+                        // `_meta.usage` from the FULL, untruncated payload FIRST
+                        // and park it for the loop, THEN apply the per-result cap
+                        // (settings `max_inline_chars`; 0/off disables it) to the
+                        // `_meta`-free content. Capping first cut the tail - the
+                        // very place the workstation puts its usage array - and
+                        // silently dropped whole dsh sessions from the thread's
+                        // Usage message.
+                        let full_chars = res.content.len();
+                        if max_inline_chars > 0 && full_chars > max_inline_chars {
                             tracing::info!(
                                 thread_id = thread_id,
                                 knob = "max_inline_chars",
@@ -4343,13 +4355,19 @@ async fn dispatch_background_tool(
                                     "max_inline_chars"
                                 ),
                                 tool = %bg_tool_name,
-                                content_chars = res.content.len(),
-                                "tool-output cap fired: truncating backgrounded tool result"
+                                content_chars = full_chars,
+                                "tool-output cap fired: collecting usage before capping the backgrounded tool result"
                             );
-                            truncate_content(&res.content, max_inline_chars)
-                        } else {
-                            res.content.clone()
-                        };
+                        }
+                        let (truncated, collected) =
+                            crate::agent::usage_entries::cap_after_collect(
+                                &res.content,
+                                max_inline_chars,
+                            );
+                        crate::agent::usage_entries::push_deferred_usage(
+                            thread_id,
+                            &collected,
+                        );
                         bg_registry.append_log(&task_id_bg,
                             &format!("tool '{}' completed after {:.1}s ({} chars)",
                                 bg_tool_name, elapsed, truncated.len())).await;
