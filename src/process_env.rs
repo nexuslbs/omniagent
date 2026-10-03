@@ -80,10 +80,24 @@ mod tests {
     }
 
     /// The real child PATH is the parent's, and it is never empty.
+    ///
+    /// NO process-wide mutation: `std::env::set_var` is process-global and the
+    /// lib test binary runs its tests IN PARALLEL, so a temporary PATH written
+    /// here is observed by every sibling test that spawns a child with
+    /// [`child_path`] - the fake MCP server of the liveness test then cannot
+    /// resolve a bare `tr` inside an env-cleared child, every response id
+    /// collapses to 0 and no handshake can be matched (CI run 37116861094,
+    /// job "Build omniagent"). The pure tests above already pin the
+    /// composition; this one pins the WIRING without touching the environment.
     #[test]
     fn child_path_uses_the_parent_toolchain() {
-        std::env::set_var("PATH", "/parent-only/bin");
-        assert_eq!(child_path(), "/parent-only/bin");
+        let parent = std::env::var("PATH").unwrap_or_default();
+        let extra = crate::runtime_settings::raw("child_extra_path");
+        assert_eq!(
+            child_path(),
+            compose_child_path(Some(parent.as_str()), extra.as_deref())
+        );
+        assert!(!child_path().is_empty(), "the child PATH is never empty");
     }
 
     /// Audit HV-C2 acceptance: an env-cleared child spawned with the composed
