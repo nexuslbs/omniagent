@@ -75,26 +75,77 @@ const WRITE_KEYWORDS: &[&str] = &[
     "LOAD",
 ];
 
-/// Max rows returned by a read-only query.
+/// Default max rows returned by a read-only query (settings
+/// `db_readonly_max_rows`).
 pub const MAX_QUERY_ROWS: usize = 1000;
 
-/// Statement timeout (ms) applied to every read-only statement via SET LOCAL.
+/// Default statement timeout (ms) applied to every read-only statement via SET
+/// LOCAL (settings `db_readonly_timeout_ms`).
 ///
 /// Free-form queries are for structured aggregations only: message-content
 /// lookups belong to `search_messages` (tsvector over `messages.search_tsv`).
 /// An `ILIKE '%term%'` scan over `messages.content` has no usable index and
-/// costs ~30 s per call, so this 8 s cap makes that mistake fail fast with a
+/// costs ~30 s per call, so this cap makes that mistake fail fast with a
 /// hint instead of blocking the caller.
 pub const STATEMENT_TIMEOUT_MS: i64 = 8000;
 
-/// Static SET LOCAL statement run inside the read-only transaction before the
-/// user query. Static on purpose: sqlx only accepts literal-safe SQL here, and
-/// the value is a compile-time constant (never user input).
-const TIMEOUT_SQL: &str = "SET LOCAL statement_timeout = 8000";
+/// Default slow-query log threshold (ms): any read-only statement slower than
+/// this is logged (with its SQL) so costly scans stay visible (settings
+/// `db_readonly_slow_query_ms`).
+pub const SLOW_QUERY_LOG_MS: u128 = 2000;
 
-/// Slow-query log threshold (ms): any read-only statement slower than this is
-/// logged (with its SQL) so costly scans stay visible.
-const SLOW_QUERY_LOG_MS: u128 = 2000;
+/// Effective read-only guard limits (settings with the documented defaults).
+///
+/// Every value is used VERBATIM: an operator value is never clamped to a
+/// narrower one (defect class A5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadOnlyLimits {
+    /// Row cap applied to every result set (defence in depth).
+    pub max_rows: usize,
+    /// Per-statement `SET LOCAL statement_timeout`, in ms.
+    pub statement_timeout_ms: i64,
+    /// Statements slower than this are logged with their SQL, in ms.
+    pub slow_query_log_ms: u128,
+}
+
+impl Default for ReadOnlyLimits {
+    fn default() -> Self {
+        Self {
+            max_rows: MAX_QUERY_ROWS,
+            statement_timeout_ms: STATEMENT_TIMEOUT_MS,
+            slow_query_log_ms: SLOW_QUERY_LOG_MS,
+        }
+    }
+}
+
+impl ReadOnlyLimits {
+    /// Read the guard limits from `settings.yml` (`db_readonly_max_rows`,
+    /// `db_readonly_timeout_ms`, `db_readonly_slow_query_ms`), falling back to
+    /// the documented code defaults (audit HV-B6).
+    pub fn from_settings() -> Self {
+        Self {
+            max_rows: crate::runtime_settings::get_usize("db_readonly_max_rows", MAX_QUERY_ROWS),
+            statement_timeout_ms: crate::runtime_settings::get_i64(
+                "db_readonly_timeout_ms",
+                STATEMENT_TIMEOUT_MS,
+            ),
+            slow_query_log_ms: crate::runtime_settings::get_u64(
+                "db_readonly_slow_query_ms",
+                SLOW_QUERY_LOG_MS as u64,
+            ) as u128,
+        }
+    }
+}
+
+/// The `SET LOCAL statement_timeout` statement for `ms`.
+///
+/// ONE source (audit HV-D1): the SQL is DERIVED from the effective value, so
+/// the enforcement path and the configured value can never drift. sqlx only
+/// accepts literal-safe SQL here and the value is an i64 from our own config,
+/// never user input.
+pub fn timeout_sql(ms: i64) -> String {
+    format!("SET LOCAL statement_timeout = {ms}")
+}
 
 /// `GET /db/tables` payload: the public-schema table list, expressed as a
 /// read-only query so it flows through the very same guard.
@@ -336,13 +387,14 @@ fn is_statement_timeout_error(err_text: &str) -> bool {
 /// Hint returned when the statement-timeout guard fires: tells the caller to
 /// use search_messages (tsvector) for content lookups instead of running
 /// ILIKE scans over messages.content.
-pub fn timeout_hint() -> String {
+pub fn timeout_hint(statement_timeout_ms: i64) -> String {
     format!(
-        "Query canceled after {STATEMENT_TIMEOUT_MS} ms by the statement-timeout guard (8 s). If \
+        "Query canceled after {statement_timeout_ms} ms by the statement-timeout guard ({} s). If \
          you were searching for message CONTENT, do not use ILIKE '%..%' over messages.content: \
          that full-table scan has no usable index and costs ~30 s per call. Use search_messages \
          instead: it searches the GIN-indexed messages.search_tsv tsvector column and returns in \
-         well under 3 s. For structured aggregations, add a tighter WHERE clause and a LIMIT."
+         well under 3 s. For structured aggregations, add a tighter WHERE clause and a LIMIT.",
+        statement_timeout_ms / 1000
     )
 }
 
@@ -459,6 +511,7 @@ fn decode_array_value(row: &sqlx::postgres::PgRow, i: usize) -> Value {
 pub async fn execute_readonly_query(
     pool: &PgPool,
     sql: &str,
+    limits: &ReadOnlyLimits,
 ) -> Result<ReadOnlyQueryResult, ReadOnlyQueryError> {
     validate_readonly_sql(sql)?;
 
@@ -474,8 +527,13 @@ pub async fn execute_readonly_query(
         })?;
 
     // Latency guard: SET LOCAL statement_timeout bounds every single statement
-    // to 8 s (transaction-scoped, rolled back with it).
-    if let Err(e) = sqlx::query(TIMEOUT_SQL).execute(&mut *conn).await {
+    // to the configured limit (transaction-scoped, rolled back with it).
+    if let Err(e) = sqlx::query(sqlx::AssertSqlSafe(timeout_sql(
+        limits.statement_timeout_ms,
+    )))
+    .execute(&mut *conn)
+    .await
+    {
         let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
         return Err(ReadOnlyQueryError::Failed(format!(
             "Failed to set statement timeout: {e}"
@@ -500,11 +558,11 @@ pub async fn execute_readonly_query(
                 );
                 return Err(ReadOnlyQueryError::Timeout(format!(
                     "{}\n\nOriginal error: {}",
-                    timeout_hint(),
+                    timeout_hint(limits.statement_timeout_ms),
                     err_text
                 )));
             }
-            if elapsed_ms > SLOW_QUERY_LOG_MS {
+            if elapsed_ms > limits.slow_query_log_ms {
                 tracing::warn!(
                     "read-only failed slow query ({elapsed_ms} ms): {}",
                     one_line_sql(sql)
@@ -535,7 +593,7 @@ pub async fn execute_readonly_query(
     }
 
     // Defense in depth: cap the result set regardless of the caller's LIMIT.
-    json_rows.truncate(MAX_QUERY_ROWS);
+    json_rows.truncate(limits.max_rows);
     let row_count = json_rows.len();
 
     sqlx::query("COMMIT")
@@ -546,7 +604,7 @@ pub async fn execute_readonly_query(
         })?;
 
     let elapsed_ms = query_started.elapsed().as_millis();
-    if elapsed_ms > SLOW_QUERY_LOG_MS {
+    if elapsed_ms > limits.slow_query_log_ms {
         tracing::warn!(
             "read-only slow query ({elapsed_ms} ms): {}",
             one_line_sql(sql)
@@ -561,13 +619,44 @@ pub async fn execute_readonly_query(
 }
 
 /// The public-schema table list, executed through the same guard.
-pub async fn list_public_tables(pool: &PgPool) -> Result<ReadOnlyQueryResult, ReadOnlyQueryError> {
-    execute_readonly_query(pool, TABLES_SQL).await
+pub async fn list_public_tables(
+    pool: &PgPool,
+    limits: &ReadOnlyLimits,
+) -> Result<ReadOnlyQueryResult, ReadOnlyQueryError> {
+    execute_readonly_query(pool, TABLES_SQL, limits).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The enforced `SET LOCAL statement_timeout` is DERIVED from the effective
+    /// limit: changing the setting changes the statement (audit HV-D1 - the
+    /// value used to be encoded twice, so changing one left the other stale).
+    #[test]
+    fn timeout_sql_is_derived_from_the_effective_limit() {
+        let sql = timeout_sql(STATEMENT_TIMEOUT_MS);
+        assert!(
+            sql.contains(&STATEMENT_TIMEOUT_MS.to_string()),
+            "sql: {sql}"
+        );
+        assert_eq!(timeout_sql(1500), "SET LOCAL statement_timeout = 1500");
+        let custom = ReadOnlyLimits {
+            statement_timeout_ms: 1500,
+            ..ReadOnlyLimits::default()
+        };
+        assert!(timeout_sql(custom.statement_timeout_ms).contains("1500"));
+    }
+
+    /// The documented defaults ARE the shipped behaviour when nothing is
+    /// configured.
+    #[test]
+    fn default_limits_match_the_documented_values() {
+        let l = ReadOnlyLimits::default();
+        assert_eq!(l.max_rows, MAX_QUERY_ROWS);
+        assert_eq!(l.statement_timeout_ms, STATEMENT_TIMEOUT_MS);
+        assert_eq!(l.slow_query_log_ms, SLOW_QUERY_LOG_MS);
+    }
 
     #[test]
     fn accepts_select_and_with() {
@@ -643,17 +732,19 @@ mod tests {
             Err(_) => return,
         };
         let _guard = crate::db::DB_TEST_LOCK.lock().await;
+        let limits = ReadOnlyLimits::default();
 
-        let res = execute_readonly_query(&pool, "SELECT COUNT(*)::int8 AS n FROM messages")
-            .await
-            .expect("read-only SELECT must succeed");
+        let res =
+            execute_readonly_query(&pool, "SELECT COUNT(*)::int8 AS n FROM messages", &limits)
+                .await
+                .expect("read-only SELECT must succeed");
         assert_eq!(res.row_count, 1);
         assert!(res.rows[0].get("n").is_some());
 
         // Column order follows the SELECT statement (sqlx row description),
         // NOT the alphabetically sorted JSON keys of the row objects (the
         // dashboard Database page renders its headers from this list).
-        let ordered = execute_readonly_query(&pool, "SELECT 1 AS zz, 2 AS aa")
+        let ordered = execute_readonly_query(&pool, "SELECT 1 AS zz, 2 AS aa", &limits)
             .await
             .expect("ordered SELECT must succeed");
         assert_eq!(
@@ -668,6 +759,7 @@ mod tests {
         let ints = execute_readonly_query(
             &pool,
             "SELECT 353::int4 AS id, 823808::int4 AS cached, 7::int2 AS small",
+            &limits,
         )
         .await
         .expect("int decode SELECT must succeed");
@@ -677,12 +769,14 @@ mod tests {
 
         // Write attempt is rejected before touching the database.
         assert!(matches!(
-            execute_readonly_query(&pool, "DELETE FROM messages").await,
+            execute_readonly_query(&pool, "DELETE FROM messages", &limits).await,
             Err(ReadOnlyQueryError::Rejected(_))
         ));
 
         // Table list flows through the same guard.
-        let tables = list_public_tables(&pool).await.expect("table list");
+        let tables = list_public_tables(&pool, &limits)
+            .await
+            .expect("table list");
         assert!(tables.row_count > 0);
     }
 }

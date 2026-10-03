@@ -51,12 +51,20 @@ pub struct Profile {
     /// Whether grounding is required for answers
     pub grounding_required: bool,
     /// Context budget for the ContextBuilder (in characters).
-    /// If None, falls back to PROMPT_BUDGET_DEFAULT (15,000).
+    /// If None, falls back to [`prompt_budget_default`] (settings
+    /// `profile_prompt_budget`, default 15,000).
     pub prompt_budget: Option<usize>,
 }
 
 /// Default context budget for profiles that don't specify one.
 pub const PROMPT_BUDGET_DEFAULT: usize = 15_000;
+
+/// Effective fallback context budget: the operator setting
+/// `profile_prompt_budget`, falling back to [`PROMPT_BUDGET_DEFAULT`]
+/// (audit HV-B9 - the value used to exist only in the binary).
+pub fn prompt_budget_default() -> usize {
+    crate::runtime_settings::get_usize("profile_prompt_budget", PROMPT_BUDGET_DEFAULT)
+}
 
 /// Legacy schema for `profiles/<name>/config.json` - KEPT for backward
 /// compat only (the file stays on disk, untouched, but is NOT read for
@@ -90,7 +98,7 @@ impl Profile {
             auto_retrieval_enabled: true,
             retrieval_aggressiveness: 2,
             grounding_required: false,
-            prompt_budget: None, // uses PROMPT_BUDGET_DEFAULT (15,000)
+            prompt_budget: None, // uses prompt_budget_default() (15,000)
         }
     }
 

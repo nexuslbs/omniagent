@@ -127,13 +127,21 @@ impl std::error::Error for BoardsConfigError {}
 /// Boards are always enabled, so this board always exists.
 pub const DEFAULT_BOARD_NAME: &str = "main";
 
-/// The built-in DEFAULT board set: one board ([`DEFAULT_BOARD_NAME`]) with no
+/// The operator-configured default board name (`settings.yml` `default_board`),
+/// falling back to [`DEFAULT_BOARD_NAME`] when the key is absent (audit HV-A4).
+/// A deployment that seeds a differently named default board sets this key
+/// instead of shipping a code change.
+pub fn default_board_name() -> String {
+    crate::runtime_settings::get_str("default_board", DEFAULT_BOARD_NAME)
+}
+
+/// The built-in DEFAULT board set: one board ([`default_board_name`]) with no
 /// execution options of its own, so every option falls through to the
 /// Channel / Global Settings levels. Used when `boards.yml` is absent - kanban
 /// therefore keeps working end to end without any config file.
 pub fn default_boards() -> BoardsFile {
     let mut file = BoardsFile::default();
-    file.upsert(DEFAULT_BOARD_NAME, BoardConfig::default());
+    file.upsert(&default_board_name(), BoardConfig::default());
     file
 }
 

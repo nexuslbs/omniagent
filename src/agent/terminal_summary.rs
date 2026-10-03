@@ -22,6 +22,83 @@
 //! real summary and never a malformed tool-call tail or a "let me now..."
 //! opener.
 
+use std::sync::OnceLock;
+
+/// Provider stop/finish reasons that mean the answer was CUT OFF by the
+/// provider: the model did not finish its own reply, so the text is a
+/// fragment whatever its wording.
+pub const CUTOFF_STOP_REASONS: &[&str] = &[
+    "length",
+    "max_tokens",
+    "max_completion_tokens",
+    "token_limit",
+];
+
+/// True when the provider's OWN structured stop/finish reason says the reply
+/// was truncated.
+pub fn stop_reason_truncated(reason: Option<&str>) -> bool {
+    reason
+        .map(|r| r.trim().to_ascii_lowercase())
+        .is_some_and(|r| CUTOFF_STOP_REASONS.contains(&r.as_str()))
+}
+
+/// The STRUCTURED "not a usable final answer" decision (audit HV-E1): the
+/// provider's stop reason and the DSML envelope STRUCTURE of the text decide,
+/// never the wording of a phrase list. Empty content is unusable by
+/// definition.
+pub fn structurally_unusable(raw: &str, stop_reason: Option<&str>) -> bool {
+    stop_reason_truncated(stop_reason) || contains_dsml_markup(raw) || raw.trim().is_empty()
+}
+
+/// Phrase lists behind [`is_continuation_intent`], demoted to DATA (audit
+/// HV-E1): they live in `{OMNI_DIR}/config/terminal_summary_phrases.yml` so the
+/// wording can be tuned without a rebuild. The built-in consts stay the
+/// defaults, so an absent file changes nothing.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct PhraseLists {
+    continuation_openers: Vec<String>,
+    continuation_todo_markers: Vec<String>,
+    summary_intros: Vec<String>,
+}
+
+/// Path of the phrase data file, relative to `OMNI_DIR`.
+pub const PHRASES_FILE: &str = "config/terminal_summary_phrases.yml";
+
+static PHRASES: OnceLock<PhraseLists> = OnceLock::new();
+
+/// The operator's phrase lists, loaded once. A missing file yields the empty
+/// set (every lookup then uses the built-in default); a malformed file is
+/// logged and ignored, never fatal (a config error must not fail a thread).
+fn phrases() -> &'static PhraseLists {
+    PHRASES.get_or_init(|| {
+        let Some(dir) = crate::runtime_settings::omni_dir() else {
+            return PhraseLists::default();
+        };
+        let path = std::path::Path::new(&dir).join(PHRASES_FILE);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return PhraseLists::default();
+        };
+        serde_yaml::from_str(&text).unwrap_or_else(|e| {
+            tracing::warn!(
+                "[terminal-summary] ignoring malformed {}: {e}",
+                path.display()
+            );
+            PhraseLists::default()
+        })
+    })
+}
+
+/// The effective list: the operator's file when it declares one, otherwise the
+/// built-in default.
+fn effective<'a>(configured: &'a [String], builtin: &'a [&'a str]) -> Vec<&'a str> {
+    if configured.is_empty() {
+        builtin.to_vec()
+    } else {
+        configured.iter().map(String::as_str).collect()
+    }
+}
+
 /// Delimiter of DeepSeek text-mode tool-call markup ("DSML"): instead of XML
 /// angle brackets the model writes special tokens with a FULL-WIDTH VERTICAL
 /// BAR (U+FF5C), e.g. `<\u{FF5C}DSML\u{FF5C} calls>` or
@@ -216,20 +293,24 @@ const SUMMARY_INTROS: &[&str] = &[
 pub(crate) fn is_continuation_intent(text: &str) -> bool {
     let head: String = text.chars().take(300).collect();
     let lower = head.to_lowercase();
+    let lists = phrases();
     // Self-declared summaries are always accepted: covers "let me summarize...",
     // "summary: ...", and polite tails like "let me know if you want me to
     // continue" when the body is a genuine report.
-    if SUMMARY_INTROS.iter().any(|s| lower.contains(s)) {
+    let intros = effective(&lists.summary_intros, SUMMARY_INTROS);
+    if intros.iter().any(|s| lower.contains(*s)) {
         return false;
     }
+    let openers = effective(&lists.continuation_openers, CONTINUATION_OPENERS);
+    let todos = effective(&lists.continuation_todo_markers, CONTINUATION_TODO_MARKERS);
     let let_me_know = lower.contains("let me know");
-    let has_opener = CONTINUATION_OPENERS
+    let has_opener = openers
         .iter()
-        .any(|o| lower.contains(o) && !(let_me_know && *o == "let me "));
+        .any(|o| lower.contains(*o) && !(let_me_know && *o == "let me "));
     if !has_opener {
         return false;
     }
-    CONTINUATION_TODO_MARKERS.iter().any(|m| lower.contains(m))
+    todos.iter().any(|m| lower.contains(*m))
 }
 
 /// Build a deterministic, honest terminal summary from the thread's own data:
@@ -408,6 +489,47 @@ mod tests {
         ));
         assert!(contains_dsml_markup("x\u{FF5C}y"));
         assert!(contains_dsml_markup("x\u{2581}y"));
+    }
+
+    /// T7.2 (HV-E1): the cutoff decision is driven by the provider's OWN
+    /// structured stop reason, not by any phrase list.
+    #[test]
+    fn stop_reason_drives_the_cutoff_decision() {
+        assert!(stop_reason_truncated(Some("length")));
+        assert!(stop_reason_truncated(Some(" max_tokens ")));
+        assert!(stop_reason_truncated(Some("MAX_COMPLETION_TOKENS")));
+        assert!(!stop_reason_truncated(Some("stop")));
+        assert!(!stop_reason_truncated(Some("tool_calls")));
+        assert!(!stop_reason_truncated(None));
+    }
+
+    /// Structured unusability needs no phrases: a truncated stop reason or a
+    /// DSML envelope is unusable even with every phrase list empty.
+    #[test]
+    fn structured_unusability_needs_no_phrases() {
+        assert!(structurally_unusable(
+            "A perfectly plausible sentence",
+            Some("length")
+        ));
+        assert!(structurally_unusable("x\u{FF5C}y", Some("stop")));
+        assert!(structurally_unusable("   ", Some("stop")));
+        assert!(!structurally_unusable(
+            "Committed abc123 and pushed to origin/main.",
+            Some("stop")
+        ));
+    }
+
+    /// The phrase lists are DATA: a configured list replaces the built-in one,
+    /// an absent/empty list keeps the built-in default.
+    #[test]
+    fn configured_phrase_lists_replace_the_builtins() {
+        let configured = vec!["morp ".to_string()];
+        assert_eq!(effective(&configured, CONTINUATION_OPENERS), vec!["morp "]);
+        let empty: Vec<String> = Vec::new();
+        assert_eq!(
+            effective(&empty, CONTINUATION_OPENERS).len(),
+            CONTINUATION_OPENERS.len()
+        );
     }
 }
 

@@ -36,8 +36,9 @@ pub const DEFAULT_PRUNE_MIN_CHARS: usize = 20_000;
 
 /// Substring shared by the task-1 spill preview and this pruner's preview.
 /// Presence of this marker means the content is ALREADY a bounded preview
-/// with a locator - never re-prune it (idempotency).
-const ALREADY_PRUNED_MARKER: &str = "omitted - see full output below";
+/// with a locator - never re-prune it (idempotency). Re-exported from the
+/// SINGLE marker source ([`crate::agent::output_markers`]).
+pub use crate::agent::output_markers::{ALREADY_PRUNED_MARKER, SPILL_LOCATOR_PREFIX};
 
 /// Prune thresholds (from settings, with defaults).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,11 +111,10 @@ impl PruneReport {
 /// `(content-without-locator, locator)` so the locator can be re-appended
 /// after the preview. Otherwise return `(content, None)`.
 fn split_spill_locator(content: &str) -> (&str, Option<&str>) {
-    const PREFIX: &str = "[full output: ";
-    let Some(start) = content.rfind(PREFIX) else {
+    let Some(start) = content.rfind(SPILL_LOCATOR_PREFIX) else {
         return (content, None);
     };
-    let after = &content[start + PREFIX.len()..];
+    let after = &content[start + SPILL_LOCATOR_PREFIX.len()..];
     let Some(close) = after.find(']') else {
         return (content, None);
     };

@@ -175,14 +175,12 @@ pub(crate) fn read_cargo_package_name(cargo_toml_path: &str) -> Option<String> {
     None
 }
 
-/// PATH for the plugin-compile cargo child: MINIMAL_PATH extended with
-/// CARGO_HOME/bin (where the cargo/rustc shims live). The child never
-/// inherits the ambient environment; every var it gets is declared here.
+/// PATH for the plugin-compile cargo child: the SAME portable child PATH the
+/// rest of the process uses (the parent's PATH plus the optional
+/// `child_extra_path` setting). The child never inherits the ambient
+/// environment; every var it gets is declared here.
 fn cargo_child_path() -> String {
-    match std::env::var("CARGO_HOME") {
-        Ok(ch) if !ch.is_empty() => format!("{}/bin:{}", ch, crate::process_env::MINIMAL_PATH),
-        _ => crate::process_env::MINIMAL_PATH.to_string(),
-    }
+    crate::process_env::child_path()
 }
 
 /// Compile a Rust crate at the given path. Returns true if compilation succeeded.
@@ -245,9 +243,11 @@ pub(crate) async fn compile_rust_crate(
     for attempt in 1..=max_attempts {
         let mut cmd = tokio::process::Command::new("cargo");
         // Platform env isolation: the cargo child must not inherit the agent's
-        // ambient environment. PATH is extended with CARGO_HOME/bin (where the
-        // cargo/rustc shims live); CARGO_HOME/RUSTUP_HOME are passed explicitly
-        // because the rustup shims need them. Declared per-call, never inherited.
+        // ambient environment. PATH is the portable child PATH (the parent's
+        // PATH plus the optional `child_extra_path` setting), so the toolchain
+        // that runs the server is the one the compile child sees;
+        // CARGO_HOME/RUSTUP_HOME are passed explicitly because the rustup shims
+        // need them. Declared per-call, never inherited.
         cmd.env_clear();
         cmd.env("PATH", cargo_child_path());
         if let Ok(ch) = std::env::var("CARGO_HOME") {

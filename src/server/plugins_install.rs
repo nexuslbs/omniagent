@@ -1027,7 +1027,7 @@ async fn run_capture(
     // PATH and HOME are passed explicitly (npm/pip/python3 need them for
     // caches and venvs); declared per-call, never inherited.
     cmd.env_clear();
-    cmd.env("PATH", crate::process_env::MINIMAL_PATH);
+    cmd.env("PATH", crate::process_env::child_path());
     if let Ok(h) = std::env::var("HOME") {
         if !h.is_empty() {
             cmd.env("HOME", h);

@@ -119,7 +119,7 @@ fn install_from_url_inner(
         // Extract using tar
         let status = std::process::Command::new("tar")
             .env_clear()
-            .env("PATH", crate::process_env::MINIMAL_PATH)
+            .env("PATH", crate::process_env::child_path())
             .arg("-xzf")
             .arg(&archive_path)
             .arg("-C")
@@ -138,7 +138,7 @@ fn install_from_url_inner(
         // Extract using unzip
         let status = std::process::Command::new("unzip")
             .env_clear()
-            .env("PATH", crate::process_env::MINIMAL_PATH)
+            .env("PATH", crate::process_env::child_path())
             .arg("-o")
             .arg(&archive_path)
             .arg("-d")
@@ -311,7 +311,7 @@ pub fn install_from_git(
         tracing::info!("Updating git-cache for '{}' at {}", url, cache_dir);
         let fetch_status = std::process::Command::new("git")
             .env_clear()
-            .env("PATH", crate::process_env::MINIMAL_PATH)
+            .env("PATH", crate::process_env::child_path())
             .args(["-C", &cache_dir, "remote", "update", "--prune"])
             .status()
             .ctx(format!("Failed to update git-cache at {}", cache_dir))?;
@@ -340,7 +340,7 @@ pub fn install_from_git(
         tracing::info!("Creating git-cache for '{}' at {}", url, cache_dir);
         let clone_status = std::process::Command::new("git")
             .env_clear()
-            .env("PATH", crate::process_env::MINIMAL_PATH)
+            .env("PATH", crate::process_env::child_path())
             .args(["clone", "--mirror", url, &cache_dir])
             .status()
             .ctx(format!(
@@ -370,7 +370,7 @@ pub fn install_from_git(
         tracing::info!("Git-cache at {} is shallow, unshallowing...", cache_dir);
         let unshallow = std::process::Command::new("git")
             .env_clear()
-            .env("PATH", crate::process_env::MINIMAL_PATH)
+            .env("PATH", crate::process_env::child_path())
             .args(["-C", &cache_dir, "fetch", "--unshallow"])
             .status()
             .ctx(format!("Failed to unshallow git-cache at {}", cache_dir))?;
@@ -417,7 +417,7 @@ pub fn install_from_git(
         // Record pre-fetch HEAD
         let pre_fetch = std::process::Command::new("git")
             .env_clear()
-            .env("PATH", crate::process_env::MINIMAL_PATH)
+            .env("PATH", crate::process_env::child_path())
             .args(["-C", &initial_remote_dir, "rev-parse", "HEAD"])
             .output()
             .ok()
@@ -427,7 +427,7 @@ pub fn install_from_git(
         // Fetch and reset to latest
         let fetch_status = std::process::Command::new("git")
             .env_clear()
-            .env("PATH", crate::process_env::MINIMAL_PATH)
+            .env("PATH", crate::process_env::child_path())
             .args([
                 "-C",
                 &initial_remote_dir,
@@ -462,7 +462,7 @@ pub fn install_from_git(
         } else {
             let reset_status = std::process::Command::new("git")
                 .env_clear()
-                .env("PATH", crate::process_env::MINIMAL_PATH)
+                .env("PATH", crate::process_env::child_path())
                 .args(["-C", &initial_remote_dir, "reset", "--hard", "FETCH_HEAD"])
                 .status()
                 .ctx(format!(
@@ -480,7 +480,7 @@ pub fn install_from_git(
             // Check if anything changed
             let post_fetch = std::process::Command::new("git")
                 .env_clear()
-                .env("PATH", crate::process_env::MINIMAL_PATH)
+                .env("PATH", crate::process_env::child_path())
                 .args(["-C", &initial_remote_dir, "rev-parse", "HEAD"])
                 .output()
                 .ok()
@@ -507,7 +507,7 @@ pub fn install_from_git(
                 if !ref_str.is_empty() {
                     let checkout_status = std::process::Command::new("git")
                         .env_clear()
-                        .env("PATH", crate::process_env::MINIMAL_PATH)
+                        .env("PATH", crate::process_env::child_path())
                         .args(["-C", &initial_remote_dir, "checkout", ref_str])
                         .status()
                         .ctx(format!("Failed to git checkout {} for '{}'", ref_str, name))?;
@@ -564,7 +564,7 @@ pub fn install_from_git(
         // directly from the URL, so a shallow source never breaks installs.
         let mut cmd = std::process::Command::new("git");
         cmd.env_clear();
-        cmd.env("PATH", crate::process_env::MINIMAL_PATH);
+        cmd.env("PATH", crate::process_env::child_path());
         cmd.arg("clone")
             .arg("--reference-if-able")
             .arg(&cache_dir)
@@ -611,7 +611,7 @@ pub fn install_from_git(
                 tracing::info!("Checking out ref '{}' for plugin '{}'", ref_str, name);
                 let checkout_status = std::process::Command::new("git")
                     .env_clear()
-                    .env("PATH", crate::process_env::MINIMAL_PATH)
+                    .env("PATH", crate::process_env::child_path())
                     .arg("-C")
                     .arg(&initial_remote_dir)
                     .arg("checkout")

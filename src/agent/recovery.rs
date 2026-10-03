@@ -28,14 +28,16 @@ pub fn is_recovering() -> bool {
 const DEFAULT_MAX_RETRIES: u32 = 60;
 
 /// Read the bounded retry limit for the recovery phase from the environment,
-/// falling back to [`DEFAULT_MAX_RETRIES`]. Values of 0 or unparseable input
-/// fall back to the default.
+/// falling back to the operator setting `db_recovery_max_retries`, then to
+/// [`DEFAULT_MAX_RETRIES`]. Values of 0 or unparseable input fall back.
 fn recovery_max_retries() -> u32 {
     std::env::var("OMNIAGENT_DB_RECOVERY_MAX_RETRIES")
         .ok()
         .and_then(|v| v.trim().parse::<u32>().ok())
         .filter(|v| *v > 0)
-        .unwrap_or(DEFAULT_MAX_RETRIES)
+        .unwrap_or_else(|| {
+            crate::runtime_settings::get_u32("db_recovery_max_retries", DEFAULT_MAX_RETRIES)
+        })
 }
 
 /// Exponential backoff for attempt `attempt` (1-based): 1s, 2s, 4s, ... capped

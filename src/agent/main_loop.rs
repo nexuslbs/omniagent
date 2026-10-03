@@ -345,6 +345,35 @@ mod round_result_tests {
 /// `up` is deliberately absent: bringing containers up is never destructive.
 const DESTRUCTIVE_COMPOSE_VERBS: &[&str] = &["restart", "down", "stop", "rm", "kill"];
 
+/// The compose CLI binary used for the probes: the operator setting
+/// `compose_cli`, default `docker` (audit HV-A2). A podman-docker shim or a
+/// differently named CLI on PATH is configured here instead of a code change.
+fn compose_cli() -> String {
+    crate::runtime_settings::get_str("compose_cli", "docker")
+}
+
+/// Emitted ONCE per process when the self-project probe cannot resolve, so a
+/// silently degraded self-restart guard is VISIBLE (audit HV-A2: outside a
+/// container the guard used to degrade without a word).
+static SELF_GUARD_DEGRADED_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// True when the "guard degraded" WARN still has to be emitted.
+fn should_log_degraded(already_logged: bool) -> bool {
+    !already_logged
+}
+
+fn warn_self_guard_degraded_once() {
+    if should_log_degraded(
+        SELF_GUARD_DEGRADED_LOGGED.swap(true, std::sync::atomic::Ordering::SeqCst),
+    ) {
+        tracing::warn!(
+            "[self-restart-guard] cannot resolve this agent's own compose project (docker inspect of $HOSTNAME failed); \
+             the self-restart guard is DEGRADED and will not block a destructive verb against its own stack"
+        );
+    }
+}
+
 /// Pure decision: block iff the verb is destructive AND both project names
 /// resolved AND they are equal. `up`/any other verb → never blocked; an
 /// unresolvable name on either side → never blocked (cannot prove self-kill).
@@ -410,9 +439,9 @@ fn build_self_inspect_cmd(container_id: &str) -> Vec<String> {
 async fn resolve_self_project() -> Option<String> {
     // In a container $HOSTNAME is the container ID.
     let cid = std::env::var("HOSTNAME").ok()?;
-    let out = tokio::process::Command::new("docker")
+    let out = tokio::process::Command::new(compose_cli())
         .env_clear()
-        .env("PATH", crate::process_env::MINIMAL_PATH)
+        .env("PATH", crate::process_env::child_path())
         .args(build_self_inspect_cmd(&cid))
         .output()
         .await
@@ -437,13 +466,13 @@ async fn resolve_target_project(
     compose_files: &[String],
     env_file: Option<&str>,
 ) -> Option<String> {
-    let out = tokio::process::Command::new("docker")
+    let out = tokio::process::Command::new(compose_cli())
         // Platform-level env isolation (2026-09-01): the probe inherits NO
         // ambient env (the agent process carries /opt/omni/.env vars, e.g.
         // COMPOSE_PROJECT_NAME=omni-stack, which docker compose would prefer
         // over the env_file). Empty env + explicit minimal PATH only.
         .env_clear()
-        .env("PATH", crate::process_env::MINIMAL_PATH)
+        .env("PATH", crate::process_env::child_path())
         .args(build_target_config_cmd(
             project_dir,
             compose_files,
@@ -466,9 +495,9 @@ async fn resolve_target_project(
         "label=com.docker.compose.project.working_dir={}",
         project_dir
     );
-    let out = tokio::process::Command::new("docker")
+    let out = tokio::process::Command::new(compose_cli())
         .env_clear()
-        .env("PATH", crate::process_env::MINIMAL_PATH)
+        .env("PATH", crate::process_env::child_path())
         .args(vec![
             "ps".to_string(),
             "-a".to_string(),
@@ -541,6 +570,9 @@ async fn self_restart_guard_block(args_json: &str) -> Option<String> {
     };
     let env_file = args.get("env_file").and_then(|e| e.as_str());
     let self_project = resolve_self_project().await;
+    if self_project.is_none() {
+        warn_self_guard_degraded_once();
+    }
     let target_project = resolve_target_project(project_dir, &compose_files, env_file).await;
     if guard_blocks(verb, self_project.as_deref(), target_project.as_deref()) {
         Some(self_restart_block_message(
@@ -556,6 +588,15 @@ async fn self_restart_guard_block(args_json: &str) -> Option<String> {
 #[cfg(test)]
 mod self_restart_guard_tests {
     use super::*;
+
+    #[test]
+    fn self_restart_degradation_warns_once() {
+        assert!(
+            should_log_degraded(false),
+            "first unresolvable probe must warn"
+        );
+        assert!(!should_log_degraded(true), "repeat probes stay silent");
+    }
 
     #[test]
     fn blocks_when_self_equals_target() {
@@ -2014,7 +2055,9 @@ Previous plan:\n{}",
                 current_iter -= 1;
                 if let Some(retry_after) = e.retry_after_secs() {
                     // Rate-limited (HTTP 429): honor Retry-After, capped at 60s.
-                    let wait = Duration::from_secs(retry_after.min(60));
+                    let wait = Duration::from_secs(
+                        retry_after.min(crate::backoff::BackoffPolicy::DEFAULT.cap_secs),
+                    );
                     info!(
                         "[executor] LLM provider rate-limited (HTTP 429): sleeping {}s before retry (thread {})",
                         wait.as_secs(), thread.id,
@@ -2579,6 +2622,10 @@ Previous plan:\n{}",
         let behavior_snapshot = cfg.plugin_manager.snapshot_registry().await;
         let own_stack_tools = behavior_snapshot.own_stack_tools();
         let subtask_family_tools = behavior_snapshot.family_tools("subtasks");
+        // Dispatch policies declared by the tools' own manifests (audit
+        // HV-A1). Read once, before the registry is moved into the tool loop;
+        // shared with the spawned tool tasks through an Arc.
+        let declared_dispatches = std::sync::Arc::new(behavior_snapshot.declared_dispatches());
 
         let pool = cfg.pool.clone();
         // mcp_registry removed - use cfg.plugin_manager instead
@@ -2715,6 +2762,7 @@ Previous plan:\n{}",
             let panic_idx = idx;
             let panic_tc_id = tc_id.clone();
             let panic_tool_name = tool_name.clone();
+            let declared_dispatches = declared_dispatches.clone();
             join_set.spawn(async move {
                 let task_result = std::panic::AssertUnwindSafe(async move {
                     // Phase 1.5 guard: if this docker_compose call would restart the
@@ -2762,7 +2810,15 @@ Previous plan:\n{}",
                 // stay SYNCHRONOUS, long-running tools are backgrounded on the
                 // FIRST call, every other tool keeps the fast path + background
                 // switch. There is no per-tool ad-hoc handling here.
-                let dispatch_mode = crate::agent::background_dispatch::dispatch_mode(&tool_name);
+                // The dispatch policy comes from the tool's OWN descriptor
+                // (plugin manifest `dispatch:`); a tool that declares none
+                // keeps the legacy fail-open list policy. See
+                // crate::agent::background_dispatch.
+                let declared_dispatch = declared_dispatches.get(&tool_name).map(String::as_str);
+                let dispatch_mode = crate::agent::background_dispatch::dispatch_mode_with(
+                    &tool_name,
+                    declared_dispatch,
+                );
                 let registry = crate::agent::task_registry::TASK_REGISTRY
                     .get()
                     .cloned()

@@ -481,10 +481,22 @@ pub async fn spawn_vectorizers(pool: PgPool, config: Arc<RwLock<crate::agent::Ag
                     // instead of silently calling the OpenAI-compatible client.
                     let proto = resolve_protocol(target, config.protocol)?;
 
+                    // No hidden default (audit V-9 / HV-B5): the api embedding
+                    // model must be configured explicitly, mirroring
+                    // `resolve_protocol`. An empty value disables this worker
+                    // with a loud error naming the setting key.
                     let model = config
                         .api_model
                         .clone()
-                        .unwrap_or_else(|| "text-embedding-ada-002".to_string());
+                        .map(|m| m.trim().to_string())
+                        .filter(|m| !m.is_empty())
+                        .ok_or_else(|| {
+                            err_str!(
+                                "{}: method=api but {}_vectorization_api_model is not set; vectorization disabled",
+                                target,
+                                target
+                            )
+                        })?;
                     tracing::info!(
                         "{}: Using ApiVectorizer with endpoint: {}, protocol: {:?}, model: {}",
                         target,
@@ -682,13 +694,13 @@ mod tests {
                 "test text",
                 "https://api.openai.com/v1",
                 &None,
-                "text-embedding-ada-002",
+                "test-embedding-model",
             )
             .unwrap();
         assert_eq!(url, "https://api.openai.com/v1/embeddings");
         assert!(headers.is_empty());
         assert_eq!(body["input"], "test text");
-        assert_eq!(body["model"], "text-embedding-ada-002");
+        assert_eq!(body["model"], "test-embedding-model");
     }
 
     #[test]
@@ -789,7 +801,7 @@ mod tests {
         let protocol = EmbeddingProtocol("openai".to_string());
         let response = json!({
             "data": [{"embedding": [0.1, 0.2, 0.3]}],
-            "model": "text-embedding-ada-002",
+            "model": "test-embedding-model",
         });
         let result = protocol.extract_embedding(&response).unwrap();
         assert_eq!(result, vec![0.1, 0.2, 0.3]);

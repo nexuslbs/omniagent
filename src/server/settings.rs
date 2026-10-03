@@ -587,7 +587,10 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
                 description: "Data directory for profiles and wiki (read-only, from env OMNI_DIR)".into(),
                 options: None,
                 readonly: true,
-                default: Some("/opt/omni".into()),
+                // No container-path default: OMNI_DIR is a REQUIRED bootstrap
+                // variable and the process fails fast when it is unset
+                // (audit HV-C1).
+                default: None,
             },
         ),
         // ── Prompts ──
@@ -745,6 +748,12 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
     categories.retain(|c| !c.settings.is_empty());
     categories
 }
+
+/// Default HTTP server port when the `PORT` bootstrap variable is unset.
+///
+/// Single source for the port default: the server binds it, `AgentConfig`
+/// reads it, and the core-API client URL is built from it (audit HV-D3).
+pub const DEFAULT_SERVER_PORT: u16 = 8080;
 
 /// The 4 bootstrap settings that are always read-only from process env vars.
 /// These are never stored in settings.yml : they come directly from env.

@@ -168,7 +168,7 @@ pub(crate) async fn handle_response(
         };
 
         let _summary_start = std::time::Instant::now();
-        let (mut summary_text, summary_token_usage) = match per_thread_llm
+        let (mut summary_text, summary_token_usage, summary_stop_reason) = match per_thread_llm
             .completion(summary_request)
             .await
         {
@@ -203,14 +203,14 @@ pub(crate) async fn handle_response(
                 } else {
                     resp.content
                 };
-                (text, tokens)
+                (text, tokens, resp.finish_reason.clone())
             }
             Err(e) => {
                 warn!(
                     "[summary] Failed to generate summary for thread {}: {:?}",
                     thread.id, e
                 );
-                (format!("Summary generation failed: {}", e), None)
+                (format!("Summary generation failed: {}", e), None, None)
             }
         };
 
@@ -225,7 +225,13 @@ pub(crate) async fn handle_response(
         // we fall back to the deterministic digest-based summary so the
         // terminal message is always a genuine, well-formed summary with no
         // pending tool-call intent.
-        let hygiene = response_hygiene::assess(&cfg.ctx, &summary_text, true).await;
+        let hygiene = response_hygiene::assess_with_stop(
+            &cfg.ctx,
+            &summary_text,
+            true,
+            summary_stop_reason.as_deref(),
+        )
+        .await;
         if hygiene.fallback {
             summary_text = deterministic_interrupted_summary(
                 &cause_msg.content,

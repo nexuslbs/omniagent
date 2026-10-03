@@ -350,7 +350,7 @@ fn extract_member(
         BinaryFormat::TarGz => {
             let status = std::process::Command::new("tar")
                 .env_clear()
-                .env("PATH", crate::process_env::MINIMAL_PATH)
+                .env("PATH", crate::process_env::child_path())
                 .arg("-xzf")
                 .arg(payload)
                 .arg("-C")
@@ -368,7 +368,7 @@ fn extract_member(
         BinaryFormat::Zip => {
             let status = std::process::Command::new("unzip")
                 .env_clear()
-                .env("PATH", crate::process_env::MINIMAL_PATH)
+                .env("PATH", crate::process_env::child_path())
                 .arg("-o")
                 .arg("-q")
                 .arg(payload)

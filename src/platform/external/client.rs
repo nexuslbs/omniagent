@@ -235,7 +235,7 @@ impl ExternalPlatformClient {
         // explicitly configured env below, plus an explicit minimal PATH for
         // the child's own spawns, are passed.
         cmd.env_clear();
-        cmd.env("PATH", crate::process_env::MINIMAL_PATH);
+        cmd.env("PATH", crate::process_env::child_path());
 
         // Run the subprocess from the plugin directory so relative entrypoint
         // args (e.g. "platform.py", "./target/release/...") resolve correctly.
@@ -390,11 +390,10 @@ impl Platform for ExternalPlatformClient {
                             e
                         );
                     }
-                    let backoff = std::cmp::min(
-                        std::time::Duration::from_secs(2u64.saturating_pow(spawn_failures)),
-                        std::time::Duration::from_secs(60),
-                    );
-                    tokio::time::sleep(backoff).await;
+                    tokio::time::sleep(
+                        crate::backoff::BackoffPolicy::DEFAULT.delay(spawn_failures),
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -451,11 +450,8 @@ impl Platform for ExternalPlatformClient {
                         );
                     }
                 }
-                let backoff = std::cmp::min(
-                    std::time::Duration::from_secs(2u64.saturating_pow(spawn_failures)),
-                    std::time::Duration::from_secs(60),
-                );
-                tokio::time::sleep(backoff).await;
+                tokio::time::sleep(crate::backoff::BackoffPolicy::DEFAULT.delay(spawn_failures))
+                    .await;
                 continue;
             }
 

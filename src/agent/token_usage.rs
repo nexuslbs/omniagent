@@ -28,7 +28,9 @@ use crate::llm::ChatMessage;
 /// Marker prefix of a telemetry block. Matches the marker convention of the
 /// other tail blocks (`=== Budget ===`, `=== Working Notes (durable) ===`), so
 /// the blocks are identifiable and their count in the array is authoritative.
-pub const TOKEN_USAGE_MARKER: &str = "=== Token Usage ===";
+/// Header of the live token-usage telemetry block. Re-exported from the SINGLE
+/// marker source ([`crate::agent::output_markers`]).
+pub use crate::agent::output_markers::TOKEN_USAGE_MARKER;
 
 /// Provider-reported cumulative token usage of a thread, aggregated from
 /// `messages.token_usage` (SUM prompt_tokens / completion_tokens /

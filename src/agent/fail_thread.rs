@@ -723,6 +723,15 @@ fn rerun_allowed(reruns: u64, limit: u64) -> bool {
 /// result so the LAST message of a failed thread always carries the reason.
 pub const DEFAULT_FAIL_REASON: &str = "The thread was ended as FAILED by the fail-thread tool.";
 
+/// The fail-thread reason used when the caller passes none: the operator
+/// setting `fail_thread_default_reason`, falling back to
+/// [`DEFAULT_FAIL_REASON`] (audit HV-E3). The user-visible wording belongs to
+/// the operator's configuration surface; the core carries the mechanism and
+/// this documented default.
+pub fn default_fail_reason() -> String {
+    crate::runtime_settings::get_str("fail_thread_default_reason", DEFAULT_FAIL_REASON)
+}
+
 pub(crate) async fn fail_thread_tool(
     ctx: &crate::mcp::AppContext,
     thread: &crate::db::types::Thread,
@@ -755,7 +764,7 @@ pub(crate) async fn fail_thread_tool(
     // Error-type message is written FIRST and the thread-end Usage message
     // SECOND (at `next_seq + 1`, see below): Usage ends up 2nd-last and the
     // loop's tool-result last. No existing row is ever mutated.
-    let content = reason.unwrap_or_else(|| DEFAULT_FAIL_REASON.to_string());
+    let content = reason.unwrap_or_else(default_fail_reason);
     let err_msg = MessageNew {
         thread_id: thread.id,
         role: "system".to_string(),

@@ -158,6 +158,13 @@ async fn run_server() -> AppResult<()> {
     let data_dir = std::env::var("OMNI_DIR").expect("OMNI_DIR must be set");
     tracing::info!("Data directory: {}", data_dir);
 
+    // Load the operator settings snapshot for readers OUTSIDE the AgentConfig
+    // path (read-only DB guard, LLM transport, board default, compose CLI,
+    // child PATH) and report which tracked settings run on a code default
+    // (audit HV-D4: the effective configuration must be visible at boot).
+    omniagent::runtime_settings::init();
+    omniagent::runtime_settings::log_code_defaults();
+
     // Ensure the config/ subdir exists (root-level yml config files live there).
     config_path::ensure_config_dir(&data_dir);
     // One-time migration of the legacy retention keys: the previous names

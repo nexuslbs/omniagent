@@ -322,7 +322,9 @@ impl AgentConfig {
     /// After startup, use reload_global_from_settings() for hot-reload.
     pub fn from_env() -> AppResult<Self> {
         // Bootstrap: read OMNI_DIR from env to find settings.yml
-        let data_dir = std::env::var("OMNI_DIR").unwrap_or_else(|_| "/opt/omni".to_string());
+        let data_dir = std::env::var("OMNI_DIR").ctx(
+            "OMNI_DIR must be set (bootstrap variable: the omni data directory containing config/settings.yml)",
+        )?;
         let settings = crate::server::settings::load_settings_file(&data_dir);
         record_configured_keys(&settings);
 
@@ -413,15 +415,20 @@ impl AgentConfig {
             }),
             host: std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
             port: std::env::var("PORT")
-                .unwrap_or_else(|_| "8080".to_string())
+                .unwrap_or_else(|_| crate::server::settings::DEFAULT_SERVER_PORT.to_string())
                 .parse()
                 .ctx("PORT must be a valid number")?,
             platform_max_spawn_retries: get("platform_max_spawn_retries", "3").parse().unwrap_or(3),
             max_inline_file_kb: get("max_inline_file_kb", "100").parse().unwrap_or(100),
-            max_inline_chars: parse_max_inline_chars(&get(
-                "max_inline_chars",
-                &DEFAULT_MAX_TOOL_OUTPUT_CHARS.to_string(),
-            )),
+            // `max_tool_output_chars` is the historical name for the same cap;
+            // `max_inline_chars` wins when both keys are present.
+            max_inline_chars: parse_max_inline_chars(
+                &settings
+                    .get("max_inline_chars")
+                    .or_else(|| settings.get("max_tool_output_chars"))
+                    .cloned()
+                    .unwrap_or_else(|| DEFAULT_MAX_TOOL_OUTPUT_CHARS.to_string()),
+            ),
             spill_dir: get("spill_dir", &format!("{}/data/spill", data_dir)),
             prune_head_chars: get("prune_head_chars", "12000").parse().unwrap_or(12000),
             prune_tail_chars: get("prune_tail_chars", "8000").parse().unwrap_or(8000),
@@ -542,15 +549,20 @@ impl AgentConfig {
             }),
             host: std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
             port: std::env::var("PORT")
-                .unwrap_or_else(|_| "8080".to_string())
+                .unwrap_or_else(|_| crate::server::settings::DEFAULT_SERVER_PORT.to_string())
                 .parse()
                 .ctx("PORT must be a valid number")?,
             platform_max_spawn_retries: get("platform_max_spawn_retries", "3").parse().unwrap_or(3),
             max_inline_file_kb: get("max_inline_file_kb", "100").parse().unwrap_or(100),
-            max_inline_chars: parse_max_inline_chars(&get(
-                "max_inline_chars",
-                &DEFAULT_MAX_TOOL_OUTPUT_CHARS.to_string(),
-            )),
+            // `max_tool_output_chars` is the historical name for the same cap;
+            // `max_inline_chars` wins when both keys are present.
+            max_inline_chars: parse_max_inline_chars(
+                &settings
+                    .get("max_inline_chars")
+                    .or_else(|| settings.get("max_tool_output_chars"))
+                    .cloned()
+                    .unwrap_or_else(|| DEFAULT_MAX_TOOL_OUTPUT_CHARS.to_string()),
+            ),
             spill_dir: get("spill_dir", &format!("{}/data/spill", data_dir)),
             prune_head_chars: get("prune_head_chars", "12000").parse().unwrap_or(12000),
             prune_tail_chars: get("prune_tail_chars", "8000").parse().unwrap_or(8000),

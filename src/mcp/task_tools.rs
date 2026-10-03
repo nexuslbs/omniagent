@@ -581,7 +581,7 @@ pub async fn handle_fail_thread(args: Value, ctx: AppContext) -> AppResult<McpTo
     // the summary in an earlier message).
     let reason_text = reason
         .clone()
-        .unwrap_or_else(|| crate::agent::fail_thread::DEFAULT_FAIL_REASON.to_string());
+        .unwrap_or_else(crate::agent::fail_thread::default_fail_reason);
 
     let thread = match crate::db::threads::get_thread_by_id(&ctx.pool, thread_id).await? {
         Some(t) => t,

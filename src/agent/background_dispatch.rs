@@ -107,6 +107,30 @@ pub fn dispatch_mode(tool_name: &str) -> DispatchMode {
     }
 }
 
+/// Decode a dispatch policy declared by a tool's own manifest (the `dispatch`
+/// key of its `plugin.json` entry).
+///
+/// An unrecognised value is IGNORED (`None`) rather than inventing a policy
+/// the manifest did not declare: the caller then falls back to the legacy
+/// name lists, which keeps the fail-open default.
+pub fn mode_from_declaration(declared: &str) -> Option<DispatchMode> {
+    match declared.trim().to_ascii_lowercase().as_str() {
+        "sync" => Some(DispatchMode::Sync),
+        "immediate" => Some(DispatchMode::Immediate),
+        "threshold" => Some(DispatchMode::Threshold),
+        _ => None,
+    }
+}
+
+/// The dispatch mode for a tool: the policy declared by the tool's OWN
+/// descriptor wins; a tool that declared none keeps the legacy list-based
+/// policy (fail-open). This is the entry point the agent loop uses.
+pub fn dispatch_mode_with(tool_name: &str, declared: Option<&str>) -> DispatchMode {
+    declared
+        .and_then(mode_from_declaration)
+        .unwrap_or_else(|| dispatch_mode(tool_name))
+}
+
 /// True for the core control-plane tools that must stay synchronous.
 pub fn is_sync_control_tool(tool_name: &str) -> bool {
     classify(tool_name) == DispatchClass::Sync
@@ -127,6 +151,48 @@ mod tests {
     fn split(name: &str) -> (&str, &str) {
         name.split_once("__")
             .unwrap_or_else(|| panic!("'{}' is not a qualified plugin__tool name", name))
+    }
+
+    /// T5.1 (HV-A1): a tool that declares its dispatch policy in its OWN
+    /// manifest is dispatched by that declaration whatever its name, and a
+    /// tool that declares nothing keeps the legacy fail-open list policy.
+    #[test]
+    fn a_declared_policy_wins_over_the_legacy_lists() {
+        // A brand-new tool nobody ever listed, declaring "immediate".
+        assert_eq!(
+            dispatch_mode_with("zorp__slow", Some("immediate")),
+            DispatchMode::Immediate
+        );
+        // A listed tool that declares "threshold" is NOT eagerly backgrounded.
+        assert_eq!(
+            dispatch_mode_with("ssh__run", Some("threshold")),
+            DispatchMode::Threshold
+        );
+        // A listed control tool that declares "immediate" becomes background.
+        assert_eq!(
+            dispatch_mode_with("core__wait_task", Some("immediate")),
+            DispatchMode::Immediate
+        );
+        // Undeclared tools keep the legacy policy (fail-open default).
+        assert_eq!(
+            dispatch_mode_with("ssh__run", None),
+            DispatchMode::Immediate
+        );
+        assert_eq!(
+            dispatch_mode_with("filesystem__read", None),
+            DispatchMode::Threshold
+        );
+        assert_eq!(
+            dispatch_mode_with("core__wait_task", None),
+            DispatchMode::Sync
+        );
+        // An unrecognised declaration is IGNORED (fall back to the list).
+        assert_eq!(
+            dispatch_mode_with("ssh__run", Some("whenever")),
+            DispatchMode::Immediate
+        );
+        assert_eq!(mode_from_declaration("  SYNC "), Some(DispatchMode::Sync));
+        assert_eq!(mode_from_declaration("nope"), None);
     }
 
     /// Every listed name must be exactly what `tool_qualify` produces for its

@@ -677,7 +677,7 @@ impl StdioMcpClient {
         // ambient environment. Empty env, then only the explicitly configured
         // env below plus an explicit minimal PATH for the child's own spawns.
         command.env_clear();
-        command.env("PATH", crate::process_env::MINIMAL_PATH);
+        command.env("PATH", crate::process_env::child_path());
         // HOME_FOR_PLUGIN_CHILD: the child env is isolated and never inherits
         // the server's HOME. Several MCP servers (Go binaries with an embedded
         // SQLite store, node tools using a cache dir) resolve their state

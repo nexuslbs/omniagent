@@ -343,19 +343,20 @@ pub fn resolve_default_base_url(provider_name: &str) -> String {
     {
         return url;
     }
-    // Fallback: read plugin.json from disk (handles stale metadata after git checkout)
-    let data_dir = std::env::var("OMNI_DIR").unwrap_or_else(|_| "/opt/omni".to_string());
-    for base in [
-        format!(
-            "{}/plugins/providers/{}/plugin.json",
-            data_dir, provider_name
-        ),
-        format!("/app/plugins/providers/{}/plugin.json", provider_name),
-    ] {
-        if let Some(meta) = read_provider_manifest(&std::path::PathBuf::from(&base)) {
-            if !meta.1.default_base_url.is_empty() {
-                return meta.1.default_base_url;
-            }
+    // Fallback: read plugin.json from disk (handles stale metadata after git
+    // checkout). OMNI_DIR is a REQUIRED bootstrap variable and there is no
+    // container-path fallback (audit HV-C1): with no OMNI_DIR there is nothing
+    // to read.
+    let Some(data_dir) = crate::runtime_settings::omni_dir() else {
+        return String::new();
+    };
+    let base = format!(
+        "{}/plugins/providers/{}/plugin.json",
+        data_dir, provider_name
+    );
+    if let Some(meta) = read_provider_manifest(&std::path::PathBuf::from(&base)) {
+        if !meta.1.default_base_url.is_empty() {
+            return meta.1.default_base_url;
         }
     }
     String::new()
@@ -480,10 +481,6 @@ pub fn resolve_llm_api_key(provider_key: Option<&str>) -> AppResult<String> {
 
 /// Default header name carrying the API key for [`AuthStyle::ApiKeyHeader`].
 pub const DEFAULT_API_KEY_HEADER: &str = "x-api-key";
-/// Default API-version header name for Anthropic-style endpoints.
-pub const DEFAULT_API_VERSION_HEADER: &str = "anthropic-version";
-/// Default API-version header value for Anthropic-style endpoints.
-pub const DEFAULT_API_VERSION: &str = "2023-06-01";
 
 /// How a provider expects the API key to be presented on each request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -523,7 +520,7 @@ pub struct RequestShaping {
 impl RequestShaping {
     /// Back-compat defaults derived from the API MODE only (never from the
     /// provider name): `anthropic_messages` keeps the historical Anthropic
-    /// header style (`x-api-key` + `anthropic-version`), every other mode uses
+    /// header style (`x-api-key`), every other mode uses
     /// `Authorization: Bearer`. `thinking` is on by default only for the
     /// API-key-header (native Anthropic) style, which reproduces the previous
     /// name-based behavior for both `anthropic` and for Bearer gateways in
@@ -533,17 +530,13 @@ impl RequestShaping {
             ApiMode::AnthropicMessages => AuthStyle::ApiKeyHeader,
             ApiMode::ChatCompletions => AuthStyle::Bearer,
         };
-        let api_version_header = match auth_style {
-            AuthStyle::ApiKeyHeader => Some((
-                DEFAULT_API_VERSION_HEADER.to_string(),
-                DEFAULT_API_VERSION.to_string(),
-            )),
-            AuthStyle::Bearer => None,
-        };
         Self {
             auth_style,
             api_key_header_name: DEFAULT_API_KEY_HEADER.to_string(),
-            api_version_header,
+            // No version header unless a provider manifest declares one
+            // (audit HV-B3): a dated version is a value that ages, and the
+            // manifest is the single place it belongs.
+            api_version_header: None,
             thinking_param: auth_style == AuthStyle::ApiKeyHeader,
         }
     }
@@ -710,7 +703,10 @@ impl ProviderThrottle {
 
     /// Create a new throttle with the default limit (5) per provider.
     pub fn new() -> Self {
-        Self::with_max_permits(Self::DEFAULT_MAX_CONCURRENT)
+        Self::with_max_permits(crate::runtime_settings::get_usize(
+            "llm_max_concurrent",
+            Self::DEFAULT_MAX_CONCURRENT,
+        ))
     }
 
     /// Create a new throttle with a custom max concurrent limit per provider.
@@ -1102,19 +1098,84 @@ const LLM_TRANSPORT_RETRY_ATTEMPTS: u32 = 3;
 /// Base backoff between transport retries, in ms; doubles per retry.
 const LLM_TRANSPORT_RETRY_BASE_DELAY_MS: u64 = 500;
 
+/// Effective LLM HTTP transport limits: the operator settings with the
+/// documented code defaults (audit HV-B4). Every value is used VERBATIM -
+/// there is no clamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LlmTransportLimits {
+    pub total_timeout_secs: u64,
+    pub connect_timeout_secs: u64,
+    pub pool_idle_timeout_secs: u64,
+    pub retry_attempts: u32,
+    pub retry_base_delay_ms: u64,
+    pub max_concurrent: usize,
+}
+
+/// Read the transport limits from `settings.yml` (cached snapshot), falling
+/// back to the documented code defaults.
+pub(crate) fn llm_transport_limits() -> LlmTransportLimits {
+    LlmTransportLimits {
+        total_timeout_secs: crate::runtime_settings::get_u64(
+            "llm_total_timeout_secs",
+            LLM_TOTAL_TIMEOUT_SECS,
+        ),
+        connect_timeout_secs: crate::runtime_settings::get_u64(
+            "llm_connect_timeout_secs",
+            LLM_CONNECT_TIMEOUT_SECS,
+        ),
+        pool_idle_timeout_secs: crate::runtime_settings::get_u64(
+            "llm_pool_idle_timeout_secs",
+            LLM_POOL_IDLE_TIMEOUT_SECS,
+        ),
+        retry_attempts: crate::runtime_settings::get_u32(
+            "llm_transport_retry_attempts",
+            LLM_TRANSPORT_RETRY_ATTEMPTS,
+        ),
+        retry_base_delay_ms: crate::runtime_settings::get_u64(
+            "llm_transport_retry_base_delay_ms",
+            LLM_TRANSPORT_RETRY_BASE_DELAY_MS,
+        ),
+        max_concurrent: crate::runtime_settings::get_usize(
+            "llm_max_concurrent",
+            ProviderThrottle::DEFAULT_MAX_CONCURRENT,
+        ),
+    }
+}
+
 /// Build the hardened reqwest client used for LLM completion requests.
 ///
-/// - `timeout`: total request timeout (5 minutes) - unchanged.
-/// - `connect_timeout`: fail fast on hung TCP/TLS connects (30s).
+/// - `timeout`: total request timeout (default 5 minutes).
+/// - `connect_timeout`: fail fast on hung TCP/TLS connects (default 30s).
 /// - `pool_idle_timeout`: recycle keep-alive sockets after 90s idle so stale
 ///   connections closed by the peer are not reused for new requests.
 fn build_llm_http_client() -> reqwest::Client {
+    let limits = llm_transport_limits();
     reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(LLM_TOTAL_TIMEOUT_SECS))
-        .connect_timeout(std::time::Duration::from_secs(LLM_CONNECT_TIMEOUT_SECS))
-        .pool_idle_timeout(std::time::Duration::from_secs(LLM_POOL_IDLE_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(limits.total_timeout_secs))
+        .connect_timeout(std::time::Duration::from_secs(limits.connect_timeout_secs))
+        .pool_idle_timeout(std::time::Duration::from_secs(
+            limits.pool_idle_timeout_secs,
+        ))
         .build()
         .expect("Failed to build reqwest Client")
+}
+
+#[cfg(test)]
+mod transport_limit_tests {
+    use super::*;
+
+    /// With no operator override the effective limits ARE the documented
+    /// defaults (an unreachable-endpoint run therefore enforces the setting).
+    #[test]
+    fn transport_limits_default_to_the_documented_values() {
+        let l = llm_transport_limits();
+        assert_eq!(l.total_timeout_secs, LLM_TOTAL_TIMEOUT_SECS);
+        assert_eq!(l.connect_timeout_secs, LLM_CONNECT_TIMEOUT_SECS);
+        assert_eq!(l.pool_idle_timeout_secs, LLM_POOL_IDLE_TIMEOUT_SECS);
+        assert_eq!(l.retry_attempts, LLM_TRANSPORT_RETRY_ATTEMPTS);
+        assert_eq!(l.retry_base_delay_ms, LLM_TRANSPORT_RETRY_BASE_DELAY_MS);
+        assert_eq!(l.max_concurrent, ProviderThrottle::DEFAULT_MAX_CONCURRENT);
+    }
 }
 
 /// Transient transport failure categories the retry layer understands.
@@ -1214,8 +1275,9 @@ fn error_text_says_transient(err: &(dyn std::error::Error + 'static)) -> bool {
 async fn send_with_transport_retry(
     req: reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, reqwest::Error> {
+    let limits = llm_transport_limits();
     let mut attempt: u32 = 1;
-    let mut delay = std::time::Duration::from_millis(LLM_TRANSPORT_RETRY_BASE_DELAY_MS);
+    let mut delay = std::time::Duration::from_millis(limits.retry_base_delay_ms);
     loop {
         // JSON payloads are replayable, so clone per attempt. Non-replayable
         // bodies fall back to a single attempt.
@@ -1227,13 +1289,13 @@ async fn send_with_transport_retry(
             Ok(resp) => return Ok(resp),
             Err(err) => {
                 let retryable = classify_transport_error(&err).is_some();
-                if attempt >= LLM_TRANSPORT_RETRY_ATTEMPTS || !retryable {
+                if attempt >= limits.retry_attempts || !retryable {
                     return Err(err);
                 }
                 warn!(
                     "[llm] transient transport error (attempt {}/{}) - retrying in {}ms: {}",
                     attempt,
-                    LLM_TRANSPORT_RETRY_ATTEMPTS,
+                    limits.retry_attempts,
                     delay.as_millis(),
                     err
                 );
@@ -2464,11 +2526,10 @@ mod request_shaping_tests {
         assert_eq!(shaping.api_key_header_name, "x-api-key");
         assert_eq!(
             pairs(&shaping),
-            vec![
-                ("x-api-key".to_string(), "k".to_string()),
-                ("anthropic-version".to_string(), "2023-06-01".to_string()),
-            ]
+            vec![("x-api-key".to_string(), "k".to_string())]
         );
+        // No version header: the provider declared none (audit HV-B3).
+        assert_eq!(shaping.api_version_header, None);
     }
 
     // ... and a provider literally NAMED "anthropic" that declares Bearer
@@ -2497,11 +2558,9 @@ mod request_shaping_tests {
         assert_eq!(anthropic.auth_style, AuthStyle::ApiKeyHeader);
         assert_eq!(
             pairs(&anthropic),
-            vec![
-                ("x-api-key".to_string(), "k".to_string()),
-                ("anthropic-version".to_string(), "2023-06-01".to_string()),
-            ]
+            vec![("x-api-key".to_string(), "k".to_string())]
         );
+        assert_eq!(anthropic.api_version_header, None);
         assert!(anthropic.thinking_param);
 
         let openai = RequestShaping::resolve(Some(&m), ApiMode::ChatCompletions);
@@ -2783,8 +2842,8 @@ mod request_shaping_wire_tests {
         let head = captured_request_head("anthropic-proxy", Some("api_key_header")).await;
         assert!(head.contains("x-api-key: shape-key"), "wire head: {head}");
         assert!(
-            head.contains("anthropic-version: 2023-06-01"),
-            "wire head: {head}"
+            !head.contains("anthropic-version:"),
+            "no version header unless declared: {head}"
         );
         assert!(
             !head.contains("authorization:"),

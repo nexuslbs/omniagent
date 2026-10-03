@@ -23,6 +23,7 @@ pub(crate) mod context_compactor;
 pub mod helpers;
 pub mod kanban_updater;
 pub(crate) mod main_loop;
+pub mod output_markers;
 pub mod plugin_manager;
 pub mod pricing;
 pub(crate) mod prompt_sections;
@@ -338,7 +339,7 @@ impl Agent {
             // Orphaned-pending-thread sweep (throttled): the second, channel
             // independent safety net behind the handler liveness sweep.
             if last_orphan_sweep
-                .is_none_or(|t| t.elapsed() >= Duration::from_secs(ORPHAN_SWEEP_INTERVAL_SECS))
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(orphan_sweep_interval_secs()))
             {
                 last_orphan_sweep = Some(std::time::Instant::now());
                 sweep_orphaned_pending_threads(&agent_ctx, &data_dir, &mut orphan_requeues).await;
@@ -380,19 +381,40 @@ async fn run_db_recovery(
     true
 }
 
-/// Age beyond which a `pending` thread with `started_at IS NULL`, on an OPEN
-/// channel with no `processing` sibling, counts as orphaned: the channel's
-/// queue is not draining. The per-channel handler polls once a second, so a
-/// claimable thread is picked up within about a second; 120s leaves ample
-/// margin for a slow claim while still recovering a stranded queue promptly.
-const ORPHAN_PENDING_SECS: i64 = 120;
+/// Default age beyond which a `pending` thread with `started_at IS NULL`, on
+/// an OPEN channel with no `processing` sibling, counts as orphaned: the
+/// channel's queue is not draining. The per-channel handler polls once a
+/// second, so a claimable thread is picked up within about a second; 120s
+/// leaves ample margin for a slow claim while still recovering a stranded
+/// queue promptly. Operator setting: `orphan_pending_secs`.
+const ORPHAN_PENDING_SECS_DEFAULT: i64 = 120;
 
-/// Automatic re-dispatch attempts per kanban task before the task is blocked
-/// with a clear reason (bounded escalation, no infinite requeue loop).
-const ORPHAN_MAX_REQUEUES: u32 = 3;
+/// Default automatic re-dispatch attempts per kanban task before the task is
+/// blocked with a clear reason (bounded escalation, no infinite requeue loop).
+/// Operator setting: `orphan_max_requeues`.
+const ORPHAN_MAX_REQUEUES_DEFAULT: u32 = 3;
 
-/// How often the orphan sweep runs (the supervisor loop ticks every 5s).
-const ORPHAN_SWEEP_INTERVAL_SECS: u64 = 30;
+/// Default orphan sweep interval (the supervisor loop ticks every 5s).
+/// Operator setting: `orphan_sweep_interval_secs`.
+const ORPHAN_SWEEP_INTERVAL_SECS_DEFAULT: u64 = 30;
+
+/// Effective orphan-pending age (settings with the documented default).
+fn orphan_pending_secs() -> i64 {
+    crate::runtime_settings::get_i64("orphan_pending_secs", ORPHAN_PENDING_SECS_DEFAULT)
+}
+
+/// Effective automatic re-dispatch bound (settings with the documented default).
+fn orphan_max_requeues() -> u32 {
+    crate::runtime_settings::get_u32("orphan_max_requeues", ORPHAN_MAX_REQUEUES_DEFAULT)
+}
+
+/// Effective orphan sweep interval (settings with the documented default).
+fn orphan_sweep_interval_secs() -> u64 {
+    crate::runtime_settings::get_u64(
+        "orphan_sweep_interval_secs",
+        ORPHAN_SWEEP_INTERVAL_SECS_DEFAULT,
+    )
+}
 
 /// Human-readable reason for a finished channel-handler task.
 fn handler_exit_reason(err: tokio::task::JoinError) -> String {
@@ -424,14 +446,14 @@ async fn sweep_orphaned_pending_threads(
     data_dir: &str,
     requeues: &mut HashMap<String, u32>,
 ) {
-    let orphans = match queries::find_orphaned_pending_threads(&cfg.pool, ORPHAN_PENDING_SECS).await
-    {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::warn!("[supervisor] orphaned-pending sweep query failed: {:?}", e);
-            return;
-        }
-    };
+    let orphans =
+        match queries::find_orphaned_pending_threads(&cfg.pool, orphan_pending_secs()).await {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!("[supervisor] orphaned-pending sweep query failed: {:?}", e);
+                return;
+            }
+        };
 
     for orphan in orphans {
         // A closed channel is not an orphan: its threads are skipped by the
@@ -466,7 +488,7 @@ async fn sweep_orphaned_pending_threads(
             orphan.task_id.as_deref(),
             task_status.as_deref(),
             attempts,
-            ORPHAN_MAX_REQUEUES,
+            orphan_max_requeues(),
         ) {
             queries::OrphanRecovery::Fail => {
                 fail_orphaned_pending_thread(cfg, &orphan).await;
@@ -498,7 +520,7 @@ async fn sweep_orphaned_pending_threads(
                             task_status,
                             new_id,
                             attempts + 1,
-                            ORPHAN_MAX_REQUEUES
+                            orphan_max_requeues()
                         );
                     }
                     Ok(None) => {
@@ -535,7 +557,7 @@ async fn sweep_orphaned_pending_threads(
                     "Thread #{} stayed pending for {}s without being claimed even after {} automatic re-dispatches; the supervisor blocked the task instead of leaving it active with no executing thread.",
                     orphan.id,
                     orphan.age_secs().unwrap_or(0),
-                    ORPHAN_MAX_REQUEUES
+                    orphan_max_requeues()
                 );
                 let blocked = queries::block_kanban_task(&cfg.pool, &task_id, &reason)
                     .await
@@ -549,7 +571,7 @@ async fn sweep_orphaned_pending_threads(
                 requeues.remove(&task_id);
                 error!(
                     "[supervisor] orphan recovery: blocked kanban task {} (moved: {}) after {} re-dispatch attempts; reason: {}",
-                    task_id, blocked, ORPHAN_MAX_REQUEUES, reason
+                    task_id, blocked, orphan_max_requeues(), reason
                 );
             }
         }

@@ -17,7 +17,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::AppState;
-use crate::db::readonly::{execute_readonly_query, list_public_tables, ReadOnlyQueryError};
+use crate::db::readonly::{
+    execute_readonly_query, list_public_tables, ReadOnlyLimits, ReadOnlyQueryError,
+};
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct DbQueryRequest {
@@ -69,7 +71,11 @@ pub(crate) async fn db_query_handler(
         }
     };
 
-    match execute_readonly_query(&state.pool, &sql).await {
+    // Effective guard limits: operator settings with the documented code
+    // defaults (audit HV-B6); read per request so a settings change is picked
+    // up without a rebuild.
+    let limits = ReadOnlyLimits::from_settings();
+    match execute_readonly_query(&state.pool, &sql, &limits).await {
         Ok(result) => (
             StatusCode::OK,
             Json(json!({
@@ -90,7 +96,8 @@ pub(crate) async fn db_query_handler(
 pub(crate) async fn db_tables_handler(
     State(state): State<Arc<AppState>>,
 ) -> (StatusCode, Json<Value>) {
-    match list_public_tables(&state.pool).await {
+    let limits = ReadOnlyLimits::from_settings();
+    match list_public_tables(&state.pool, &limits).await {
         Ok(result) => (
             StatusCode::OK,
             Json(json!({

@@ -893,6 +893,28 @@ impl McpRegistry {
             .collect()
     }
 
+    /// The dispatch policy this tool declared in its OWN manifest
+    /// (`dispatch: sync|immediate|threshold`), or `None` when it declared
+    /// none. The core loop asks the registry BEFORE falling back to the
+    /// legacy name lists, so a tool registered under a new id keeps its
+    /// declared policy (audit HV-A1) and an undeclared tool keeps today's
+    /// fail-open behaviour.
+    pub fn declared_dispatch(&self, tool_name: &str) -> Option<String> {
+        self.tools
+            .get(tool_name)
+            .and_then(|t| t.behavior.dispatch.clone())
+    }
+
+    /// Every tool that DECLARED a dispatch policy, keyed by registry name. The
+    /// agent loop reads this ONCE per turn (as a plain map) so the dispatch
+    /// decision needs no borrow of the registry inside the tool loop.
+    pub fn declared_dispatches(&self) -> std::collections::HashMap<String, String> {
+        self.tools
+            .values()
+            .filter_map(|t| t.behavior.dispatch.clone().map(|d| (t.name.clone(), d)))
+            .collect()
+    }
+
     /// Remove all tools belonging to a given server.
     /// Returns the names of removed tools.
     pub fn remove_by_server(&mut self, server_name: &str) -> Vec<String> {
@@ -1801,9 +1823,16 @@ pub fn levenshtein_distance(a: &str, b: &str) -> usize {
     prev[b_len]
 }
 
-/// Default base URL of the core omniagent HTTP API (the historical hardcoded
-/// value), used when neither `CORE_API_BASE_URL` nor `HOST`/`PORT` are set.
-const DEFAULT_CORE_API_BASE_URL: &str = "http://localhost:8080";
+/// Default HTTP port of the core omniagent API when neither `CORE_API_BASE_URL`
+/// nor `PORT` is set. SINGLE source for the port default: the server bootstrap
+/// default and the API-client default are the same constant (audit HV-D3).
+pub(crate) const DEFAULT_CORE_API_PORT: u16 = crate::server::settings::DEFAULT_SERVER_PORT;
+
+/// Default base URL of the core omniagent HTTP API, derived from
+/// [`DEFAULT_CORE_API_PORT`].
+fn default_core_api_base_url() -> String {
+    format!("http://localhost:{DEFAULT_CORE_API_PORT}")
+}
 
 /// Resolve the base URL of the core omniagent HTTP API (audit V-8).
 ///
@@ -1814,7 +1843,7 @@ const DEFAULT_CORE_API_BASE_URL: &str = "http://localhost:8080";
 ///    and the settings page exposes. A wildcard bind address (`0.0.0.0`,
 ///    `::`) is not dialable, so it is mapped to `127.0.0.1`/`[::1]`; `PORT`
 ///    defaults to `8080`,
-/// 3. [`DEFAULT_CORE_API_BASE_URL`] (`http://localhost:8080`).
+/// 3. [`default_core_api_base_url`] (loopback on [`DEFAULT_CORE_API_PORT`]).
 ///
 /// A trailing `/` is trimmed so the result can be concatenated with an API
 /// path that already starts with `/`.
@@ -1854,7 +1883,8 @@ fn core_api_base_url_from(
     let port = port
         .map(str::trim)
         .filter(|v| !v.is_empty())
-        .unwrap_or("8080");
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| DEFAULT_CORE_API_PORT.to_string());
     format!("http://{}:{}", host, port)
 }
 
@@ -2057,10 +2087,10 @@ mod tests {
     // ─── core_api_base_url tests (audit V-8) ───
 
     #[test]
-    fn test_core_api_base_url_default_is_localhost_8080() {
+    fn test_core_api_base_url_default_is_loopback_default_port() {
         assert_eq!(
             core_api_base_url_from(None, None, None),
-            DEFAULT_CORE_API_BASE_URL
+            default_core_api_base_url()
         );
     }
 

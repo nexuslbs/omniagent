@@ -57,8 +57,15 @@ pub const OUTCOME_SOLVED: &str = "solved";
 pub const OUTCOME_ABORTED: &str = "aborted";
 pub const OUTCOME_TIMEOUT: &str = "timeout";
 
-/// Default interaction deadline when the payload carries no `timeout_s`.
+/// Default interaction deadline when the payload carries no `timeout_s`
+/// (operator setting `event_default_timeout_s`).
 pub const DEFAULT_TIMEOUT_S: i64 = 900;
+
+/// Effective default interaction deadline (settings with the documented
+/// default).
+fn default_timeout_s() -> i64 {
+    crate::runtime_settings::get_i64("event_default_timeout_s", DEFAULT_TIMEOUT_S)
+}
 /// How often a waiter re-checks the interaction state.
 const WAIT_POLL_MS: u64 = 250;
 /// Hard bound for ONE listener action (a hanging listener must never hang the
@@ -610,7 +617,7 @@ fn new_interaction(event: &str, correlation_id: &str, payload: &Value, now: i64)
         .get("timeout_s")
         .and_then(Value::as_i64)
         .filter(|v| *v > 0)
-        .unwrap_or(DEFAULT_TIMEOUT_S);
+        .unwrap_or_else(default_timeout_s);
     Interaction {
         correlation_id: correlation_id.to_string(),
         event: event.to_string(),

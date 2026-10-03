@@ -41,7 +41,7 @@ use serde_json::Value;
 
 use crate::agent::config;
 use crate::agent::terminal_summary::{
-    contains_dsml_markup, is_continuation_intent, sanitize_terminal_content,
+    contains_dsml_markup, is_continuation_intent, sanitize_terminal_content, structurally_unusable,
 };
 use crate::mcp::AppContext;
 
@@ -113,9 +113,23 @@ pub(crate) struct Hygiene {
 /// Built-in provider-neutral heuristic: exactly the behaviour the core had
 /// before `malformed_response_tool` existed (the back-compat default).
 pub(crate) fn builtin_hygiene(raw: &str, continuation_gate: bool) -> Hygiene {
+    builtin_hygiene_with_stop(raw, continuation_gate, None)
+}
+
+/// [`builtin_hygiene`] with the provider's STRUCTURED stop/finish reason (audit
+/// HV-E1): a reply the provider itself marked as truncated
+/// ([`structurally_unusable`]) is never accepted as a final summary, whatever
+/// its wording - the phrase lists are the last resort, not the decision.
+pub(crate) fn builtin_hygiene_with_stop(
+    raw: &str,
+    continuation_gate: bool,
+    stop_reason: Option<&str>,
+) -> Hygiene {
     let cleaned = sanitize_terminal_content(raw);
-    let fallback =
-        cleaned.trim().is_empty() || (continuation_gate && is_continuation_intent(&cleaned));
+    let structural = continuation_gate && structurally_unusable(raw, stop_reason);
+    let fallback = structural
+        || cleaned.trim().is_empty()
+        || (continuation_gate && is_continuation_intent(&cleaned));
     Hygiene {
         cleaned,
         fallback,
@@ -167,15 +181,29 @@ pub(crate) fn hygiene_from_verdict(
 /// built-in heuristic takes over after a warning (fail-open, same contract as
 /// `redaction_tool`).
 pub(crate) async fn assess(ctx: &AppContext, raw: &str, continuation_gate: bool) -> Hygiene {
+    assess_with_stop(ctx, raw, continuation_gate, None).await
+}
+
+/// [`assess`] carrying the provider's STRUCTURED stop/finish reason (audit
+/// HV-E1).
+pub(crate) async fn assess_with_stop(
+    ctx: &AppContext,
+    raw: &str,
+    continuation_gate: bool,
+    stop_reason: Option<&str>,
+) -> Hygiene {
     let tool = config::get_global()
         .map(|g| g.read().malformed_response_tool.trim().to_string())
         .unwrap_or_default();
     if tool.is_empty() {
-        return builtin_hygiene(raw, continuation_gate);
+        return builtin_hygiene_with_stop(raw, continuation_gate, stop_reason);
     }
     match call_malformed_response_tool(ctx, &tool, raw).await {
         Ok(verdict) => {
-            let hygiene = hygiene_from_verdict(raw, &verdict, continuation_gate);
+            let mut hygiene = hygiene_from_verdict(raw, &verdict, continuation_gate);
+            if continuation_gate && structurally_unusable(raw, stop_reason) {
+                hygiene.fallback = true;
+            }
             tracing::info!(
                 "[hygiene] malformed_response_tool '{}': malformed={} reason='{}' fallback={}",
                 tool,
@@ -191,7 +219,7 @@ pub(crate) async fn assess(ctx: &AppContext, raw: &str, continuation_gate: bool)
                 tool,
                 e
             );
-            builtin_hygiene(raw, continuation_gate)
+            builtin_hygiene_with_stop(raw, continuation_gate, stop_reason)
         }
     }
 }

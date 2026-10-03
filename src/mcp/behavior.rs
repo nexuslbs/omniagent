@@ -58,6 +58,14 @@ pub struct ToolBehavior {
     /// images, networks): the self-restart guard must run before it executes.
     #[serde(default)]
     pub affects_own_stack: bool,
+    /// Dispatch policy declared by the tool's own manifest: `sync` (never
+    /// backgrounded), `immediate` (backgrounded on the FIRST call) or
+    /// `threshold` (fast path + background switch). Absent = the legacy
+    /// fail-open policy in [`crate::agent::background_dispatch`] applies
+    /// (audit HV-A1: the policy belongs to the descriptor, not to a name
+    /// list in the core).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch: Option<String>,
     /// Structured declaration that executing this tool may CHANGE the world
     /// (write a file, mutate a repo, deploy something). The invocation ledger
     /// uses it to decide whether a thread's recorded invocations are still
@@ -76,6 +84,7 @@ impl ToolBehavior {
             && self.family.is_none()
             && !self.affects_own_stack
             && self.changes_state.is_none()
+            && self.dispatch.is_none()
     }
 
     /// May executing this tool have changed the world?
@@ -108,6 +117,8 @@ pub struct ToolManifestEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub affects_own_stack: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changes_state: Option<bool>,
 }
 
@@ -123,6 +134,9 @@ impl ToolManifestEntry {
         }
         if let Some(v) = self.affects_own_stack {
             behavior.affects_own_stack = v;
+        }
+        if let Some(v) = &self.dispatch {
+            behavior.dispatch = Some(v.clone());
         }
         if let Some(v) = self.changes_state {
             behavior.changes_state = Some(v);
