@@ -59,12 +59,18 @@ pub(crate) async fn handle_response(
             let last_seq = crate::db::threads::get_max_thread_sequence(&cfg.pool, thread.id)
                 .await
                 .unwrap_or(0);
+            // Same per-thread counter as every other row: the Usage message is
+            // an ordinary thread message, never a bespoke iteration 0.
+            let iteration = crate::db::messages::current_thread_iteration(&cfg.pool, thread.id)
+                .await
+                .unwrap_or(0);
             if let Err(e) = insert_thread_usage_message_at(
                 &cfg.pool,
                 thread.id,
                 last_seq + 1,
                 usage_entries,
                 cumulative_usage.as_ref(),
+                iteration,
             )
             .await
             {
@@ -242,6 +248,7 @@ pub(crate) async fn handle_response(
             next_seq,
             usage_entries,
             cumulative_usage.as_ref(),
+            current_iter,
         )
         .await;
         let summary_msg = MessageNew {
@@ -356,6 +363,7 @@ pub(crate) async fn handle_response(
                 next_seq,
                 usage_entries,
                 cumulative_usage.as_ref(),
+                current_iter,
             )
             .await;
             let summary_msg = MessageNew {
@@ -409,6 +417,7 @@ pub(crate) async fn handle_response(
                 next_seq,
                 usage_entries,
                 cumulative_usage.as_ref(),
+                current_iter,
             )
             .await;
             let agent_msg = MessageNew {
@@ -476,6 +485,7 @@ pub(crate) async fn handle_response(
             next_seq,
             usage_entries,
             cumulative_usage.as_ref(),
+            current_iter,
         )
         .await;
         let agent_msg = MessageNew {
@@ -639,12 +649,18 @@ fn thread_usage_stats(
 /// `msg_type = 'usage'` message - idempotent across the terminal paths that
 /// can both reach a thread (the builtin fail-thread tool inserts it before its
 /// Error message; `handle_response` inserts it before the final message).
+///
+/// `iteration` is the thread's CURRENT iteration (the same per-thread counter
+/// the agentic rows carry, see `crate::db::messages::current_thread_iteration`),
+/// NOT a hardcoded 0: the Usage message is an ordinary thread message and must
+/// report the turn it belongs to (a thread that ran 7 LLM calls gets 7).
 pub(crate) async fn insert_thread_usage_message_at(
     pool: &sqlx::PgPool,
     thread_id: i64,
     seq: i32,
     entries: &[serde_json::Value],
     cumulative_usage: Option<&Usage>,
+    iteration: i32,
 ) -> AppResult<bool> {
     let max_seq = crate::db::threads::get_max_thread_sequence(pool, thread_id).await?;
     if max_seq == 0 || seq <= 0 {
@@ -681,7 +697,8 @@ pub(crate) async fn insert_thread_usage_message_at(
         original_thread_id: None,
         msg_type: "usage".to_string(),
         msg_subtype: None,
-        iteration_number: 0,
+        // Same per-thread counter as every other message row (never 0-by-default).
+        iteration_number: iteration,
         duration_ms: 0,
         token_usage: serde_json::json!({
             "full_input_tokens": agg.full_input_tokens,
@@ -728,8 +745,17 @@ pub(crate) async fn usage_then_final_seq(
     next_seq: i32,
     entries: &[serde_json::Value],
     cumulative_usage: Option<&Usage>,
+    iteration: i32,
 ) -> i32 {
-    match insert_thread_usage_message_at(pool, thread_id, next_seq, entries, cumulative_usage).await
+    match insert_thread_usage_message_at(
+        pool,
+        thread_id,
+        next_seq,
+        entries,
+        cumulative_usage,
+        iteration,
+    )
+    .await
     {
         Ok(true) => next_seq + 1,
         Ok(false) => next_seq,
@@ -754,7 +780,13 @@ pub(crate) async fn usage_message_seq_for_thread(
     next_seq: i32,
 ) -> i32 {
     let entries = crate::agent::usage_entries::thread_usage_snapshot(thread_id);
-    usage_then_final_seq(pool, thread_id, next_seq, &entries, None).await
+    // The thread's CURRENT iteration, read from its own messages (the same
+    // counter `threads.iterations` is derived from) - so callers that have no
+    // `current_iter` in scope still write the real turn, never a bespoke 0.
+    let iteration = crate::db::messages::current_thread_iteration(pool, thread_id)
+        .await
+        .unwrap_or(0);
+    usage_then_final_seq(pool, thread_id, next_seq, &entries, None, iteration).await
 }
 
 /// Final thread status after the executor loop (pure, unit-tested).

@@ -583,6 +583,11 @@ async fn fail_orphaned_pending_thread(cfg: &AgentContext, orphan: &queries::Orph
         .await
         .unwrap_or(0)
         + 1;
+    // The recovered thread's CURRENT iteration (same counter as every other
+    // message row; 0 for a queue that never ran an LLM call).
+    let iteration = crate::db::messages::current_thread_iteration(&cfg.pool, orphan.id)
+        .await
+        .unwrap_or(0);
     let msg = queries::MessageNew {
         thread_id: orphan.id,
         role: "agent".to_string(),
@@ -599,7 +604,7 @@ async fn fail_orphaned_pending_thread(cfg: &AgentContext, orphan: &queries::Orph
         original_thread_id: None,
         msg_type: "error".to_string(),
         msg_subtype: Some("orphan_pending".to_string()),
-        iteration_number: 0,
+        iteration_number: iteration,
         duration_ms: 0,
         token_usage: serde_json::json!({}),
     };
@@ -823,6 +828,11 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                                 &cfg.pool, thread.id, next_seq,
                             )
                             .await;
+                            let iteration = crate::db::messages::current_thread_iteration(
+                                &cfg.pool, thread.id,
+                            )
+                            .await
+                            .unwrap_or(0);
                             let err_msg = queries::MessageNew {
                                 thread_id: thread.id,
                                 role: "agent".to_string(),
@@ -836,7 +846,7 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                                 original_thread_id: None,
                                 msg_type: "error".to_string(),
                                 msg_subtype: Some("no_cause".to_string()),
-                                iteration_number: 0,
+                                iteration_number: iteration,
                                 duration_ms: 0,
                                 token_usage: serde_json::json!({}),
                             };
@@ -863,6 +873,11 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                                 &cfg.pool, thread.id, next_seq,
                             )
                             .await;
+                            let iteration = crate::db::messages::current_thread_iteration(
+                                &cfg.pool, thread.id,
+                            )
+                            .await
+                            .unwrap_or(0);
                             let err_msg = queries::MessageNew {
                                 thread_id: thread.id,
                                 role: "agent".to_string(),
@@ -876,7 +891,7 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                                 original_thread_id: None,
                                 msg_type: "error".to_string(),
                                 msg_subtype: Some("unknown_error".to_string()),
-                                iteration_number: 0,
+                                iteration_number: iteration,
                                 duration_ms: 0,
                                 token_usage: serde_json::json!({}),
                             };
@@ -980,6 +995,11 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                             &cfg.pool, thread.id, next_seq,
                         )
                         .await;
+                        let iteration = crate::db::messages::current_thread_iteration(
+                            &cfg.pool, thread.id,
+                        )
+                        .await
+                        .unwrap_or(0);
                         let err_msg = queries::MessageNew {
                             thread_id: thread.id,
                             role: "agent".to_string(),
@@ -993,7 +1013,7 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                             original_thread_id: None,
                             msg_type: "error".to_string(),
                                                     msg_subtype: Some("spam".to_string()),
-                                                    iteration_number: 0,
+                                                    iteration_number: iteration,
                                                     duration_ms: 0,
                                                     token_usage: serde_json::json!({}),
                                                 };

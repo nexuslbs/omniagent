@@ -107,6 +107,8 @@ pub async fn persist_action_messages(
         original_thread_id: None,
         msg_type: "action".to_string(),
         msg_subtype: Some(spec.action_id.to_string()),
+        // Documented 0: action threads make NO LLM call at all, so
+        // `threads.iterations` stays 0 and 0 is their current iteration.
         iteration_number: 0,
         duration_ms: spec.duration_ms as i32,
         token_usage: json!({}),
@@ -129,6 +131,7 @@ pub async fn persist_action_messages(
         original_thread_id: None,
         msg_type: "summary".to_string(),
         msg_subtype: Some(spec.action_id.to_string()),
+        // Documented 0: see the action message above - non-agentic action thread.
         iteration_number: 0,
         duration_ms: spec.duration_ms as i32,
         token_usage: json!({}),

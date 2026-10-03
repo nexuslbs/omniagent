@@ -252,11 +252,12 @@ pub async fn get_latest_seq0_message(
     struct IdContent {
         id: i64,
         content: String,
+        iteration_number: i32,
     }
     let row: Option<IdContent> = sql_forge!(
         IdContent,
         r#"
-        SELECT m.id, m.content
+        SELECT m.id, m.content, m.iteration_number
         FROM messages m
         JOIN threads t ON t.id = m.thread_id
         WHERE t.channel_id = :channel_id
@@ -285,12 +286,40 @@ pub async fn get_latest_seq0_message(
             msg_type: String::new(),
             msg_subtype: None,
             created_at: chrono::Utc::now(),
-            iteration_number: 0,
+            // Real per-turn counter of the cause row, read above (never a bespoke 0).
+            iteration_number: r.iteration_number,
             duration_ms: 0,
             token_usage: serde_json::Value::Null,
         })),
         None => Ok(None),
     }
+}
+
+/// The thread's CURRENT iteration: the highest `iteration_number` already
+/// persisted for the thread (0 when it has no iteration-bearing message yet).
+///
+/// Semantics of `messages.iteration_number` (per-thread turn counter):
+/// - the very first row of a thread (the seq-0 cause/user prompt, written
+///   before any LLM call) carries 0;
+/// - the first LLM call's message carries 1, the Nth carries N
+///   (`src/agent/main_loop.rs` increments `current_iter` before each call);
+/// - non-agentic threads (action threads, hook/system bookkeeping rows) stay 0;
+/// - `threads.iterations` is derived from these rows as
+///   `MAX(messages.iteration_number)` (`crate::db::threads`), i.e. the real
+///   LLM call count.
+///
+/// Thread-scoped OUT-OF-BAND inserts (thread-end Usage row, Error rows on the
+/// fail/finalize paths, supervisor error rows) reuse this helper so they carry
+/// the SAME counter as the agentic rows instead of a hardcoded 0 - one flow,
+/// not a separate universe.
+pub async fn current_thread_iteration(pool: &PgPool, thread_id: i64) -> AppResult<i32> {
+    // `$1` (not `:thread_id`): this raw query is not rewritten by `sql_forge!`.
+    let iteration: Option<i32> =
+        sqlx::query_scalar("SELECT MAX(iteration_number) FROM messages WHERE thread_id = $1")
+            .bind(thread_id)
+            .fetch_one(pool)
+            .await?;
+    Ok(iteration.unwrap_or(0))
 }
 
 /// Get the thread ID for a given message.

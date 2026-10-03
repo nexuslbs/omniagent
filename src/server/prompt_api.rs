@@ -159,6 +159,8 @@ fn preview_cause_message(thread_id: i64, content: &str) -> Message {
         msg_subtype: None,
         original_thread_id: None,
         created_at: chrono::Utc::now(),
+        // Documented 0: in-memory preview message, NEVER persisted (see the doc
+        // comment above) - it has no iteration because it has no row.
         iteration_number: 0,
         duration_ms: 0,
         token_usage: serde_json::json!({}),

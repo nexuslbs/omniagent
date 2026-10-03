@@ -893,6 +893,9 @@ Previous plan:\n{}",
                     original_thread_id: None,
                     msg_type: "prompt".to_string(),
                     msg_subtype: Some("plan".to_string()),
+                    // Documented 0: this prompt-log row is persisted BEFORE the
+                    // first LLM call of the thread (the plan request below), so
+                    // 0 is the thread's current iteration at this point.
                     iteration_number: 0,
                     duration_ms: 0,
                     token_usage: serde_json::json!({}),

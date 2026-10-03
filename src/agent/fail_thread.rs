@@ -36,6 +36,13 @@ pub(crate) async fn fail_thread(
         .await
         .unwrap_or((0, 0, 0));
 
+    // The thread's CURRENT iteration (same counter as every other message row):
+    // the Error message is an ordinary thread message and must not pretend to
+    // live in iteration 0.
+    let iteration = crate::db::messages::current_thread_iteration(&cfg.pool, thread.id)
+        .await
+        .unwrap_or(0);
+
     let err_msg = MessageNew {
         thread_id: thread.id,
         role: "system".to_string(),
@@ -55,7 +62,7 @@ pub(crate) async fn fail_thread(
         original_thread_id: None,
         msg_type: "error".to_string(),
         msg_subtype: Some(subtype.to_string()),
-        iteration_number: 0,
+        iteration_number: iteration,
         duration_ms: 0,
         token_usage: serde_json::json!({
             "prompt_tokens": usage.0,
@@ -736,6 +743,11 @@ pub(crate) async fn fail_thread_tool(
     let usage = crate::db::threads::aggregate_thread_token_usage(&ctx.pool, thread.id)
         .await
         .unwrap_or((0, 0, 0));
+    // The thread's CURRENT iteration (same counter as every other message row) -
+    // the fail-thread Error message reports the turn it belongs to, not 0.
+    let iteration = crate::db::messages::current_thread_iteration(&ctx.pool, thread.id)
+        .await
+        .unwrap_or(0);
     // Ordering (operator correction 2026-10-02, telegram thread 3883): this tool
     // runs inside the tool-calling loop, which appends the tool's own
     // `tool-result` message AFTER the tool returns - and that message is the
@@ -768,7 +780,7 @@ pub(crate) async fn fail_thread_tool(
         original_thread_id: None,
         msg_type: "error".to_string(),
         msg_subtype: Some("fail_thread".to_string()),
-        iteration_number: 0,
+        iteration_number: iteration,
         duration_ms: 0,
         token_usage: serde_json::json!({
             "prompt_tokens": usage.0,

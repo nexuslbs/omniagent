@@ -839,6 +839,9 @@ pub async fn create_thread_with_cause(
         original_thread_id: None,
         msg_type: p.msg_type.clone(),
         msg_subtype: p.msg_subtype,
+        // Documented 0: the seq-0 cause/user-prompt row is written BEFORE any
+        // LLM call ever runs, so 0 IS this thread's current iteration here
+        // (`current_thread_iteration` would return 0 as well).
         iteration_number: 0,
         duration_ms: 0,
         token_usage: serde_json::json!({}),
@@ -4968,6 +4971,97 @@ mod sub_prompt_appendable_tests {
         );
 
         cleanup_threads(&pool, &[running_id, other_id]).await;
+    }
+
+    /// G-A (incremental iteration for ALL messages): a thread that ran N agentic
+    /// iterations gets its thread-end Usage message at that SAME iteration N
+    /// (never a bespoke 0), and `threads.iterations` stays the real LLM call
+    /// count (MAX(iteration_number) = N).
+    #[tokio::test]
+    async fn usage_message_carries_the_threads_current_iteration() {
+        // DB-backed test against the dev database; skipped when DATABASE_URL is
+        // absent. It only touches rows it creates itself and is cleaned up below.
+        let Ok(db_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let _db_guard = crate::db::DB_TEST_LOCK.lock().await;
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect dev db");
+
+        let thread_id: i64 = sqlx::query_scalar(
+            "INSERT INTO threads (status, cause, channel_id, profile) \
+             VALUES ('processing', 'user', 'test-channel-iteration', 'test-profile') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("insert test thread");
+
+        // Simulate N agentic turns: message rows carrying iteration_number
+        // 1..=N, exactly what the loop persists per LLM call.
+        const N: i32 = 7;
+        for i in 1..=N {
+            sqlx::query(
+                "INSERT INTO messages (thread_id, thread_sequence, role, content, msg_type, iteration_number) \
+                 VALUES ($1, $2, 'agent', 'x', 'message', $2)",
+            )
+            .bind(thread_id)
+            .bind(i)
+            .execute(&pool)
+            .await
+            .expect("insert agentic message");
+        }
+
+        // The out-of-band thread-end Usage insert must read that same counter
+        // instead of hardcoding 0, and still land before the final row.
+        let next_seq = N + 1;
+        let final_seq = crate::agent::response_handler::usage_message_seq_for_thread(
+            &pool, thread_id, next_seq,
+        )
+        .await;
+        assert_eq!(
+            final_seq,
+            next_seq + 1,
+            "usage message must be inserted before the final message"
+        );
+
+        let usage_iter: i32 = sqlx::query_scalar(
+            "SELECT iteration_number FROM messages WHERE thread_id = $1 AND msg_type = 'usage'",
+        )
+        .bind(thread_id)
+        .fetch_one(&pool)
+        .await
+        .expect("usage row must exist");
+        assert_eq!(
+            usage_iter, N,
+            "usage message must carry the thread's current iteration, not 0"
+        );
+
+        // `current_thread_iteration` is the shared source of that value.
+        let current = crate::db::messages::current_thread_iteration(&pool, thread_id)
+            .await
+            .expect("current iteration");
+        assert_eq!(current, N);
+
+        // threads.iterations semantics are unchanged: real LLM call count.
+        let iterations: i32 = sqlx::query_scalar(
+            "SELECT COALESCE((SELECT MAX(iteration_number) FROM messages WHERE thread_id = $1), 0)",
+        )
+        .bind(thread_id)
+        .fetch_one(&pool)
+        .await
+        .expect("iterations");
+        assert_eq!(iterations, N, "iterations = MAX(iteration_number)");
+
+        // Best-effort cleanup: keep the shared dev DB free of test rows.
+        let _ = sqlx::query("DELETE FROM messages WHERE thread_id = $1")
+            .bind(thread_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM threads WHERE id = $1")
+            .bind(thread_id)
+            .execute(&pool)
+            .await;
     }
 }
 
