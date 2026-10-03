@@ -115,13 +115,34 @@ struct DispatchActiveTaskRow {
 /// missing (which blocks dispatch). Otherwise `(status, archived)`.
 type DepState = Option<(String, Option<bool>)>;
 
-/// Eligibility gate: every dependency must be archived or `done`.
+/// Terminal-SUCCESS kanban statuses: a dependency parked in one of these has
+/// FINISHED its work, so it satisfies the dependency gate exactly like an
+/// archived row. Single source of truth for the gate - the predicate, its
+/// docs and its tests all read this list, so `released` (the manual terminal
+/// parking column AFTER `done`, see `VALID_STATUSES` in
+/// `crate::server::kanban`) counts exactly like `done` and the two can never
+/// drift apart (operator report 2026-10-03: after `done` tasks were moved to
+/// `released`, every task depending on them was stuck forever).
+///
+/// `blocked` is deliberately NOT a member: it is terminal for the WORKFLOW
+/// (R4 - see `crate::agent::fail_thread::is_terminal_status`) but it is a
+/// FAILURE, not a success, so a dependency parked there must keep blocking.
+const DEP_SATISFIED_STATUSES: &[&str] = &["done", "released"];
+
+/// Whether a non-archived dependency with this status satisfies the gate
+/// (see `DEP_SATISFIED_STATUSES`).
+fn is_dep_satisfied_status(status: &str) -> bool {
+    DEP_SATISFIED_STATUSES.contains(&status)
+}
+
+/// Eligibility gate: every dependency must be archived or in a terminal
+/// SUCCESS status (`DEP_SATISFIED_STATUSES`: `done` / `released`).
 /// Mirrors the dispatcher semantics: archived -> ok, missing row -> blocks,
-/// status != "done" -> blocks.
+/// status not terminal-success -> blocks.
 fn deps_satisfied(deps: &[DepState]) -> bool {
     deps.iter().all(|dep| match dep {
         None => false,
-        Some((status, archived)) => *archived == Some(true) || status == "done",
+        Some((status, archived)) => *archived == Some(true) || is_dep_satisfied_status(status),
     })
 }
 
@@ -189,7 +210,8 @@ fn resolve_task_channel(
 
 /// Run ONE dispatch pass: promote the highest-priority eligible `todo` task
 /// to `running` and start a thread for it. A task is eligible when every
-/// non-archived dependency is `done` AND its channel has no active
+/// non-archived dependency is in a terminal success status (`done` or
+/// `released` - see `DEP_SATISFIED_STATUSES`) AND its channel has no active
 /// (queued/running) thread AND its channel is not claimed by another active
 /// task - the channel gates let the current task's full workflow
 /// (executor -> tester -> reviewer -> done) finish before the next task on
@@ -551,6 +573,78 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dispatch_deps_gate_accepts_released_and_done() {
+        // Terminal-SUCCESS dependencies satisfy the gate: `released` (the
+        // manual terminal parking column AFTER `done`) counts exactly like
+        // `done` (operator 2026-10-03). The set lives ONCE in
+        // `DEP_SATISFIED_STATUSES` - every member must be accepted.
+        assert_eq!(DEP_SATISFIED_STATUSES, &["done", "released"]);
+        for &status in DEP_SATISFIED_STATUSES {
+            assert!(
+                is_dep_satisfied_status(status),
+                "dependency status {status} must satisfy the gate"
+            );
+            assert!(deps_satisfied(&[Some((status.to_string(), Some(false)))]));
+        }
+
+        // A `released` dependency makes the dependent task eligible: the
+        // selector returns it as the next candidate when it is the only one
+        // and when it precedes a still-blocked candidate.
+        let released = vec![vec![Some(("released".to_string(), Some(false)))]];
+        assert!(deps_satisfied(&released[0]));
+        assert_eq!(first_dispatchable_index(&released, &[0], &[false]), Some(0));
+        assert_eq!(
+            first_dispatchable_index(
+                &[
+                    vec![Some(("released".to_string(), Some(false)))],
+                    vec![Some(("todo".to_string(), Some(false)))],
+                ],
+                &[0, 0],
+                &[false, false]
+            ),
+            Some(0)
+        );
+        // Mixed set: all deps must be satisfied, both success statuses ok.
+        assert!(deps_satisfied(&[
+            Some(("done".to_string(), Some(false))),
+            Some(("released".to_string(), Some(false))),
+        ]));
+        // One blocking dep among successes still blocks the task.
+        assert!(!deps_satisfied(&[
+            Some(("released".to_string(), Some(false))),
+            Some(("todo".to_string(), Some(false))),
+        ]));
+
+        // Every OTHER kanban status still blocks. `blocked` is
+        // workflow-terminal (fail_thread::is_terminal_status) but NOT a
+        // success, so it blocks like todo/running/testing/review/backlog.
+        for status in ["backlog", "todo", "running", "testing", "review", "blocked"] {
+            assert!(
+                !is_dep_satisfied_status(status),
+                "dependency status {status} must still block dispatch"
+            );
+            assert!(
+                !deps_satisfied(&[Some((status.to_string(), Some(false)))]),
+                "a non-archived {status} dependency must block its dependent task"
+            );
+            assert_eq!(
+                first_dispatchable_index(
+                    &[vec![Some((status.to_string(), Some(false)))]],
+                    &[0],
+                    &[false]
+                ),
+                None
+            );
+        }
+
+        // Archived dependencies never block, regardless of status; a missing
+        // dependency row still blocks.
+        assert!(deps_satisfied(&[Some(("todo".to_string(), Some(true)))]));
+        assert!(deps_satisfied(&[Some(("blocked".to_string(), Some(true)))]));
+        assert!(!deps_satisfied(&[None]));
+    }
+
+    #[test]
     fn dispatch_no_eligible_tasks() {
         // A task whose dependency is still 'todo' is not eligible -> no dispatch.
         let blocked = vec![Some(("todo".to_string(), Some(false)))];
@@ -567,7 +661,8 @@ mod tests {
 
     #[test]
     fn dispatch_deps_gate_skips_unsatisfied() {
-        // Task 0 has a non-done dep (blocked); task 1 has a done dep (eligible);
+        // Task 0 has a non-success dep ('todo') -> blocked; task 1 has a
+        // `done` dep (eligible);
         // task 2 has no deps (eligible). The first eligible is task 1.
         let task_deps = vec![
             vec![Some(("todo".to_string(), Some(false)))],
