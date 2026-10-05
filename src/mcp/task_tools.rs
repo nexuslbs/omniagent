@@ -473,6 +473,22 @@ pub async fn handle_wait_for_status(args: Value, ctx: AppContext) -> AppResult<M
         });
     }
 
+    // CORE GUARD against a self-referential wait (incident telegram
+    // 4122/4126): a thread that waits on the task it is itself running can
+    // only be answered when that thread ends, so the call would block for the
+    // whole timeout while the agent polls pointlessly. Refuse it BEFORE any
+    // polling starts.
+    if let Some(refusal) =
+        crate::status_wait::self_wait_error(&ctx.pool, entity, &id, &until, ctx.current_thread_id)
+            .await?
+    {
+        return Ok(McpToolResult {
+            call_id: String::new(),
+            content: format!("Error: {refusal}"),
+            is_error: true,
+        });
+    }
+
     let timeout_s = args
         .get("timeout_s")
         .and_then(|v| v.as_u64())
@@ -900,5 +916,106 @@ mod call_and_wait_tests {
             .expect("missing tool is a result, not an error");
         assert!(result.is_error);
         assert!(result.content.contains("'tool' parameter is required"));
+    }
+}
+
+#[cfg(test)]
+mod wait_for_status_self_guard_tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// End-to-end (tool handler) proof of the self-wait guard: a call issued
+    /// from the thread that is the target task's running thread returns an
+    /// error IMMEDIATELY (no polling, no timeout wait); a different caller
+    /// keeps the normal path. Skipped when DATABASE_URL is absent.
+    #[tokio::test]
+    async fn wait_for_status_refuses_a_self_wait_immediately() {
+        let Ok(db_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let _db_guard = crate::db::DB_TEST_LOCK.lock().await;
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect dev db");
+
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let task_id = format!("task-wfs-self-guard-{}-{}", std::process::id(), n);
+        let channel = format!("test-channel-wfs-self-guard-{}", std::process::id());
+        sqlx::query(
+            "INSERT INTO kanban_tasks (id, title, status, board, channel_id, profile, thread_status, created_at, updated_at)
+             VALUES ($1, 'wait_for_status self-wait guard test', 'running', 'main', $2, 'test-profile', 'scheduled', NOW(), NOW())",
+        )
+        .bind(&task_id)
+        .bind(&channel)
+        .execute(&pool)
+        .await
+        .expect("insert task");
+        let thread_id: i64 = sqlx::query_scalar(
+            "INSERT INTO threads (status, cause, channel_id, profile, task_id, workflow_step)
+             VALUES ('processing', 'user', $1, 'test-profile', $2, 'running') RETURNING id",
+        )
+        .bind(&channel)
+        .bind(&task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert thread");
+
+        let ctx_for = |tid: i64| {
+            let mut ctx = AppContext::new(
+                pool.clone(),
+                pool.clone(),
+                "/tmp",
+                std::collections::HashMap::new(),
+                Arc::new(crate::mcp::external::client::ExternalMcpClients::new()),
+            );
+            ctx.current_thread_id = Some(tid);
+            ctx
+        };
+
+        // (1) The calling thread IS the task's running thread: immediate error.
+        let started = Instant::now();
+        let res = handle_wait_for_status(
+            json!({"task_id": &task_id, "timeout_s": 420, "until": "done,blocked"}),
+            ctx_for(thread_id),
+        )
+        .await
+        .expect("handler ok");
+        let elapsed = started.elapsed();
+        assert!(res.is_error, "must be an error result: {}", res.content);
+        assert!(res.content.contains("cannot wait"), "{}", res.content);
+        assert!(res.content.contains(&task_id), "{}", res.content);
+        assert!(
+            res.content.contains(&format!("#{thread_id}")),
+            "names the calling thread: {}",
+            res.content
+        );
+        assert!(res.content.contains("wait_task"), "{}", res.content);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "self-wait must be refused without polling: {elapsed:?}"
+        );
+
+        // (2) A different caller is NOT refused: the normal wait runs and
+        // times out (short timeout) exactly as before.
+        let res2 = handle_wait_for_status(
+            json!({"task_id": &task_id, "timeout_s": 1, "until": "done"}),
+            ctx_for(thread_id + 5_000_000),
+        )
+        .await
+        .expect("handler ok");
+        assert!(!res2.is_error, "{}", res2.content);
+        assert!(res2.content.contains("\"timeout\""), "{}", res2.content);
+
+        let _ = sqlx::query("DELETE FROM threads WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM kanban_tasks WHERE id = $1")
+            .bind(&task_id)
+            .execute(&pool)
+            .await;
     }
 }
