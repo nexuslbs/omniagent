@@ -1294,6 +1294,16 @@ pub async fn update_thread_progress(
 /// (channel-wide skips, startup recovery, closed-channel skips) all funnel
 /// through the same statement. Only `NOT terminal` rows are touched: an
 /// already-terminal thread is never re-flipped.
+///
+/// TOKEN SEMANTICS: `input_tokens` is the CACHE-MISS input only
+/// (`SUM(prompt_tokens - cached_tokens)`), exactly the contract
+/// `complete_thread` applies (operator UPDATE 2026-10-02, telegram thread
+/// 3915). Summing the raw `prompt_tokens` here stored the TOTAL prompt for
+/// every skipped / interrupted / system thread, so each surface deriving the
+/// cache share as `cached / (cached + input_tokens)` (dashboard threads list,
+/// overview token trend) under-reported those rows by ~2x - the operator's
+/// "cache tokens is so low" report (telegram thread 4136, 2026-10-05): dev
+/// thread 4122 (skipped) showed 49 % instead of 97 %.
 pub async fn mark_thread_terminal<'e, E>(
     executor: E,
     thread_id: i64,
@@ -1321,7 +1331,8 @@ where
                 terminal = true
             FROM (
                 SELECT
-                    COALESCE(SUM(COALESCE((m.token_usage->>'prompt_tokens')::bigint, 0)), 0)::int AS input_tokens,
+                    COALESCE(SUM(GREATEST(COALESCE((m.token_usage->>'prompt_tokens')::bigint, 0)
+                                       - COALESCE((m.token_usage->>'cached_tokens')::bigint, 0), 0)), 0)::int AS input_tokens,
                     COALESCE(SUM(COALESCE((m.token_usage->>'cached_tokens')::bigint, 0)), 0)::int AS cached_tokens,
                     COALESCE(SUM(COALESCE((m.token_usage->>'completion_tokens')::bigint, 0)), 0)::int AS output_tokens
                 FROM messages m
@@ -3185,6 +3196,73 @@ mod tests {
             .bind(thread_id)
             .execute(&pool)
             .await;
+    }
+
+    #[tokio::test]
+    async fn mark_thread_terminal_stores_cache_miss_only_input_tokens() {
+        // Regression (operator telegram thread 4136, 2026-10-05: "the cache
+        // tokens is so low"): EVERY terminal write path stores the CACHE-MISS
+        // input only - the contract `complete_thread` / `response_handler`
+        // apply. This choke point summed the raw `prompt_tokens`, so every
+        // skipped / interrupted / system thread carried its cache hits as
+        // misses and the dashboard cache share `cached / (cached + input)`
+        // came out roughly half the real value. DB-backed (dev DB only),
+        // skipped without DATABASE_URL; only touches rows it creates itself.
+        let Ok(db_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let _db_guard = crate::db::DB_TEST_LOCK.lock().await;
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect dev db");
+
+        let thread_id: i64 = sqlx::query_scalar(
+            "INSERT INTO threads (status, cause, channel_id, profile) \
+             VALUES ('processing', 'user', 'test-channel-cache-miss-terminal', 'test-profile') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("insert test thread");
+
+        sqlx::query(
+            "INSERT INTO messages (thread_id, thread_sequence, role, content, msg_type, token_usage) \
+             VALUES ($1, 1, 'agent', 'x', 'message', \
+                     '{\"prompt_tokens\": 1000, \"cached_tokens\": 900, \"completion_tokens\": 7}'::jsonb)",
+        )
+        .bind(thread_id)
+        .execute(&pool)
+        .await
+        .expect("insert test message");
+
+        mark_thread_terminal(&pool, thread_id, "skipped")
+            .await
+            .expect("mark terminal");
+
+        let (status, terminal, input, cached, output): (String, bool, i32, i32, i32) =
+            sqlx::query_as(
+                "SELECT status, terminal, input_tokens, cached_tokens, output_tokens \
+                 FROM threads WHERE id = $1",
+            )
+            .bind(thread_id)
+            .fetch_one(&pool)
+            .await
+            .expect("fetch terminal row");
+
+        // Best-effort cleanup: keep the shared dev DB free of test rows.
+        let _ = sqlx::query("DELETE FROM messages WHERE thread_id = $1")
+            .bind(thread_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM threads WHERE id = $1")
+            .bind(thread_id)
+            .execute(&pool)
+            .await;
+
+        assert_eq!(status, "skipped");
+        assert!(terminal, "row is terminal");
+        assert_eq!(input, 100, "cache hits must NOT be counted as cache misses");
+        assert_eq!(cached, 900);
+        assert_eq!(output, 7);
     }
 
     #[tokio::test]

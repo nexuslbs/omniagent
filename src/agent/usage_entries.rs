@@ -869,11 +869,21 @@ mod tests {
         .to_string();
         assert!(content.len() > 1000);
         let (capped, collected) = cap_after_collect(&content, 1000);
-        assert_eq!(collected.len(), 1, "usage beyond the cap is still collected");
+        assert_eq!(
+            collected.len(),
+            1,
+            "usage beyond the cap is still collected"
+        );
         assert_eq!(collected[0]["agent"], "tester");
         assert_eq!(collected[0]["input_tokens"], 2_192_341);
-        assert!(!capped.contains("_meta"), "the capped text carries no _meta");
-        assert!(capped.len() < content.len(), "the cap still bounds the payload");
+        assert!(
+            !capped.contains("_meta"),
+            "the capped text carries no _meta"
+        );
+        assert!(
+            capped.len() < content.len(),
+            "the cap still bounds the payload"
+        );
         // The cap-disabled setting keeps the whole (still `_meta`-free) payload.
         let (full, collected) = cap_after_collect(&content, 0);
         assert_eq!(collected.len(), 1);

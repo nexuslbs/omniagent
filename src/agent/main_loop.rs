@@ -39,7 +39,18 @@ fn thread_progress_stats(
     start_time: &std::time::Instant,
 ) -> queries::CompleteThreadStats {
     queries::CompleteThreadStats {
-        input_tokens: usage.as_ref().map(|u| u.prompt_tokens as i32).unwrap_or(0),
+        // `threads.input_tokens` is the omniagent's CACHE-MISS input only - the
+        // same contract the terminal write applies (`response_handler`;
+        // operator UPDATE 2026-10-02, telegram thread 3915). Raw
+        // `prompt_tokens` is the TOTAL prompt (cache hits included): storing it
+        // here made every processing thread carry the total, so the live cache
+        // share of a running thread (dashboard threads list, overview token
+        // trend) counted its cache hits as misses until the terminal write
+        // rewrote the row.
+        input_tokens: usage
+            .as_ref()
+            .map(|u| u.prompt_tokens.saturating_sub(u.cached_tokens.unwrap_or(0)) as i32)
+            .unwrap_or(0),
         cached_tokens: usage.as_ref().and_then(|u| u.cached_tokens).unwrap_or(0) as i32,
         output_tokens: usage
             .as_ref()
@@ -3480,6 +3491,42 @@ fn billed_over_hard_budget(billed_prompt_tokens: usize, hard_budget: usize) -> b
 #[cfg(test)]
 mod budget_gate_tests {
     use super::*;
+    /// Regression (operator telegram thread 4136, 2026-10-05): the LIVE progress
+    /// write must store the CACHE-MISS input only, exactly like the terminal
+    /// write in `response_handler`. It used to store the raw cumulative
+    /// `prompt_tokens`, so a processing thread counted its cache hits as
+    /// misses (the dashboard cache share `cached / (cached + input)` came out
+    /// roughly half the real value) until the terminal write corrected the row.
+    #[test]
+    fn live_progress_input_tokens_exclude_cache_hits() {
+        let start = std::time::Instant::now();
+        let usage = Some(Usage {
+            prompt_tokens: 1_000,
+            completion_tokens: 25,
+            cached_tokens: Some(900),
+            reasoning_tokens: None,
+        });
+        let stats = thread_progress_stats(&usage, &start);
+        assert_eq!(stats.input_tokens, 100, "cache hits are not cache misses");
+        assert_eq!(stats.cached_tokens, 900);
+        assert_eq!(stats.output_tokens, 25);
+
+        // No usage yet: nothing recorded.
+        let none = thread_progress_stats(&None, &start);
+        assert_eq!(none.input_tokens, 0);
+        assert_eq!(none.cached_tokens, 0);
+
+        // A provider that reports no cache field: the whole prompt is a miss.
+        let uncached = Some(Usage {
+            prompt_tokens: 700,
+            completion_tokens: 5,
+            cached_tokens: None,
+            reasoning_tokens: None,
+        });
+        let s = thread_progress_stats(&uncached, &start);
+        assert_eq!(s.input_tokens, 700, "no cache field -> all input is a miss");
+        assert_eq!(s.cached_tokens, 0);
+    }
 
     /// Compaction is triggered ONLY by the HARD budget: a provider-billed prompt
     /// between soft and hard must NOT set `prev_over_budget` (so no force), one
