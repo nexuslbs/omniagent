@@ -18,6 +18,7 @@ pub(crate) mod hooks;
 pub(crate) mod kanban;
 pub(crate) mod kanban_ids;
 pub(crate) mod llm_proxy;
+pub(crate) mod mcp_scope;
 pub(crate) mod memory;
 pub(crate) mod messages;
 pub(crate) mod models;
@@ -34,7 +35,7 @@ pub(crate) mod toolsets;
 use crate::error::{AppResult, ErrorContext};
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{delete, get, post, put},
     Json, Router,
@@ -1137,12 +1138,45 @@ fn declared_tools(data_dir: &str) -> (Vec<tool_errors::DeclaredTool>, Vec<String
 
 async fn execute_mcp_tool_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<McpExecuteRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let name = body.name.trim().to_string();
     if name.is_empty() {
         let failure = tool_errors::name_required();
         return (StatusCode::BAD_REQUEST, Json(failure.to_json()));
+    }
+
+    // Caller scoping (operator requirement, telegram 4134): /mcp/execute must
+    // never execute a tool outside the CALLER's effective toolset. Identity is
+    // taken from the headers the builtin `core__omniagent_api` forwards (they
+    // win over the body `_meta`, so an agent cannot downgrade its own identity
+    // by rewriting the body) and resolved with the SAME rule the agent runtime
+    // uses (`crate::toolsets`). No identity at all = deny, no fallback.
+    let identity = mcp_scope::CallerIdentity::with_header_priority(
+        &mcp_scope::CallerIdentity::from_headers(&headers),
+        &mcp_scope::CallerIdentity::from_meta(body.meta.as_ref()),
+    );
+    let scope = match mcp_scope::resolve_scope(
+        &state.pool,
+        &state.data_dir,
+        &state.default_profile,
+        &identity,
+        &name,
+    )
+    .await
+    {
+        Ok(scope) => scope,
+        Err(refusal) => {
+            mcp_scope::audit_refusal(&name, &refusal);
+            let status = StatusCode::from_u16(refusal.status).unwrap_or(StatusCode::FORBIDDEN);
+            return (status, Json(refusal.to_json()));
+        }
+    };
+    if let Err(refusal) = mcp_scope::check_tool(&scope, &name) {
+        mcp_scope::audit_refusal(&name, &refusal);
+        let status = StatusCode::from_u16(refusal.status).unwrap_or(StatusCode::FORBIDDEN);
+        return (status, Json(refusal.to_json()));
     }
 
     // Resolve the tool BEFORE executing. An unknown / unregistered / disabled
@@ -1207,6 +1241,16 @@ async fn execute_mcp_tool_handler(
         .get_or_insert_with(|| state.default_profile.clone());
     ctx.current_platform
         .get_or_insert_with(|| "cli".to_string());
+    // The resolved scope is authoritative for the profile context: a
+    // thread-bound call runs as the THREAD's profile (never as a profile the
+    // body tries to claim).
+    ctx.current_profile_name = Some(scope.profile.clone());
+    if ctx.current_thread_id.is_none() {
+        ctx.current_thread_id = identity.thread_id;
+    }
+    if ctx.current_channel_id.is_none() {
+        ctx.current_channel_id = identity.channel_id.clone();
+    }
 
     match registry.execute(&call, ctx).await {
         Ok(result) => (

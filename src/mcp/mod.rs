@@ -1946,7 +1946,7 @@ fn omniagent_api_tool() -> McpTool {
         server_name: None,
         timeout_secs: Some(30),
         behavior: ToolBehavior::default(),
-        handler: std::sync::Arc::new(move |args: Value, _ctx: crate::mcp::AppContext| {
+        handler: std::sync::Arc::new(move |args: Value, ctx: crate::mcp::AppContext| {
             let base_url = base_url.clone();
             Box::pin(async move {
                 let method = args
@@ -1986,6 +1986,24 @@ fn omniagent_api_tool() -> McpTool {
                     }
                 };
                 let mut req = client.request(method_parsed, &url);
+                // Forward the executing thread's identity so the core API can
+                // scope the call to this profile's toolset: `POST /mcp/execute`
+                // refuses any tool outside the effective toolset of the caller
+                // (operator requirement, telegram 4134). The headers win over a
+                // body `_meta`, so an agent cannot downgrade its own identity.
+                if let Some(profile) = ctx.current_profile_name.as_deref() {
+                    if !profile.trim().is_empty() {
+                        req = req.header("x-omni-profile", profile);
+                    }
+                }
+                if let Some(thread_id) = ctx.current_thread_id {
+                    req = req.header("x-omni-thread-id", thread_id.to_string());
+                }
+                if let Some(channel_id) = ctx.current_channel_id.as_deref() {
+                    if !channel_id.trim().is_empty() {
+                        req = req.header("x-omni-channel-id", channel_id);
+                    }
+                }
                 if let Some(body) = args.get("body") {
                     if !body.is_null() {
                         req = req.json(body);
