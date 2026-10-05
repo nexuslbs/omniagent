@@ -942,7 +942,7 @@ mod wait_for_status_self_guard_tests {
 
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let task_id = format!("task-wfs-self-guard-{}-{}", std::process::id(), n);
+        let task_id = format!("task_wfs_self_guard_{}_{}", std::process::id(), n);
         let channel = format!("test-channel-wfs-self-guard-{}", std::process::id());
         sqlx::query(
             "INSERT INTO kanban_tasks (id, title, status, board, channel_id, profile, thread_status, created_at, updated_at)
