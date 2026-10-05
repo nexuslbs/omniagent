@@ -651,6 +651,45 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     tracing::info!(
         "[migration] Terminal status invariant: threads backfilled + CHECK constraint chk_thread_terminal_status added"
     );
+    // ── Data repair: threads.input_tokens stored as the TOTAL prompt ────────
+    // `threads.input_tokens` means the CACHE-MISS input only
+    // (`SUM(prompt_tokens - cached_tokens)`; operator UPDATE 2026-10-02,
+    // telegram thread 3915). Two write paths stored the raw `prompt_tokens`
+    // instead - `mark_thread_terminal` (skipped / interrupted / system / merged
+    // threads) and `update_thread_progress` (the live per-LLM-call write) - so
+    // every surface deriving the cache share as `cached / (cached + input)`
+    // (dashboard threads list, overview token trend and its day totals)
+    // under-reported those rows: on the dev DB 22 rows carried 101,487,333
+    // stored input where the true cache-miss total is ~2.9M - the operator's
+    // "the cache tokens is so low" report (telegram thread 4136, 2026-10-05).
+    // Both write paths are fixed in code; this repairs the rows they already
+    // wrote. GUARD = the exact buggy signature: the stored value EQUALS the
+    // message total prompt AND DIFFERS from the message cache-miss total. A
+    // correctly written row (prompt - cached) can only match the first
+    // condition when cached = 0, where both values are equal and the row is
+    // skipped. Idempotent: after the repair the signature no longer matches.
+    sqlx::query(
+        r#"UPDATE threads t
+              SET input_tokens = s.miss_input::int
+             FROM (
+                 SELECT m.thread_id,
+                        COALESCE(SUM(GREATEST(COALESCE((m.token_usage->>'prompt_tokens')::bigint, 0), 0)), 0) AS total_input,
+                        COALESCE(SUM(GREATEST(COALESCE((m.token_usage->>'prompt_tokens')::bigint, 0)
+                                            - COALESCE((m.token_usage->>'cached_tokens')::bigint, 0), 0)), 0) AS miss_input
+                   FROM messages m
+                  WHERE m.msg_type <> 'error'
+                  GROUP BY m.thread_id
+             ) s
+            WHERE t.id = s.thread_id
+              AND t.input_tokens::bigint = s.total_input
+              AND t.input_tokens::bigint <> s.miss_input"#,
+    )
+    .execute(pool)
+    .await
+    .ok();
+    tracing::info!(
+        "[migration] Repaired threads.input_tokens written as the TOTAL prompt (cache-miss semantics)"
+    );
     // -- Removed: per-task goal state (goal_phase et al.) --------------------
     // Dispatch is status-gated (only status = 'todo' AND archived = false is
     // ever dispatched) and the status-change -> thread lifecycle never read
