@@ -205,9 +205,9 @@ type TierCandidate = (KnobTier, String, Option<u64>);
 /// precedence); each candidate carries its OWN tier so the provenance names the
 /// tier the value really came from.
 fn first_some(candidates: &[TierCandidate]) -> Option<KnobResolution> {
-    candidates
-        .iter()
-        .find_map(|(tier, source, value)| value.map(|v| KnobResolution::new(v, *tier, source.clone())))
+    candidates.iter().find_map(|(tier, source, value)| {
+        value.map(|v| KnobResolution::new(v, *tier, source.clone()))
+    })
 }
 
 /// Resolve both orchestration knobs for one thread.
@@ -506,7 +506,11 @@ pub async fn load_for_thread(
     // the tier the value really came from (role > workflow).
     let (role_token, role_interval, wf_token, wf_interval) = workflow_id
         .as_deref()
-        .and_then(|id| crate::workflows::WorkflowsFile::load_workflow(data_dir, id).ok().flatten())
+        .and_then(|id| {
+            crate::workflows::WorkflowsFile::load_workflow(data_dir, id)
+                .ok()
+                .flatten()
+        })
         .map(|wf| {
             let role_def = role_key.and_then(|r| wf.roles.get(r));
             (
@@ -532,11 +536,11 @@ pub async fn load_for_thread(
         role_iteration_min_interval_secs: role_interval,
         workflow_token_budget: wf_token,
         workflow_iteration_min_interval_secs: wf_interval,
-        task_token_budget: candidate_from_db(
-            task_row.as_ref().and_then(|r| r.token_budget),
-        ),
+        task_token_budget: candidate_from_db(task_row.as_ref().and_then(|r| r.token_budget)),
         task_iteration_min_interval_secs: candidate_from_db(
-            task_row.as_ref().and_then(|r| r.iteration_min_interval_secs),
+            task_row
+                .as_ref()
+                .and_then(|r| r.iteration_min_interval_secs),
         ),
         board_token_budget: board_token,
         board_iteration_min_interval_secs: board_interval,
@@ -657,7 +661,10 @@ mod tests {
         assert_eq!(r.token_budget.tier, KnobTier::GlobalSetting);
         assert!(r.token_budget.source.contains(TOKEN_BUDGET_KNOB));
         assert_eq!(r.iteration_min_interval.value, 3600);
-        assert!(r.iteration_min_interval.source.contains(ITERATION_MIN_INTERVAL_KNOB));
+        assert!(r
+            .iteration_min_interval
+            .source
+            .contains(ITERATION_MIN_INTERVAL_KNOB));
     }
 
     /// A SIMPLE orchestration task: the TASK tier caps it at 1M (R2).
@@ -709,16 +716,28 @@ mod tests {
     /// A workflow id in the configured list opts the thread in.
     #[test]
     fn configured_workflow_ids_are_orchestration() {
-        for id in ["orchestrator", "workstation", "mvp", "papers-orchestrator", " WORKSTATION "] {
+        for id in [
+            "orchestrator",
+            "workstation",
+            "mvp",
+            "papers-orchestrator",
+            " WORKSTATION ",
+        ] {
             assert!(
                 is_orchestration_workflow(Some(id), DEFAULT_ORCHESTRATION_WORKFLOWS),
                 "{id} must be an orchestration workflow"
             );
         }
         for id in ["dev-executor", "omniagent-dev", "research", ""] {
-            assert!(!is_orchestration_workflow(Some(id), DEFAULT_ORCHESTRATION_WORKFLOWS));
+            assert!(!is_orchestration_workflow(
+                Some(id),
+                DEFAULT_ORCHESTRATION_WORKFLOWS
+            ));
         }
-        assert!(!is_orchestration_workflow(None, DEFAULT_ORCHESTRATION_WORKFLOWS));
+        assert!(!is_orchestration_workflow(
+            None,
+            DEFAULT_ORCHESTRATION_WORKFLOWS
+        ));
         // The list is configurable.
         assert!(is_orchestration_workflow(Some("my-wf"), "my-wf,other"));
     }
@@ -830,7 +849,9 @@ mod tests {
         assert!(output_is_background_handle(
             "started\n{\"status\":\"processing\",\"task_id\":\"t\"}\n"
         ));
-        assert!(!output_is_background_handle(r#"{"status":"completed","task_id":"t"}"#));
+        assert!(!output_is_background_handle(
+            r#"{"status":"completed","task_id":"t"}"#
+        ));
         assert!(!output_is_background_handle(r#"{"ok":true}"#));
         assert!(!output_is_background_handle("plain text"));
         assert!(!output_is_background_handle(""));
@@ -840,7 +861,11 @@ mod tests {
 
     #[test]
     fn cap_notice_names_the_knob_the_value_and_the_source() {
-        let msg = cap_notice(1_000_000, 1_000_001, "kanban_tasks.token_budget (task override)");
+        let msg = cap_notice(
+            1_000_000,
+            1_000_001,
+            "kanban_tasks.token_budget (task override)",
+        );
         assert!(msg.contains("1000000"), "{msg}");
         assert!(msg.contains("1000001"), "{msg}");
         assert!(msg.contains(TOKEN_BUDGET_KNOB), "{msg}");
