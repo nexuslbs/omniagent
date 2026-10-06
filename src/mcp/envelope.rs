@@ -219,7 +219,7 @@ mod tests {
         });
         // A LEGITIMATE `core__call_and_wait` into a bridge tool.
         let legit = json!({
-            "tool": "workstation__tool",
+            "tool": "external_agent__tool",
             "params": {"tool": "agent_run", "params": {"objective": "x"}}
         });
         assert!(repair_self_nested_envelope(&call_and_wait_schema, &legit).is_none());

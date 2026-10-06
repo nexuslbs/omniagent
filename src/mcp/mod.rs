@@ -1132,7 +1132,7 @@ impl McpRegistry {
         }
         // No match found. A bare name is useless to the agent (production
         // incident 2026-09-27: three threads got `Unknown tool:
-        // workstation__tool` with no reason at all): explain WHY the name is
+        // <plugin>__<tool>` with no reason at all): explain WHY the name is
         // unresolvable (plugin disabled / child crashed / restarting / never
         // started) and what to do about it.
         let suggestion_msg = if let Some(s) = suggestion {

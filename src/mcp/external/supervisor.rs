@@ -6,7 +6,7 @@
 //! either disappeared from the registry (a reload while the child was dead) or
 //! kept failing with a vague message, and every thread saw a bare
 //! `Unknown tool: <plugin>__<tool>` with no way to tell why (production
-//! incident 2026-09-27: `workstation__tool`).
+//! incident 2026-09-27: an external bridge tool).
 //!
 //! This module is the single, process-wide record of what each external MCP
 //! server is actually doing:

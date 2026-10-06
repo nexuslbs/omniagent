@@ -329,7 +329,7 @@ async fn run_server() -> AppResult<()> {
     // while the child was dead could otherwise leave a plugin permanently
     // exposing nothing, and every thread would see a bare
     // `Unknown tool: <plugin>__<tool>` (production incident thread 3356,
-    // `workstation__tool`).
+    // an external bridge tool).
     {
         let pm = plugin_manager.clone();
         let dd = data_dir.clone();
