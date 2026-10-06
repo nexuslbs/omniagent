@@ -538,8 +538,8 @@ mod tests {
     #[test]
     fn crash_message_names_plugin_pid_exit_status_and_stderr_tail() {
         let tail = vec!["boom: out of memory".to_string()];
-        let msg = crash_message("workstation", Some(4242), "exit code 137", &tail);
-        assert!(msg.contains("MCP server 'workstation' DIED"), "got: {msg}");
+        let msg = crash_message("external", Some(4242), "exit code 137", &tail);
+        assert!(msg.contains("MCP server 'external' DIED"), "got: {msg}");
         assert!(msg.contains("pid 4242"), "got: {msg}");
         assert!(msg.contains("exit code 137"), "got: {msg}");
         assert!(msg.contains("boom: out of memory"), "got: {msg}");
@@ -547,7 +547,7 @@ mod tests {
 
     #[test]
     fn crash_message_says_so_when_no_stderr_was_captured() {
-        let msg = crash_message("workstation", None, "signal: 9 (SIGKILL)", &[]);
+        let msg = crash_message("external", None, "signal: 9 (SIGKILL)", &[]);
         assert!(msg.contains("signal: 9 (SIGKILL)"), "got: {msg}");
         assert!(msg.contains("no stderr output was captured"), "got: {msg}");
     }

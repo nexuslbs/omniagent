@@ -3,7 +3,7 @@
 //! 2026-10-06).
 //!
 //! ## Why
-//! An orchestrator thread (one that dispatches a dsh worker and then only
+//! An orchestrator thread (one that dispatches an external worker and then only
 //! verifies it) burned 4.6M input + 72k output tokens over 45 iterations while
 //! still processing: the loop had NO cumulative spend cap (the existing
 //! `token_usage_budget` setting is TELEMETRY ONLY) and no minimum interval

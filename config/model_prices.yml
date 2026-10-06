@@ -1,8 +1,8 @@
 # model_prices.yml - USD per 1,000,000 tokens, ONE price class per model.
 #
 # SINGLE source of truth for LLM token pricing, shared by the omniagent core
-# (`src/agent/pricing.rs`) and the dsh/workstation cost accounting
-# (`workstation-plugins/shared/pricing.ts` + `shared/usage.ts`). Editing a rate
+# (`src/agent/pricing.rs`) and the external sub-agent cost accounting
+# (the external bridge's shared pricing + usage modules). Editing a rate
 # here changes FUTURE costs with NO rebuild, NO release and NO restart: the file
 # is re-read on every cost computation.
 #
@@ -18,7 +18,7 @@
 #   input         uncached (cache-miss) input tokens
 #   cached_input  cache-READ (cache-hit) tokens. This is the canonical name,
 #                 matching the `cached_input_tokens` field both sides already
-#                 emit. The dsh-internal spelling `cache_read` is NOT a valid
+#                 emit. The external-side internal spelling `cache_read` is NOT a valid
 #                 key here.
 #   output        output tokens
 #   cache_write   cache-write tokens

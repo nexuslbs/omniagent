@@ -937,7 +937,7 @@ async fn create_tables(pool: &PgPool) -> Result<()> {
         .ok();
     // `full_cost` (operator UPDATE 2026-10-02, telegram threads 3916/3917):
     // `threads.cost` holds the OMNIAGENT-only cost and `full_cost` the FULL
-    // cost (omniagent + external/sub-agent dsh). Additive + defaulted, so no
+    // cost (omniagent + external agents/sub-agents). Additive + defaulted, so no
     // data migration is needed; new threads carry the split.
     sqlx::query(
         "ALTER TABLE threads ADD COLUMN IF NOT EXISTS full_cost DOUBLE PRECISION DEFAULT 0;",
@@ -1746,7 +1746,7 @@ async fn backfill_thread_end_usage_messages(pool: &PgPool) -> Result<()> {
 /// backfill rewrites pre-change terminal rows onto the NEW column semantics -
 /// `input_tokens` = cache-MISS input only (was cache hit + miss), `cost` = the
 /// omniagent-only share (was the combined cost) and the new `full_cost` =
-/// omniagent + dsh. A row counts as pre-change while `full_cost = 0` (the
+/// omniagent + external sub-agents. A row counts as pre-change while `full_cost = 0` (the
 /// column did not exist before and the write path always fills it). Migrations
 /// are declarative and run at every startup, so this is idempotent: once
 /// `full_cost > 0` the row is left untouched, and Skipped/Merged threads are
@@ -1759,7 +1759,7 @@ async fn backfill_terminal_thread_usage_aggregates(pool: &PgPool) -> Result<()> 
                                 THEN LEAST(COALESCE(t.input_tokens, 0)::bigint, s.sum_omni_input)::int
                                 ELSE t.input_tokens END,
             full_input_tokens = CASE WHEN COALESCE(t.full_cost, 0) > 0 THEN t.full_input_tokens
-                                     ELSE (s.sum_omni_input + s.sum_dsh_input)::int END,
+                                     ELSE (s.sum_omni_input + s.sum_external_input)::int END,
             full_cached_tokens = CASE WHEN COALESCE(t.full_cost, 0) > 0 THEN t.full_cached_tokens
                                       ELSE s.sum_cached::int END,
             full_output_tokens = CASE WHEN COALESCE(t.full_cost, 0) > 0 THEN t.full_output_tokens
@@ -1784,7 +1784,7 @@ async fn backfill_terminal_thread_usage_aggregates(pool: &PgPool) -> Result<()> 
                    COALESCE(SUM(CASE WHEN COALESCE(e.item ->> 'omniagent', 'false') <> 'true'
                                      THEN COALESCE(CASE WHEN jsonb_typeof(e.item -> 'input_tokens') = 'number'
                                                        THEN (e.item ->> 'input_tokens')::bigint ELSE 0 END, 0)
-                                     ELSE 0 END), 0) AS sum_dsh_input,
+                                     ELSE 0 END), 0) AS sum_external_input,
                    COALESCE(SUM(CASE WHEN jsonb_typeof(e.item -> 'cached_input_tokens') = 'number'
                                      THEN (e.item ->> 'cached_input_tokens')::bigint ELSE 0 END), 0) AS sum_cached,
                    COALESCE(SUM(CASE WHEN jsonb_typeof(e.item -> 'output_tokens') = 'number'

@@ -76,7 +76,7 @@ pub struct ThreadEntry {
     /// omniagent-only cost (USD): the omniagent's OWN LLM calls
     /// (operator UPDATE 2026-10-02 threads 3916/3917).
     pub cost: Option<f64>,
-    /// FULL cost (USD): omniagent + external/sub-agent (dsh) LLM calls
+    /// FULL cost (USD): omniagent + external agents/sub-agents LLM calls
     /// (operator UPDATE 2026-10-02 threads 3916/3917).
     pub full_cost: Option<f64>,
     pub iterations: Option<i64>,

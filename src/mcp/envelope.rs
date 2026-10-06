@@ -1,6 +1,6 @@
 //! Argument-shape repair for "bridge" tool calls.
 //!
-//! A bridge plugin (`workstation`, `workbench`) exposes exactly ONE tool - the
+//! A bridge plugin (an external tool server) exposes exactly ONE tool - the
 //! MCP server literally names it `tool` - whose DECLARED input schema is the
 //! two-key envelope
 //!
@@ -111,12 +111,12 @@ pub fn repair_self_nested_envelope(schema: &Value, arguments: &Value) -> Option<
 mod tests {
     use super::*;
 
-    /// The schema the workstation/workbench MCP bridges declare.
+    /// The schema the external bridge MCP servers declare.
     fn bridge_schema() -> Value {
         json!({
             "type": "object",
             "properties": {
-                "tool": {"type": "string", "description": "workstation tool/command name"},
+                "tool": {"type": "string", "description": "bridge tool/command name"},
                 "params": {"type": "object", "additionalProperties": true, "default": {}}
             },
             "required": ["tool"]
@@ -217,7 +217,7 @@ mod tests {
             },
             "required": ["tool"]
         });
-        // A LEGITIMATE `core__call_and_wait` into the workstation bridge.
+        // A LEGITIMATE `core__call_and_wait` into a bridge tool.
         let legit = json!({
             "tool": "workstation__tool",
             "params": {"tool": "agent_run", "params": {"objective": "x"}}

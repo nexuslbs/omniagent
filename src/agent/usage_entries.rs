@@ -2,8 +2,8 @@
 //! `_meta.usage` array items, build the omniagent's own LLM-call usage entries
 //! and the thread-end "Usage"-type message.
 //!
-//! Background (operator request 2026-09-30, follow-up of the workstation
-//! `expose_tool_call` task): workstation agent-calling tools return
+//! Background (operator request 2026-09-30, follow-up of the external agent
+//! `expose_tool_call` task): external agent-calling tools return
 //! `_meta.usage` as an ARRAY of per-call usage dicts (fields: agent,
 //! input_tokens, output_tokens, total_tokens, cached_input_tokens,
 //! cache_write_tokens, reasoning_tokens, cost{amount_usd, is_estimate, source,
@@ -14,7 +14,7 @@
 //!    level, including payloads that arrive string-encoded inside a
 //!    background-dispatch envelope (`{"status":..,"result":"<json>"}`) or a
 //!    multi-tool wrapper (`{"tool":..,"input":..,"output":"<json>"}`): the
-//!    workstation's `{"status":"ok","tool":"agent_run","result":{..},
+//!    external bridge's `{"status":"ok","tool":"agent_run","result":{..},
 //!    "_meta":{..}}` answer reaches the loop inside those envelopes, so a
 //!    top-level-only strip never saw it (operator thread 3887 defect);
 //! 2. concatenates all `_meta.usage` items from all tool call results of the
@@ -28,9 +28,9 @@
 //!    (operator UPDATE 3702) - they never appear on the Usage message. The
 //!    min-clamp against the omniagent's own bare totals applies to the
 //!    OMNIAGENT sub-total only, because the operator's semantics are
-//!    `full_*` = omniagent + dsh agents (thread 3887): the dsh items are added
-//!    on top, `full_input_tokens = min(input_tokens, omniagent_sum) + dsh_sum`.
-//!    Only REAL LLM calls are summed: a dsh `details.kind = "agent-aggregate"`
+//!    `full_*` = omniagent + external agents (thread 3887): the external items are added
+//!    on top, `full_input_tokens = min(input_tokens, omniagent_sum) + external_sum`.
+//!    Only REAL LLM calls are summed: an external `details.kind = "agent-aggregate"`
 //!    roll-up (the session summary of the same calls) is skipped so its
 //!    tokens/cost are not counted a second time (review thread 3890).
 //!
@@ -121,9 +121,9 @@ fn strip_meta_deep(value: Value, collector: &mut Vec<Value>) -> (Value, bool) {
 /// output cap - the cap must never be able to hide a usage item.
 ///
 /// WHY (operator request 2026-10-03, telegram threads 4004/4005): the answer of
-/// a workstation agent-calling tool carries `_meta.usage` LAST, behind the
+/// an external agent-calling tool carries `_meta.usage` LAST, behind the
 /// agent's stdout/stderr tails, so a payload longer than the inline cap lost
-/// its usage items the moment the cap ran FIRST. Five of the twelve dsh
+/// its usage items the moment the cap ran FIRST. Five of the twelve external
 /// sessions of thread 3999 (the four biggest by tokens plus the two vision
 /// children riding in them) never reached the thread-end Usage message; the
 /// operator's reference case is ~10.46M tokens while the DB recorded 4.50M.
@@ -145,7 +145,7 @@ pub fn cap_after_collect(content: &str, max_inline_chars: usize) -> (String, Vec
 }
 
 /// Build the omniagent's own usage entry for one LLM call, mirroring the
-/// dsh-agent field set.
+/// external-agent field set.
 ///
 /// `omniagent: true` and `agent` are filled by the MAIN LOOP (never by the
 /// provider); token counts come from the provider usage result; `cost` is the
@@ -187,15 +187,15 @@ pub fn omniagent_usage_entry(usage: &Usage, provider: &str, model: &str, agent: 
 /// FIELD SEMANTICS (operator UPDATE 2026-10-02, telegram threads 3915/3916/
 /// 3917): every `input` figure is CACHE-MISS (fresh) input only, never
 /// cache-hit + miss. `full_*` = the omniagent's own numbers + the
-/// sub-agent/dsh numbers for that same field.
+/// external sub-agent numbers for that same field.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct UsageAggregates {
-    /// omniagent cache-miss input + dsh cache-miss input.
+    /// omniagent cache-miss input + external cache-miss input.
     pub full_input_tokens: u64,
     pub full_cached_tokens: u64,
     pub full_output_tokens: u64,
     pub full_reasoning_tokens: u64,
-    /// FULL cost (USD): omniagent + dsh/sub-agent LLM calls.
+    /// FULL cost (USD): omniagent + external sub-agent LLM calls.
     pub cost: f64,
     /// omniagent-only cost (USD) - the `threads.cost` column value.
     pub omniagent_cost: f64,
@@ -210,13 +210,13 @@ fn item_u64(item: &Value, key: &str) -> u64 {
 /// True when a usage item counts toward the aggregates: a real LLM call, or
 /// an item that carries no call-kind marker at all.
 ///
-/// The workstation's dsh layer emits, besides one item per LLM call
+/// The external agent layer emits, besides one item per LLM call
 /// (`details.kind == "llm-call"`), a per-session ROLL-UP item
 /// (`details.kind == "agent-aggregate"`, carrying `llm_calls` / `tool_calls`)
 /// whose tokens and cost are the SUM of those same call items. Counting both
-/// counted every dsh call twice (review thread 3890 on dev thread 3912:
+/// counted every external call twice (review thread 3890 on dev thread 3912:
 /// `full_input_tokens` 154381 instead of 138086, `cost` 0.026022 instead of
-/// 0.020250), while the operator semantics are "omniagent LLM calls + dsh LLM
+/// 0.020250), while the operator semantics are "omniagent LLM calls + external LLM
 /// calls" (telegram 3887) - a roll-up of calls already in the array is not
 /// another call. Items without `details.kind` (the omniagent's own entries,
 /// and any shape that carries no marker) are counted as before.
@@ -235,7 +235,7 @@ fn is_llm_call_item(item: &Value) -> bool {
 /// fields default to 0 when the array is empty or the items carry no such
 /// field; `cost` sums `cost.amount_usd` (missing = 0). Roll-up items
 /// (`details.kind` present and not `"llm-call"`, see [`is_llm_call_item`])
-/// are skipped so a dsh session aggregate never double counts the calls it
+/// are skipped so an external session aggregate never double counts the calls it
 /// summarizes. The items themselves stay in the Usage message array (they are
 /// raw tool output) - only the aggregates skip them.
 pub fn sum_usage_items(entries: &[Value]) -> UsageAggregates {
@@ -268,7 +268,7 @@ pub fn sum_usage_items(entries: &[Value]) -> UsageAggregates {
 }
 
 /// Sum the items whose `omniagent` flag equals `want` (a missing flag counts
-/// as `false`, i.e. as a non-omniagent / dsh item).
+/// as `false`, i.e. as a non-omniagent / external item).
 fn sum_usage_items_where(entries: &[Value], want: bool) -> UsageAggregates {
     let filtered: Vec<Value> = entries
         .iter()
@@ -289,31 +289,31 @@ fn sum_usage_items_where(entries: &[Value], want: bool) -> UsageAggregates {
 /// today).
 ///
 /// Semantics (operator, telegram threads 3887 + 3915/3916/3917): `full_*` =
-/// omniagent + dsh agents, and every `input` figure is CACHE-MISS only.
+/// omniagent + external agents, and every `input` figure is CACHE-MISS only.
 ///
 /// The two item kinds do NOT report `input_tokens` the same way, verified on
 /// real dev thread 3899 (2026-10-02):
 ///   * the OMNIAGENT entries carry the provider's `prompt_tokens`, i.e. TOTAL
 ///     input with the cache hit INCLUDED (33 items summed to 1,928,385 with
 ///     1,567,488 cached);
-///   * the dsh/workstation entries carry the FRESH (cache-miss) input and the
+///   * the external entries carry the FRESH (cache-miss) input and the
 ///     hit in `cached_input_tokens` (112 items summed to 398,032 input +
 ///     5,025,024 cached, and `total_tokens` = input + cached + output held
 ///     exactly).
 ///
 /// So the omniagent sub-total is min-clamped against the omniagent's own
 /// cumulative totals (still authoritative) and its cache hit is SUBTRACTED to
-/// obtain the miss-only figure; the dsh sub-total needs no subtraction (its
+/// obtain the miss-only figure; the external sub-total needs no subtraction (its
 /// input is already miss-only). Result:
 /// `full_input_tokens = (min(input, cum.prompt) - min(cached, cum.cached)) +
-///  dsh_input`.
+///  external_input`.
 ///
-/// `cost` is the FULL cost (omniagent + dsh) and `omniagent_cost` the
+/// `cost` is the FULL cost (omniagent + external) and `omniagent_cost` the
 /// omniagent-only share (operator threads 3916/3917: `threads.cost` is the
 /// omniagent-only cost, the new `threads.full_cost` is the combined one).
 pub fn aggregate_fields(entries: &[Value], cumulative: Option<&Usage>) -> UsageAggregates {
     let omniagent_sum = sum_usage_items_where(entries, true);
-    let dsh_sum = sum_usage_items_where(entries, false);
+    let external_sum = sum_usage_items_where(entries, false);
     let (omniagent_total_input, omniagent_cached, omniagent_output, omniagent_reasoning) =
         match cumulative {
             Some(cum) => (
@@ -338,17 +338,18 @@ pub fn aggregate_fields(entries: &[Value], cumulative: Option<&Usage>) -> UsageA
             ),
         };
     let omniagent_miss_input = omniagent_total_input.saturating_sub(omniagent_cached);
-    // dsh entries report cache-MISS `input_tokens` already (verified on dev
-    // thread 3899: `total_tokens` == input + cached + output for all 112 dsh
+    // external entries report cache-MISS `input_tokens` already (verified on dev
+    // thread 3899: `total_tokens` == input + cached + output for all 112 external
     // items), so subtracting their (much larger) cache hit would collapse the
-    // dsh share to 0.
-    let dsh_miss_input = dsh_sum.full_input_tokens;
+    // external share to 0.
+    let external_miss_input = external_sum.full_input_tokens;
     UsageAggregates {
-        full_input_tokens: omniagent_miss_input.saturating_add(dsh_miss_input),
-        full_cached_tokens: omniagent_cached.saturating_add(dsh_sum.full_cached_tokens),
-        full_output_tokens: omniagent_output.saturating_add(dsh_sum.full_output_tokens),
-        full_reasoning_tokens: omniagent_reasoning.saturating_add(dsh_sum.full_reasoning_tokens),
-        cost: omniagent_sum.cost + dsh_sum.cost,
+        full_input_tokens: omniagent_miss_input.saturating_add(external_miss_input),
+        full_cached_tokens: omniagent_cached.saturating_add(external_sum.full_cached_tokens),
+        full_output_tokens: omniagent_output.saturating_add(external_sum.full_output_tokens),
+        full_reasoning_tokens: omniagent_reasoning
+            .saturating_add(external_sum.full_reasoning_tokens),
+        cost: omniagent_sum.cost + external_sum.cost,
         omniagent_cost: omniagent_sum.cost,
         omniagent_input_tokens: omniagent_miss_input,
     }
@@ -462,7 +463,7 @@ mod tests {
 
     #[test]
     fn strips_top_level_meta_and_collects_usage_array_in_order() {
-        let content = r#"{"status":"ok","tool":"agent_run","result":{"exitCode":0},"_meta":{"usage":[{"agent":"dsh","input_tokens":10},{"agent":"dsh","input_tokens":20}]}}"#;
+        let content = r#"{"status":"ok","tool":"agent_run","result":{"exitCode":0},"_meta":{"usage":[{"agent":"external","input_tokens":10},{"agent":"external","input_tokens":20}]}}"#;
         let mut collector = Vec::new();
         let stripped = strip_meta_and_collect(content, &mut collector);
         let v: Value = serde_json::from_str(&stripped).unwrap();
@@ -470,7 +471,7 @@ mod tests {
         assert_eq!(v["status"], "ok");
         assert_eq!(v["result"]["exitCode"], 0);
         assert_eq!(collector.len(), 2, "both usage items collected");
-        assert_eq!(collector[0]["agent"], "dsh");
+        assert_eq!(collector[0]["agent"], "external");
         assert_eq!(collector[0]["input_tokens"], 10);
         assert_eq!(collector[1]["input_tokens"], 20);
     }
@@ -514,7 +515,7 @@ mod tests {
     // ── omniagent_usage_entry ──────────────────────────────────────────────
 
     #[test]
-    fn omniagent_entry_has_dsh_field_set_with_main_loop_filled_fields() {
+    fn omniagent_entry_has_external_field_set_with_main_loop_filled_fields() {
         // A valid `config/model_prices.yml` is present (pricing.rs tests seed
         // one): an unknown ROUTE stays null - it is never fabricated as 0.
         let _ = crate::agent::pricing::test_support::seeded_data_dir();
@@ -584,7 +585,7 @@ mod tests {
 
     #[test]
     fn thread_usage_registry_round_trips_and_clears() {
-        let entries = json!([{"agent": "dsh", "input_tokens": 7}]);
+        let entries = json!([{"agent": "external", "input_tokens": 7}]);
         let entries: Vec<Value> = serde_json::from_value(entries).unwrap();
         assert!(thread_usage_snapshot(9_999_999).is_empty());
         publish_thread_usage(9_999_999, &entries);
@@ -603,7 +604,7 @@ mod tests {
         let entries = json!([
             {"input_tokens": 10, "output_tokens": 2, "cached_input_tokens": 8, "reasoning_tokens": 1, "cost": {"amount_usd": 0.001}},
             {"input_tokens": 20, "output_tokens": 3},
-            {"agent": "dsh"} // no numeric fields at all
+            {"agent": "external"} // no numeric fields at all
         ]);
         let entries: Vec<Value> = serde_json::from_value(entries).unwrap();
         let agg = sum_usage_items(&entries);
@@ -626,7 +627,7 @@ mod tests {
     fn agent_aggregate_rollup_is_not_counted_twice() {
         // Shape observed on the omnidev dev stack (dev thread 3912, review
         // 3890): one `llm-call` item plus the `agent-aggregate` roll-up of
-        // that very call. Summing both counted the dsh call twice.
+        // that very call. Summing both counted the external call twice.
         let entries: Vec<Value> = serde_json::from_value(json!([
             {
                 "agent": "researcher",
@@ -659,9 +660,9 @@ mod tests {
     #[test]
     fn llm_call_kind_and_markerless_items_are_counted() {
         let entries: Vec<Value> = serde_json::from_value(json!([
-            {"agent": "dsh", "input_tokens": 100, "details": {"kind": "llm-call"}},
+            {"agent": "external", "input_tokens": 100, "details": {"kind": "llm-call"}},
             {"input_tokens": 5},
-            {"agent": "dsh", "input_tokens": 7, "details": {"kind": "tool-call"}}
+            {"agent": "external", "input_tokens": 7, "details": {"kind": "tool-call"}}
         ]))
         .unwrap();
         let agg = sum_usage_items(&entries);
@@ -669,8 +670,8 @@ mod tests {
     }
 
     #[test]
-    fn dsh_rollup_is_excluded_from_the_clamped_aggregate_fields() {
-        // full_* = omniagent LLM calls + dsh LLM calls, never the dsh roll-up.
+    fn external_rollup_is_excluded_from_the_clamped_aggregate_fields() {
+        // full_* = omniagent LLM calls + external LLM calls, never the external roll-up.
         let entries: Vec<Value> = serde_json::from_value(json!([
             {"omniagent": true, "input_tokens": 100, "output_tokens": 20, "cost": {"amount_usd": 0.1}},
             {"agent": "researcher", "input_tokens": 500, "output_tokens": 100, "cost": {"amount_usd": 0.5},
@@ -687,23 +688,23 @@ mod tests {
     }
 
     #[test]
-    fn full_fields_clamp_only_the_omniagent_part_and_add_dsh_items() {
-        // Operator thread 3887: full_* = omniagent + dsh agents. The clamp
+    fn full_fields_clamp_only_the_omniagent_part_and_add_external_items() {
+        // Operator thread 3887: full_* = omniagent + external agents. The clamp
         // against the bare omniagent totals therefore applies to the
-        // omniagent sub-total only; the dsh items are always added on top.
+        // omniagent sub-total only; the external items are always added on top.
         let entries = json!([
-            {"agent": "dsh", "input_tokens": 500, "output_tokens": 100, "cached_input_tokens": 400, "reasoning_tokens": 50, "cost": {"amount_usd": 0.5}},
+            {"agent": "external", "input_tokens": 500, "output_tokens": 100, "cached_input_tokens": 400, "reasoning_tokens": 50, "cost": {"amount_usd": 0.5}},
             {"omniagent": true, "input_tokens": 100, "output_tokens": 20, "cached_input_tokens": 60, "reasoning_tokens": 5, "cost": {"amount_usd": 0.1}}
         ]);
         let entries: Vec<Value> = serde_json::from_value(entries).unwrap();
         let cum = usage(100, 20, Some(60), Some(5));
         let agg = aggregate_fields(&entries, Some(&cum));
         // input is CACHE-MISS only (operator thread 3915): omniagent
-        // min(100,100) - min(60,60) = 40; the dsh item's input is already
+        // min(100,100) - min(60,60) = 40; the external item's input is already
         // miss-only, so it is added as-is (no cache subtraction).
         assert_eq!(
             agg.full_input_tokens, 540,
-            "omniagent miss 40 + dsh miss 500"
+            "omniagent miss 40 + external miss 500"
         );
         assert_eq!(agg.omniagent_input_tokens, 40);
         assert_eq!(agg.full_output_tokens, 120, "min(20, 20) + 100");
@@ -720,9 +721,9 @@ mod tests {
     fn thread_3899_real_numbers_split_miss_only_input_and_the_two_costs() {
         // Raw data from the omnidev dev DB, thread 3899 (2026-10-02):
         //   33 omniagent items: input 1,928,385 (cached 1,567,488), cost 0.175425228
-        //   112 dsh llm-call items: input 398,032 (miss), cached 5,025,024,
+        //   112 external llm-call items: input 398,032 (miss), cached 5,025,024,
         //   output 101,612, cost 0.271494144 (the old COMBINED `cost` column
-        //   held 0.446919372 = omniagent + dsh).
+        //   held 0.446919372 = omniagent + external).
         let entries = json!([
             {"omniagent": true, "input_tokens": 1928385, "cached_input_tokens": 1567488, "output_tokens": 48126, "cost": {"amount_usd": 0.175425228}},
             {"agent": "researcher", "input_tokens": 398032, "cached_input_tokens": 5025024, "output_tokens": 101612, "cost": {"amount_usd": 0.271494144}, "details": {"kind": "llm-call"}}
@@ -733,7 +734,7 @@ mod tests {
         assert_eq!(agg.omniagent_input_tokens, 360_897, "1,928,385 - 1,567,488");
         assert_eq!(
             agg.full_input_tokens, 758_929,
-            "omniagent miss 360,897 + dsh miss 398,032"
+            "omniagent miss 360,897 + external miss 398,032"
         );
         assert_eq!(agg.full_cached_tokens, 6_592_512);
         assert_eq!(agg.full_output_tokens, 149_738);
@@ -744,7 +745,7 @@ mod tests {
         );
         assert!(
             (agg.cost - 0.446919372).abs() < 1e-9,
-            "full cost = omniagent + dsh"
+            "full cost = omniagent + external"
         );
     }
 
@@ -764,30 +765,30 @@ mod tests {
     #[test]
     fn strip_meta_reaches_string_encoded_envelopes_and_multi_tool_wrappers() {
         // Shape observed on the omnidev dev stack (thread 3909): the
-        // workstation answer carrying `_meta` arrives string-encoded inside a
+        // external bridge answer carrying `_meta` arrives string-encoded inside a
         // background-dispatch envelope, itself inside a multi-tool wrapper.
-        let dsh_entry = json!({
+        let external_entry = json!({
             "agent": "researcher",
             "input_tokens": 15118,
             "cost": {"amount_usd": 0.0046698, "is_estimate": true, "source": "price_table_v1"}
         });
-        let workstation_answer = json!({
+        let external_answer = json!({
             "status": "ok",
             "tool": "agent_run",
             "result": {"role": "researcher", "output": "done"},
-            "_meta": {"usage": [dsh_entry]}
+            "_meta": {"usage": [external_entry]}
         })
         .to_string();
         let envelope = json!({
             "status": "completed",
             "task_id": "task_1_2",
-            "tool": "workstation__tool",
+            "tool": "external__tool",
             "logs": "tool completed",
-            "result": workstation_answer
+            "result": external_answer
         })
         .to_string();
         let content = json!({
-            "tool": "workstation__tool",
+            "tool": "external__tool",
             "input": {"tool": "agent_run"},
             "output": envelope
         })
@@ -819,7 +820,7 @@ mod tests {
         ]);
         let entries: Vec<Value> = serde_json::from_value(entries).unwrap();
         let agg = aggregate_fields(&entries, None);
-        // A marker-less item is treated as a dsh item (missing `omniagent`
+        // A marker-less item is treated as an external item (missing `omniagent`
         // flag == false), whose `input_tokens` is already miss-only.
         assert_eq!(agg.full_input_tokens, 10);
         assert_eq!(agg.full_output_tokens, 2);
@@ -831,14 +832,14 @@ mod tests {
     #[test]
     fn usage_message_content_is_the_array_itself() {
         let entries = json!([
-            {"agent": "dsh", "input_tokens": 10, "output_tokens": 2, "cost": {"amount_usd": 0.0005}},
+            {"agent": "external", "input_tokens": 10, "output_tokens": 2, "cost": {"amount_usd": 0.0005}},
             {"omniagent": true, "input_tokens": 100, "output_tokens": 25}
         ]);
         let entries: Vec<Value> = serde_json::from_value(entries).unwrap();
         let content = usage_message_content(&entries);
         let arr = content.as_array().expect("content is the array itself");
         assert_eq!(arr.len(), 2, "all items in order");
-        assert_eq!(arr[0]["agent"], "dsh");
+        assert_eq!(arr[0]["agent"], "external");
         assert_eq!(arr[1]["omniagent"], true);
         // No wrapper object: no "usage" key, no full_* aggregates.
         assert!(content.get("usage").is_none());
@@ -852,7 +853,7 @@ mod tests {
     #[test]
     fn cap_after_collect_keeps_the_usage_that_sits_beyond_the_inline_cap() {
         // Regression (operator telegram 4004/4005, thread 3999): the
-        // workstation result carries `_meta.usage` LAST, so a payload larger
+        // external result carries `_meta.usage` LAST, so a payload larger
         // than the inline cap lost its usage items when the cap ran FIRST.
         let filler = "x".repeat(4000);
         let item = json!({
@@ -862,7 +863,7 @@ mod tests {
             "details": {"kind": "llm-call", "session_id": "s-tester", "seq": 1}
         });
         let content = json!({
-            "tool": "workstation__tool",
+            "tool": "external__tool",
             "output": filler,
             "_meta": {"usage": [item]}
         })

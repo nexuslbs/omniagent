@@ -9,7 +9,7 @@
 //! registry. Unknown variables and duplicate section names within one layer
 //! fail loudly.
 //!
-//! Ordering convention (dsh pattern): identity -100, deployment/persona 0,
+//! Ordering convention (external harness pattern): identity -100, deployment/persona 0,
 //! thread template 50, tool guidance 100-199, channel/platform 200+.
 
 use crate::error::{AppResult, Error};

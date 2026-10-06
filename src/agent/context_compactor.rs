@@ -10,7 +10,7 @@
 //!      cost - wired in `main_loop.rs`),
 //!   2. if pruning is exhausted, FORCE a summary compaction of the OLDEST
 //!      portion of the thread and REPLACE it in the in-memory history with a
-//!      single "Compact Checkpoint" user message (mirroring dsh's
+//!      single "Compact Checkpoint" user message (mirroring the external harness'
 //!      `user/message` with `surfaceOp: replace`),
 //!   3. retry the failed LLM request with the compacted context, bounded by
 //!      `max_compaction_retries` (default 2) so a hopeless thread fails
@@ -179,7 +179,7 @@ pub fn build_compact_summary_request(range_messages: &[ChatMessage]) -> Completi
 }
 
 /// The `user`-role message that replaces the compacted range in the in-memory
-/// conversation (mirrors dsh's `user/message` with `surfaceOp: replace`).
+/// conversation (mirrors the external harness' `user/message` with `surfaceOp: replace`).
 pub fn compact_checkpoint_message(summary: &str) -> ChatMessage {
     ChatMessage::user(&format!(
         "=== Compact Checkpoint (earlier conversation summarized - full fidelity preserved in thread history) ===\n\n{}",

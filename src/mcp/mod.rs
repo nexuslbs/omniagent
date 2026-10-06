@@ -1057,7 +1057,7 @@ impl McpRegistry {
         // Try exact match first
         if let Some(tool) = self.get(&call.name) {
             let tool = tool.clone();
-            // Bridge tools (`{plugin}__tool`: the workstation/workbench MCP
+            // Bridge tools (`{plugin}__tool`: the external bridge MCP
             // wrappers) forward to an inner tool by name. Some models repeat
             // the whole `{tool, params}` envelope INSIDE `params`, which the
             // bridge then delivers to the inner tool as its own params (thread
@@ -1342,7 +1342,7 @@ fn wait_task_tool() -> McpTool {
 fn call_and_wait_tool() -> McpTool {
     McpTool {
         name: tool_qualify(CORE_PLUGIN_NAME, "call_and_wait"),
-        description: "Call a tool with the given params and immediately wait for its result in a SINGLE call (2 tool calls in 1). Use for tasks you KNOW will take some time (long scripts, workstation delegation): instead of calling the tool, getting a task id, and then calling core__wait_task separately, this invokes the wrapped tool and returns its FINAL result when it finishes, or the timeout outcome if the timeout hits first - exactly as calling the tool and then core__wait_task would behave. The wrapped tool must be one you have permission to call directly: the same permission check as a direct call applies, and a disallowed tool is NOT invoked. Pass the fully qualified tool name in 'tool' (e.g. ssh__run, docker__compose), the exact params object in 'params', and a generous 'timeout' (seconds, default 900) for long operations.".to_string(),
+        description: "Call a tool with the given params and immediately wait for its result in a SINGLE call (2 tool calls in 1). Use for tasks you KNOW will take some time (long scripts, external sub-agent delegation): instead of calling the tool, getting a task id, and then calling core__wait_task separately, this invokes the wrapped tool and returns its FINAL result when it finishes, or the timeout outcome if the timeout hits first - exactly as calling the tool and then core__wait_task would behave. The wrapped tool must be one you have permission to call directly: the same permission check as a direct call applies, and a disallowed tool is NOT invoked. Pass the fully qualified tool name in 'tool' (e.g. ssh__run, docker__compose), the exact params object in 'params', and a generous 'timeout' (seconds, default 900) for long operations.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {

@@ -45,11 +45,11 @@
 //! When the file IS present and valid, a route it does not contain is UNPRICED
 //! -> `cost: null` (an unknown price is never fabricated as 0).
 //!
-//! SHARED SCHEMA (core + dsh)
+//! SHARED SCHEMA (core + external sub-agent bridge)
 //! --------------------------
 //! `{OMNI_DIR}/config/model_prices.yml` is the SINGLE source of truth for this
-//! module AND the dsh/workstation cost accounting
-//! (`workstation-plugins/shared/usage.ts`). ONE provider -> model hierarchy and
+//! module AND the external sub-agent cost accounting
+//! (the external bridge's shared usage module). ONE provider -> model hierarchy and
 //! ONE set of field names, USD per 1,000,000 tokens:
 //!
 //! ```yaml
@@ -68,7 +68,7 @@
 //! ```
 //!
 //! `cached_input` is the CANONICAL key (matching the `cached_input_tokens`
-//! field both sides already emit). `cache_read` was the dsh-side INTERNAL name
+//! field both sides already emit). `cache_read` was the external-side INTERNAL name
 //! and is never a key in `model_prices.yml`. Unknown keys are NOT tolerated at
 //! any level: they make the file invalid (see above).
 //!
@@ -100,7 +100,7 @@
 //! the cache-hit tokens, so the cached bucket is subtracted from the input
 //! bucket instead of being billed twice. Reasoning is billed inside
 //! `output_tokens` by these providers, so no separate reasoning term is added
-//! (the optional `reasoning` rate is carried for the dsh side and future
+//! (the optional `reasoning` rate is carried for the external side and future
 //! callers). `cache_write_tokens` is not reported by the core provider parsing
 //! today (always 0 here).
 
@@ -173,7 +173,7 @@ pub struct PriceEntry {
     /// Uncached input tokens.
     pub input: f64,
     /// Cache-READ (cache-hit) tokens. Canonical name; `cache_read` is not
-    /// accepted (it was the dsh-side internal spelling).
+    /// accepted (it was the external-side internal spelling).
     pub cached_input: f64,
     /// Output tokens.
     pub output: f64,
@@ -1024,10 +1024,10 @@ mod tests {
     }
 
     #[test]
-    fn seed_agrees_with_the_dsh_side_price_table_fixture() {
+    fn seed_agrees_with_the_external_side_price_table_fixture() {
         // Cross-side schema parity (fixture level): the SAME file + canonical
-        // keys must reproduce the rates the dsh/workstation table documents
-        // (`workstation-plugins/shared/usage.ts`), including the alias provider
+        // keys must reproduce the rates the external table documents
+        // (the external bridge's shared usage module), including the alias provider
         // spellings that side records.
         let dir = tmpdir("cross-side");
         write_prices(&dir, SEED);
@@ -1048,7 +1048,7 @@ mod tests {
             (gemini.input, gemini.output, gemini.cached_input),
             (0.3, 2.5, 0.03)
         );
-        // Unlisted gateway spelling: the dsh side uses `opencode-go`.
+        // Unlisted gateway spelling: the external side uses `opencode-go`.
         assert_eq!(
             price_of_in(dir, "opencode-go", "deepseek-v4-flash").map(|p| p.input),
             Some(0.3)

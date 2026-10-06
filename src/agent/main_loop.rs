@@ -4532,8 +4532,8 @@ async fn dispatch_background_tool(
                         // and park it for the loop, THEN apply the per-result cap
                         // (settings `max_inline_chars`; 0/off disables it) to the
                         // `_meta`-free content. Capping first cut the tail - the
-                        // very place the workstation puts its usage array - and
-                        // silently dropped whole dsh sessions from the thread's
+                        // very place the external bridge puts its usage array - and
+                        // silently dropped whole external sessions from the thread's
                         // Usage message.
                         let full_chars = res.content.len();
                         if max_inline_chars > 0 && full_chars > max_inline_chars {

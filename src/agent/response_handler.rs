@@ -623,7 +623,7 @@ fn thread_usage_stats(
         full_cached_tokens: agg.full_cached_tokens as i32,
         full_output_tokens: agg.full_output_tokens as i32,
         full_reasoning_tokens: agg.full_reasoning_tokens as i32,
-        // `cost` = omniagent-only, `full_cost` = omniagent + dsh (3916/3917).
+        // `cost` = omniagent-only, `full_cost` = omniagent + external (3916/3917).
         cost: agg.omniagent_cost,
         full_cost: agg.cost,
     }

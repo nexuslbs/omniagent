@@ -243,7 +243,7 @@ pub struct CompleteThreadStats {
     /// omniagent-only cost, no bare-provider counterpart).
     #[allow(dead_code)]
     pub cost: f64,
-    /// FULL cost (USD): omniagent + external/sub-agent (dsh) LLM calls
+    /// FULL cost (USD): omniagent + external agents/sub-agents LLM calls
     /// (NEW `threads.full_cost` column, threads 3917).
     #[allow(dead_code)]
     pub full_cost: f64,
