@@ -27,6 +27,8 @@
 //! `tool_qualify`, so a future rename cannot silently drop a tool from its
 //! mode.
 
+use serde_json::Value;
+
 /// How a tool call is dispatched relative to the agent turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchMode {
@@ -62,12 +64,17 @@ pub const SYNC_CONTROL_TOOLS: &[&str] = &[
 /// Long-running tools dispatched to the background on the FIRST call: the
 /// answer is `status=processing` + a task id, the work continues as a tracked
 /// background task.
+///
+/// EXTERNAL-HARNESS AGNOSTICISM: a "bridge" tool (the single `tool` entry of
+/// an external tool-server bridge, whose declared input schema is the
+/// `{tool, params}` envelope - see [`is_bridge_tool`]) is backgrounded from
+/// its OWN DESCRIPTOR, never from a name in this list: the core must not know
+/// the name of any specific external harness, so a new bridge plugin needs no
+/// core edit.
 pub const IMMEDIATE_BACKGROUND_TOOLS: &[&str] = &[
     "ssh__run",
     "ssh__copy",
     "docker__compose",
-    "workbench__tool",
-    "workstation__tool",
     "fetch__fetch",
     "git__clone_repo",
     "git__commit_and_push",
@@ -122,13 +129,48 @@ pub fn mode_from_declaration(declared: &str) -> Option<DispatchMode> {
     }
 }
 
-/// The dispatch mode for a tool: the policy declared by the tool's OWN
-/// descriptor wins; a tool that declared none keeps the legacy list-based
-/// policy (fail-open). This is the entry point the agent loop uses.
+/// True when a tool's DECLARED input schema is the two-key `{tool, params}`
+/// bridge envelope exposed by an external tool-server bridge (see
+/// [`crate::mcp::envelope::is_bridge_envelope_schema`]).
+///
+/// A bridge call forwards to a REMOTE tool server whose run may take minutes,
+/// so it must never block the turn. The gate is the tool's OWN declared
+/// schema, never the name of a specific harness: the core stays agnostic and
+/// any future bridge plugin is handled without a core edit.
+pub fn is_bridge_tool(schema: &Value) -> bool {
+    crate::mcp::envelope::is_bridge_envelope_schema(schema)
+}
+
+/// The dispatch mode for a tool, taking its OWN descriptor into account:
+///
+/// 1. an explicit manifest `dispatch:` declaration wins (audit HV-A1): a tool
+///    that declared `sync`/`threshold` is never overridden by its shape;
+/// 2. otherwise a BRIDGE tool (`bridge_envelope`, derived from its declared
+///    input schema via [`is_bridge_tool`]) is backgrounded immediately - the
+///    remote call is long-running by nature;
+/// 3. otherwise the legacy fail-open name list decides.
+///
+/// This is the entry point the agent loop uses.
+pub fn dispatch_mode_for(
+    tool_name: &str,
+    declared: Option<&str>,
+    bridge_envelope: bool,
+) -> DispatchMode {
+    if let Some(mode) = declared.and_then(mode_from_declaration) {
+        return mode;
+    }
+    if bridge_envelope {
+        return DispatchMode::Immediate;
+    }
+    dispatch_mode(tool_name)
+}
+
+/// The dispatch mode for a tool when no schema information is available (the
+/// schema-aware entry point is [`dispatch_mode_for`]). The policy declared by
+/// the tool's OWN descriptor wins; a tool that declared none keeps the legacy
+/// list-based policy (fail-open).
 pub fn dispatch_mode_with(tool_name: &str, declared: Option<&str>) -> DispatchMode {
-    declared
-        .and_then(mode_from_declaration)
-        .unwrap_or_else(|| dispatch_mode(tool_name))
+    dispatch_mode_for(tool_name, declared, false)
 }
 
 /// True for the core control-plane tools that must stay synchronous.
@@ -193,6 +235,16 @@ mod tests {
         );
         assert_eq!(mode_from_declaration("  SYNC "), Some(DispatchMode::Sync));
         assert_eq!(mode_from_declaration("nope"), None);
+        // A manifest declaration also wins over the SCHEMA-derived bridge
+        // classification: the descriptor decides, never the shape alone.
+        assert_eq!(
+            dispatch_mode_for("zorp__tool", Some("sync"), true),
+            DispatchMode::Sync
+        );
+        assert_eq!(
+            dispatch_mode_for("zorp__tool", Some("threshold"), true),
+            DispatchMode::Threshold
+        );
     }
 
     /// Every listed name must be exactly what `tool_qualify` produces for its
@@ -256,14 +308,16 @@ mod tests {
     }
 
     /// The long-running tools are backgrounded immediately, and NOT sync.
+    ///
+    /// EXTERNAL-HARNESS AGNOSTICISM: a bridge tool is NOT in this name list
+    /// any more; its classification comes from its own declared schema (see
+    /// `bridge_tools_are_immediate_from_their_own_schema`).
     #[test]
     fn long_running_tools_are_immediate_background() {
         let expected = [
             ("ssh", "run"),
             ("ssh", "copy"),
             ("docker", "compose"),
-            ("workbench", "tool"),
-            ("workstation", "tool"),
             ("fetch", "fetch"),
             ("git", "clone_repo"),
             ("git", "commit_and_push"),
@@ -290,6 +344,71 @@ mod tests {
         listed.sort();
         wanted.sort();
         assert_eq!(listed, wanted);
+    }
+
+    /// The exact input schema the external bridge plugins declare (verified
+    /// verbatim in their `server.js`: two properties `tool` (string) and
+    /// `params` (object), `required: ["tool"]`).
+    fn bridge_envelope_schema() -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tool": {"type": "string", "description": "bridge tool/command name"},
+                "params": {"type": "object", "additionalProperties": true, "default": {}}
+            },
+            "required": ["tool"]
+        })
+    }
+
+    /// A tool is a BRIDGE tool because of its OWN declared schema, whatever it
+    /// is called: any future external-harness bridge is backgrounded
+    /// immediately without a core edit, and the historical bridge tools keep
+    /// EXACTLY their old immediate behaviour (equivalence). The harness names
+    /// below appear ONLY as test fixtures - the core lists none of them.
+    #[test]
+    fn bridge_tools_are_immediate_from_their_own_schema() {
+        let schema = bridge_envelope_schema();
+        assert!(
+            is_bridge_tool(&schema),
+            "the bridge envelope must be recognised"
+        );
+        for name in [
+            "workstation__tool",
+            "workbench__tool",
+            "zorp__tool",
+            "paperclip__tool",
+        ] {
+            // No manifest declaration: the SCHEMA alone decides.
+            assert_eq!(
+                dispatch_mode_for(name, None, is_bridge_tool(&schema)),
+                DispatchMode::Immediate,
+                "{} must be backgrounded immediately from its schema",
+                name
+            );
+            assert!(!is_immediate_background_tool(name));
+        }
+        // A tool whose declared schema is anything else stays on the fast
+        // path: the shape is the gate, not the name.
+        let unrelated = serde_json::json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"]
+        });
+        assert!(!is_bridge_tool(&unrelated));
+        assert_eq!(
+            dispatch_mode_for("filesystem__read", None, is_bridge_tool(&unrelated)),
+            DispatchMode::Threshold
+        );
+        // A bridge tool is a plugin tool: never a core control tool, and never
+        // listed in a core name list (the core knows no harness).
+        assert!(!is_sync_control_tool("workstation__tool"));
+        for name in ["workstation__tool", "workbench__tool", "zorp__tool"] {
+            assert!(
+                !IMMEDIATE_BACKGROUND_TOOLS.contains(&name) && !SYNC_CONTROL_TOOLS.contains(&name),
+                "{} must not be hard-coded in a core dispatch list",
+                name
+            );
+        }
     }
 
     /// Fast, unknown and non-core tools keep the threshold (fast-path) mode:

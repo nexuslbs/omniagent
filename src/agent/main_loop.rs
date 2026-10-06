@@ -2818,6 +2818,11 @@ Previous plan:\n{}",
         // HV-A1). Read once, before the registry is moved into the tool loop;
         // shared with the spawned tool tasks through an Arc.
         let declared_dispatches = std::sync::Arc::new(behavior_snapshot.declared_dispatches());
+        // Bridge tools (a tool whose OWN declared input schema is the
+        // `{tool, params}` envelope of an external tool server) are
+        // backgrounded immediately from their descriptor: the core keeps no
+        // knowledge of any specific external harness (agnosticism).
+        let bridge_envelope_tools = std::sync::Arc::new(behavior_snapshot.bridge_envelope_tools());
 
         let pool = cfg.pool.clone();
         // mcp_registry removed - use cfg.plugin_manager instead
@@ -2958,6 +2963,7 @@ Previous plan:\n{}",
             let panic_tc_id = tc_id.clone();
             let panic_tool_name = tool_name.clone();
             let declared_dispatches = declared_dispatches.clone();
+            let bridge_envelope_tools = bridge_envelope_tools.clone();
             join_set.spawn(async move {
                 let task_result = std::panic::AssertUnwindSafe(async move {
                     // Phase 1.5 guard: if this docker_compose call would restart the
@@ -3010,9 +3016,11 @@ Previous plan:\n{}",
                 // keeps the legacy fail-open list policy. See
                 // crate::agent::background_dispatch.
                 let declared_dispatch = declared_dispatches.get(&tool_name).map(String::as_str);
-                let dispatch_mode = crate::agent::background_dispatch::dispatch_mode_with(
+                let is_bridge_tool = bridge_envelope_tools.contains(&tool_name);
+                let dispatch_mode = crate::agent::background_dispatch::dispatch_mode_for(
                     &tool_name,
                     declared_dispatch,
+                    is_bridge_tool,
                 );
                 let registry = crate::agent::task_registry::TASK_REGISTRY
                     .get()

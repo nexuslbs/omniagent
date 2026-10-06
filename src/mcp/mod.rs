@@ -951,6 +951,23 @@ impl McpRegistry {
             .collect()
     }
 
+    /// Tools whose OWN declared input schema is the two-key `{tool, params}`
+    /// envelope exposed by an external tool-server bridge (see
+    /// [`crate::mcp::envelope::is_bridge_envelope_schema`]).
+    ///
+    /// The agent loop reads this ONCE per turn (as a plain set) and backgrounds
+    /// a bridge call immediately: the call runs on a REMOTE tool server, so it
+    /// may take minutes. The classification comes from the tool's OWN
+    /// descriptor, never from a harness name, so any future bridge plugin is
+    /// recognised without a core edit.
+    pub fn bridge_envelope_tools(&self) -> std::collections::HashSet<String> {
+        self.tools
+            .values()
+            .filter(|t| crate::mcp::envelope::is_bridge_envelope_schema(&t.input_schema))
+            .map(|t| t.name.clone())
+            .collect()
+    }
+
     /// Remove all tools belonging to a given server.
     /// Returns the names of removed tools.
     pub fn remove_by_server(&mut self, server_name: &str) -> Vec<String> {
