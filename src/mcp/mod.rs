@@ -355,6 +355,42 @@ pub fn meta_profile_name(ctx: &AppContext) -> String {
     }
 }
 
+/// The single source of truth for the `_meta` context an external tool
+/// dispatch carries (JSON-RPC `params._meta`).
+///
+/// `profile_name` is ALWAYS present and non-empty; `channel_id`,
+/// `channel_name`, `thread_id` and `platform` are added whenever the context
+/// knows them. A dispatch that arrived without a profile was what let a remote
+/// plugin invent `<OMNI_DIR>/profiles/default` (telegram threads 2260/2719),
+/// so an empty result is impossible here: `profile_name` is never dropped.
+///
+/// Kept as a free function (not inlined in the client closure) so the contract
+/// is unit-testable without a live MCP server.
+pub fn build_tool_meta(ctx: &AppContext) -> Option<serde_json::Value> {
+    let mut meta_map = serde_json::Map::new();
+    if let Some(ref cid) = ctx.current_channel_id {
+        meta_map.insert("channel_id".to_string(), serde_json::json!(cid));
+    }
+    if let Some(tid) = ctx.current_thread_id {
+        meta_map.insert("thread_id".to_string(), serde_json::json!(tid));
+    }
+    meta_map.insert(
+        "profile_name".to_string(),
+        serde_json::json!(meta_profile_name(ctx)),
+    );
+    if let Some(ref plat) = ctx.current_platform {
+        meta_map.insert("platform".to_string(), serde_json::json!(plat));
+    }
+    if let Some(ref cn) = ctx.current_channel_name {
+        meta_map.insert("channel_name".to_string(), serde_json::json!(cn));
+    }
+    if meta_map.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(meta_map))
+    }
+}
+
 /// Async handler type for MCP tool execution.
 pub type McpToolHandler = Arc<
     dyn Fn(Value, AppContext) -> Pin<Box<dyn Future<Output = AppResult<McpToolResult>> + Send>>
@@ -2100,6 +2136,47 @@ mod tests {
         let mut explicit = ctx.clone();
         explicit.current_profile_name = Some("omni".to_string());
         assert_eq!(meta_profile_name(&explicit), "omni");
+    }
+
+    #[tokio::test]
+    async fn test_external_tool_meta_always_carries_profile_and_channel() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://user:pass@127.0.0.1:1/none")
+            .expect("lazy pool");
+        let mut ctx = AppContext::new(
+            pool.clone(),
+            pool,
+            "/tmp",
+            std::collections::HashMap::new(),
+            std::sync::Arc::new(crate::mcp::external::client::ExternalMcpClients::new()),
+        );
+        // A dispatch with NO profile and NO channel still carries a NON-EMPTY
+        // profile: that is what keeps a remote plugin away from
+        // `<OMNI_DIR>/profiles/default`.
+        ctx.current_profile_name = None;
+        let meta = build_tool_meta(&ctx).expect("meta is never empty");
+        assert!(
+            !meta["profile_name"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .is_empty(),
+            "profile_name must never be empty: {meta}"
+        );
+        assert!(meta.get("channel_id").is_none());
+        // A thread-bound dispatch carries the channel + thread alongside it.
+        ctx.current_channel_id = Some("omnidev".to_string());
+        ctx.current_channel_name = Some("omnidev".to_string());
+        ctx.current_thread_id = Some(4177);
+        let meta = build_tool_meta(&ctx).expect("meta");
+        assert_eq!(meta["channel_id"], "omnidev");
+        assert_eq!(meta["channel_name"], "omnidev");
+        assert_eq!(meta["thread_id"], 4177);
+        assert!(!meta["profile_name"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .is_empty());
     }
 
     // ─── core_api_base_url tests (audit V-8) ───

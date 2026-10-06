@@ -232,33 +232,12 @@ pub trait McpServerClient: Send + Sync {
                     let sn = sn.clone();
                     let tn = tn.clone();
                     Box::pin(async move {
-                        // Build _meta context from AppContext (channel_id always, profile_name ALWAYS non-empty)
-                        let mut meta_map = serde_json::Map::new();
-                        if let Some(ref cid) = ctx.current_channel_id {
-                            meta_map.insert("channel_id".to_string(), serde_json::json!(cid));
-                        }
-                        if let Some(tid) = ctx.current_thread_id {
-                            meta_map.insert("thread_id".to_string(), serde_json::json!(tid));
-                        }
-                        // NEVER omit: an absent _meta.profile_name made the
-                        // remote memory plugin invent `profiles/default`
-                        // (telegram thread 2719). Fall back to the resolved
-                        // default profile, which is a DECLARED profile.
-                        meta_map.insert(
-                            "profile_name".to_string(),
-                            serde_json::json!(crate::mcp::meta_profile_name(&ctx)),
-                        );
-                        if let Some(ref plat) = ctx.current_platform {
-                            meta_map.insert("platform".to_string(), serde_json::json!(plat));
-                        }
-                        if let Some(ref cn) = ctx.current_channel_name {
-                            meta_map.insert("channel_name".to_string(), serde_json::json!(cn));
-                        }
-                        let meta = if meta_map.is_empty() {
-                            None
-                        } else {
-                            Some(Value::Object(meta_map))
-                        };
+                        // Single source of truth for the tool-call context:
+                        // `_meta` always carries a non-empty profile_name (plus
+                        // channel/thread/platform when known). See
+                        // crate::mcp::build_tool_meta - kept out of the closure
+                        // so its contract is unit-testable.
+                        let meta = crate::mcp::build_tool_meta(&ctx);
 
                         match ctx.external_clients.call_tool(&sn, &tn, &args, meta).await {
                             Ok(res) => Ok(res),
