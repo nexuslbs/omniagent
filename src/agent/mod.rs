@@ -23,6 +23,7 @@ pub(crate) mod context_compactor;
 pub mod helpers;
 pub mod kanban_updater;
 pub(crate) mod main_loop;
+pub mod orchestration_budget;
 pub mod output_markers;
 pub mod plugin_manager;
 pub mod pricing;

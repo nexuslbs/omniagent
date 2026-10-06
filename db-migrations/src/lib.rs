@@ -160,6 +160,22 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .await
         .ok();
 
+    // -- Orchestration-task budget overrides (task tier) --
+    // Nullable TASK-tier columns for the two orchestration knobs enforced by
+    // `src/agent/orchestration_budget.rs`: NULL = the task declares nothing and
+    // the other tiers apply (workflow/role > task > board > global setting).
+    // Idempotent ADD COLUMN IF NOT EXISTS, like every other migration here.
+    sqlx::query("ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS token_budget BIGINT")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query(
+        "ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS iteration_min_interval_secs BIGINT",
+    )
+    .execute(pool)
+    .await
+    .ok();
+
     // ── Kanban tags (kanban task tags) ─────────────────────────────────────
     // kanban_tags: free-form label registry (one row per unique tag name).
     // task_tags: task <-> tag association (FK CASCADE: deleting a task or a

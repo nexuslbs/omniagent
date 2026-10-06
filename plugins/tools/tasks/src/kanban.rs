@@ -160,6 +160,15 @@ async fn handle_create(
     if let Some(tags) = args["tags"].as_array() {
         req["tags"] = serde_json::json!(tags);
     }
+    // Optional orchestration TASK-tier overrides (numbers): forwarded verbatim
+    // to the HTTP API, which stores them on
+    // `kanban_tasks.token_budget` / `.iteration_min_interval_secs` (read by
+    // the core's orchestration budget resolver at thread start).
+    for field in ["token_budget", "iteration_min_interval_secs"] {
+        if let Some(v) = args.get(field).and_then(|v| v.as_i64()) {
+            req[field] = serde_json::json!(v);
+        }
+    }
     // Explicit channel/profile win; omitted stays EMPTY (NULL in the task) so
     // the board supplies them. See `create_context_fields`.
     let (channel, profile) = create_context_fields(args);
@@ -256,8 +265,18 @@ async fn handle_update(
         .ok_or_else(|| anyhow!("Missing required argument: 'id'"))?;
     let mut req = serde_json::json!({});
     for field in [
-        "title", "body", "status", "priority", "assignee", "profile", "archived", "template",
-        "toolset", "plan",
+        "title",
+        "body",
+        "status",
+        "priority",
+        "assignee",
+        "profile",
+        "archived",
+        "template",
+        "toolset",
+        "plan",
+        "token_budget",
+        "iteration_min_interval_secs",
     ] {
         if let Some(v) = args.get(field) {
             req[field] = v.clone();
@@ -577,6 +596,14 @@ pub fn build_tools(pool: &Arc<RwLock<Option<PgPool>>>) -> Vec<McpToolEntry> {
                             "type": "string",
                             "description": "Optional toolset name for the task's threads"
                         },
+                        "token_budget": {
+                            "type": "integer",
+                            "description": "Optional TASK-tier override of the orchestration HARD cumulative token budget (e.g. 1000000 for a simple orchestration task). 0 = explicitly disabled."
+                        },
+                        "iteration_min_interval_secs": {
+                            "type": "integer",
+                            "description": "Optional TASK-tier override of the minimum seconds between orchestrator iterations while a dispatched worker runs (0 = disabled)."
+                        },
                         "plan": {
                             "type": "boolean",
                             "description": "Optional: whether the task runs in plan mode (defaults to the board's plan setting)"
@@ -652,6 +679,8 @@ pub fn build_tools(pool: &Arc<RwLock<Option<PgPool>>>) -> Vec<McpToolEntry> {
                         "channel": { "type": "string", "description": "New channel name, or empty string to clear it so the BOARD's channel applies (boards.yml fallback)" },
                         "template": { "type": "string", "description": "New template file name (without .md), or empty string to clear it" },
                         "toolset": { "type": "string", "description": "New toolset name, or empty string to clear it" },
+                        "token_budget": { "type": "integer", "description": "TASK-tier orchestration cumulative token budget override (>= 0 sets it, negative clears it to NULL)" },
+                        "iteration_min_interval_secs": { "type": "integer", "description": "TASK-tier orchestrator iteration minimum interval override in seconds (>= 0 sets it, negative clears it)" },
                         "plan": { "type": "boolean", "description": "New plan-mode flag" },
                         "board": { "type": "string", "description": "Move the task to another board. Only sent when non-empty; empty/null means unchanged (the API rejects an explicit clear: boards are always enabled)" },
                         "profile": {

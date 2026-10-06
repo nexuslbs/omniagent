@@ -1349,8 +1349,111 @@ Previous plan:\n{}",
     // derived from the PREVIOUS request's billed/measured pair, so an observed
     // overshoot is exactly the amount that estimate was short (thread 3998).
     let mut last_overshoot_tokens: u64 = 0;
+
+    // ── Orchestration-task budgets (operator directive 2026-10-06, telegram
+    // thread 4183) ──
+    // Resolved ONCE here from the whole tier chain (workflow_role > workflow >
+    // kanban_task > board > global setting), exactly like every other
+    // fallback-bearing field. Two knobs:
+    //  * a HARD CUMULATIVE token cap: when the thread's provider-reported
+    //    cumulative usage reaches it, the loop stops cleanly with a cap notice
+    //    naming the knob, the value and where the value came from;
+    //  * an ITERATION THROTTLE: while a dispatched worker is still running (a
+    //    tool returned a background-task handle), two orchestrator iterations
+    //    are spaced at least `iteration_min_interval_secs` apart.
+    // Both are inert for a non-orchestration thread (`orchestration == false`),
+    // so ordinary threads behave exactly as before (R5). Nothing here touches
+    // the per-iteration prompt budgets / compaction (R4).
+    let orch_limits = crate::agent::orchestration_budget::load_for_thread(
+        &cfg.pool,
+        &cfg.ctx.data_dir,
+        thread.task_id.as_deref(),
+        thread.workflow_step.as_deref(),
+        &cfg_snapshot,
+    )
+    .await;
+    if orch_limits.budget.orchestration {
+        info!(
+            thread_id = thread.id,
+            workflow = orch_limits.workflow_id.as_deref().unwrap_or("-"),
+            role = orch_limits.role_key.as_deref().unwrap_or("-"),
+            board = orch_limits.board.as_deref().unwrap_or("-"),
+            token_budget = orch_limits.budget.token_budget.value,
+            token_budget_source = %orch_limits.budget.token_budget.source,
+            iteration_min_interval_secs = orch_limits.budget.iteration_min_interval.value,
+            iteration_min_interval_source = %orch_limits.budget.iteration_min_interval.source,
+            "orchestration budgets resolved for this thread"
+        );
+    }
+    // True while the previous round left a background (dispatched worker) task
+    // in flight: only then does the iteration throttle apply.
+    let mut worker_in_flight: bool = false;
+    // When the previous iteration started, for the throttle arithmetic.
+    let mut last_iteration_at = std::time::Instant::now();
+
     for _turn in 0..max_llm_calls {
         current_iter += 1; // increment before each LLM call
+
+        // ── Orchestration HARD cumulative token cap (checked BEFORE every LLM
+        // call so the cap is never exceeded by another paid request) ──
+        if orch_limits.budget.cap_enabled() {
+            match crate::db::threads::aggregate_thread_token_usage(&cfg.pool, thread.id).await {
+                Ok((input_tokens, _cached_tokens, output_tokens)) => {
+                    let cumulative = (input_tokens.max(0) as u64)
+                        .saturating_add(output_tokens.max(0) as u64);
+                    let cap = orch_limits.budget.token_budget.value;
+                    if cumulative >= cap {
+                        let source = orch_limits.budget.token_budget.source.clone();
+                        warn!(
+                            thread_id = thread.id,
+                            knob = crate::agent::orchestration_budget::TOKEN_BUDGET_KNOB,
+                            value = cap,
+                            source = %source,
+                            cumulative_tokens = cumulative,
+                            "orchestration cumulative token cap reached: terminating the loop with provenance"
+                        );
+                        // Clean stop: the cap notice IS the thread's final
+                        // content. `limit_reached` stays false on purpose - it
+                        // would make `handle_response` generate a SUMMARY with
+                        // one more paid LLM call, the opposite of a spend cap.
+                        final_content = crate::agent::orchestration_budget::cap_notice(
+                            cap, cumulative, &source,
+                        );
+                        break;
+                    }
+                }
+                Err(e) => warn!(
+                    thread_id = thread.id,
+                    "orchestration token-cap aggregation failed, skipping the cap check this iteration: {e}"
+                ),
+            }
+        }
+
+        // ── Orchestration iteration throttle (R3) ──
+        // Only while a dispatched worker is still running: the orchestrator
+        // verifies it at most once per configured interval instead of polling
+        // in a tight loop. `0` disables the throttle entirely.
+        if orch_limits.budget.throttle_enabled() && worker_in_flight {
+            let min_interval = orch_limits.budget.iteration_min_interval.value;
+            let wait = crate::agent::orchestration_budget::throttle_wait(
+                min_interval,
+                last_iteration_at.elapsed(),
+                true,
+            );
+            if !wait.is_zero() {
+                info!(
+                    thread_id = thread.id,
+                    "{}",
+                    crate::agent::orchestration_budget::throttle_notice(
+                        min_interval,
+                        wait.as_secs(),
+                        &orch_limits.budget.iteration_min_interval.source,
+                    )
+                );
+                tokio::time::sleep(wait).await;
+            }
+        }
+        last_iteration_at = std::time::Instant::now();
 
         // If this LLM call will reach the iteration limit, hint to the model
         // to produce a final answer rather than more tool calls.
@@ -3096,9 +3199,16 @@ Previous plan:\n{}",
         // out of text): default `true` = treat a missing result as a failure, so
         // its record is dropped and the invocation stays retryable.
         let mut tool_errors: Vec<bool> = vec![true; tool_count];
+        // Recompute the "dispatched worker still running" signal from THIS
+        // round's tool results (a background-task handle means the orchestrator
+        // is in its wait/verify phase and the throttle applies next round).
+        worker_in_flight = false;
         while let Some(join_result) = join_set.join_next().await {
             match join_result {
                 Ok((idx, tc_id, tool_name, output, is_error, task_usage)) => {
+                    if crate::agent::orchestration_budget::output_is_background_handle(&output) {
+                        worker_in_flight = true;
+                    }
                     tool_errors[idx] = is_error;
                     tool_results[idx] = Some((tc_id, tool_name, output));
                     usage_entries.extend(task_usage);

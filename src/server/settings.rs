@@ -649,6 +649,36 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
                 default: Some("10".into()),
             },
         ),
+        (
+            "orchestration_token_budget".into(),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "HARD cumulative token budget for ORCHESTRATION threads (workflows listed in orchestration_workflows): provider-reported cumulative tokens (input + output) the thread may spend; at the cap the loop stops cleanly with a cap notice. 0 disables the cap. Overrides: workflow/role (workflows.yml token_budget), task (kanban_tasks.token_budget), board (boards.yml token_budget). Separate from token_usage_budget (telemetry only) and from the per-iteration prompt budgets.".into(),
+                options: None,
+                readonly: false,
+                default: Some("3000000".into()),
+            },
+        ),
+        (
+            "orchestration_iteration_min_interval_secs".into(),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Minimum seconds between two iterations of an ORCHESTRATION thread while a dispatched worker is still running (default 3600 = at most one verification iteration per hour). 0 disables the throttle. Overrides: workflow/role (workflows.yml iteration_min_interval_secs), task (kanban_tasks.iteration_min_interval_secs), board (boards.yml iteration_min_interval_secs).".into(),
+                options: None,
+                readonly: false,
+                default: Some("3600".into()),
+            },
+        ),
+        (
+            "orchestration_workflows".into(),
+            SettingMeta {
+                field_type: "text".into(),
+                description: "Comma-separated workflow ids treated as ORCHESTRATION workflows (default: orchestrator,workstation,mvp,papers-orchestrator). Only these (or a workflow/role/task that explicitly declares token_budget / iteration_min_interval_secs) get the cumulative token cap and the iteration throttle; every other thread is unaffected.".into(),
+                options: None,
+                readonly: false,
+                default: Some("orchestrator,workstation,mvp,papers-orchestrator".into()),
+            },
+        ),
         // ── Group 2 settings ──
         (
             "platform_max_spawn_retries".into(),
@@ -721,6 +751,9 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "max_tokens_on_truncation"
             | "max_unfinished_subtask_retries"
             | "temperature"
+            | "orchestration_token_budget"
+            | "orchestration_iteration_min_interval_secs"
+            | "orchestration_workflows"
             | "tool_bg_secs" => "execution",
             // general category (default; matches state_block_update_interval)
             "kanban_dispatcher_interval" | "delete_after_days_soft" | "delete_after_days_hard" => {
@@ -865,6 +898,9 @@ fn writable_setting_keys() -> std::collections::HashSet<&'static str> {
         "prompt_token_budget_soft",
         "token_usage_budget",
         "token_usage_telemetry_percent",
+        "orchestration_token_budget",
+        "orchestration_iteration_min_interval_secs",
+        "orchestration_workflows",
         "sub_prompt_max_chars",
         "sub_prompt_iteration_percent",
         "platform_max_spawn_retries",
@@ -1311,6 +1347,8 @@ mod tests {
             ("prompt_token_budget_soft", "120000"),
             ("token_usage_budget", "0"),
             ("token_usage_telemetry_percent", "10"),
+            ("orchestration_token_budget", "3000000"),
+            ("orchestration_iteration_min_interval_secs", "3600"),
         ] {
             let meta = by_name
                 .get(name)
@@ -1326,6 +1364,9 @@ mod tests {
             "prompt_token_budget_soft",
             "token_usage_budget",
             "token_usage_telemetry_percent",
+            "orchestration_token_budget",
+            "orchestration_iteration_min_interval_secs",
+            "orchestration_workflows",
         ] {
             assert!(keys.contains(name), "{name} must be writable");
         }

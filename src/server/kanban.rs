@@ -87,6 +87,51 @@ fn patch_string_bind(v: Option<&str>) -> &str {
     }
 }
 
+/// Apply the optional TASK-tier orchestration budget overrides of a create or
+/// PATCH request (`kanban_tasks.token_budget` /
+/// `.iteration_min_interval_secs`, read by
+/// `crate::agent::orchestration_budget::load_for_thread`).
+///
+/// Semantics per field (identical for create and PATCH):
+/// - `None` (field absent) leaves the column untouched (on create it stays
+///   NULL);
+/// - `Some(v)` with `v >= 0` sets it (0 = explicitly DISABLED);
+/// - `Some(v)` with `v < 0` clears it to NULL, so the fallback tiers
+///   (workflow/role > board > global setting) apply again.
+///
+/// Executed as a PLAIN `sqlx::query` (never a `sql_forge!` macro) so the
+/// committed offline query cache is unaffected; the columns come from
+/// db-migrations (`ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS`).
+async fn apply_task_orchestration_overrides(
+    pool: &sqlx::PgPool,
+    task_id: &str,
+    token_budget: Option<i64>,
+    iteration_min_interval_secs: Option<i64>,
+) {
+    if token_budget.is_none() && iteration_min_interval_secs.is_none() {
+        return;
+    }
+    let res = sqlx::query(
+        "UPDATE kanban_tasks SET \
+           token_budget = CASE WHEN $2::bigint IS NULL THEN token_budget \
+                               WHEN $2 < 0 THEN NULL ELSE $2 END, \
+           iteration_min_interval_secs = CASE WHEN $3::bigint IS NULL THEN iteration_min_interval_secs \
+                                              WHEN $3 < 0 THEN NULL ELSE $3 END \
+         WHERE id = $1",
+    )
+    .bind(task_id)
+    .bind(token_budget)
+    .bind(iteration_min_interval_secs)
+    .execute(pool)
+    .await;
+    if let Err(e) = res {
+        error!(
+            "[kanban/tasks/{}] orchestration budget override update failed: {:?}",
+            task_id, e
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -225,6 +270,13 @@ struct CreateTaskRequest {
     workflow: Option<String>,
     board: Option<String>,
     tags: Option<Vec<String>>,
+    /// Optional TASK-tier override of the orchestration HARD cumulative token
+    /// budget (`crate::agent::orchestration_budget`). Non-negative sets it;
+    /// absent/negative leaves it NULL (the workflow/board/global tiers apply).
+    token_budget: Option<i64>,
+    /// Optional TASK-tier override of the orchestrator iteration minimum
+    /// interval in seconds (same semantics as `token_budget`).
+    iteration_min_interval_secs: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -270,6 +322,14 @@ struct UpdateTaskRequest {
     #[serde(default, deserialize_with = "de_optional_workflow")]
     workflow: Option<Option<String>>,
     board: Option<String>,
+    /// Optional TASK-tier override of the orchestration HARD cumulative token
+    /// budget (`crate::agent::orchestration_budget`). ABSENT keeps the current
+    /// value; a value >= 0 sets it; a negative value CLEARS it (NULL: the
+    /// workflow/board/global tiers apply again).
+    token_budget: Option<i64>,
+    /// Optional TASK-tier override of the orchestrator iteration minimum
+    /// interval in seconds (same semantics as `token_budget`).
+    iteration_min_interval_secs: Option<i64>,
     /// Thread id that issued this PATCH (kanban_update tool / agent thread).
     /// Used to (a) reject premature self-close to done while the task's own
     /// serving thread is still running with pending subtasks (threads must
@@ -1372,6 +1432,18 @@ async fn create_task_handler(
         );
     }
 
+    // Orchestration TASK-tier overrides (optional). Written with a plain
+    // (non-macro) statement so the committed sqlx query cache stays valid:
+    // the columns are added by db-migrations. A non-negative value sets the
+    // override; absent/negative stores NULL (no task tier).
+    apply_task_orchestration_overrides(
+        &state.pool,
+        &id,
+        body.token_budget,
+        body.iteration_min_interval_secs,
+    )
+    .await;
+
     // Insert creation history (best-effort)
     if let Err(e) = sql_forge!(
         r#"
@@ -1839,6 +1911,8 @@ async fn update_task_handler(
         || body.plan.is_some()
         || body.workflow.is_some()
         || body.board.is_some()
+        || body.token_budget.is_some()
+        || body.iteration_min_interval_secs.is_some()
         || body.assignee.is_some();
 
     if !has_fields {
@@ -1951,6 +2025,17 @@ async fn update_task_handler(
             "Failed to update task",
         );
     }
+
+    // Orchestration TASK-tier overrides (optional; same plain-statement rule as
+    // the create path). ABSENT fields keep the current value; a NON-NEGATIVE
+    // value sets it; a NEGATIVE value CLEARS it (NULL).
+    apply_task_orchestration_overrides(
+        &state.pool,
+        &id,
+        body.token_budget,
+        body.iteration_min_interval_secs,
+    )
+    .await;
 
     // 6. Insert kanban history
     let has_status_change = body

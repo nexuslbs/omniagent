@@ -73,6 +73,19 @@ pub struct BoardConfig {
     pub toolset: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
+    /// BOARD-tier candidate for the orchestration cumulative token budget
+    /// (`crate::agent::orchestration_budget`). `None` = this board declares
+    /// nothing; `Some(0)` = explicitly DISABLED. Sits BELOW the task tier and
+    /// ABOVE the global setting. A board value alone never turns a task into
+    /// an orchestration task (it only supplies a value once the thread IS
+    /// orchestration).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<u64>,
+    /// BOARD-tier candidate for the minimum seconds between orchestrator
+    /// iterations while a dispatched worker runs (same tier semantics as
+    /// `token_budget`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iteration_min_interval_secs: Option<u64>,
 }
 
 /// Parsed `boards.yml`: `boards:` dict of board name → options.

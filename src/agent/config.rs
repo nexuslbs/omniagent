@@ -164,6 +164,29 @@ pub struct AgentConfig {
     /// no telemetry block is ever appended to the prompt, at any time.
     pub token_usage_telemetry_percent: u32,
 
+    /// HARD cumulative token budget for ORCHESTRATION threads (global setting
+    /// `orchestration_token_budget`): provider-reported cumulative tokens
+    /// (input + output) an orchestration thread may spend before the main
+    /// loop stops cleanly with a cap notice naming this knob and its source.
+    /// Default 3,000,000 (operator directive, telegram thread 4183); 0
+    /// disables the cap. Per-workflow/role (`workflows.yml`), per-task
+    /// (`kanban_tasks`) and per-board (`boards.yml`) overrides win over this
+    /// value (see `crate::agent::orchestration_budget`). Completely separate
+    /// from `token_usage_budget` (telemetry only) and from the per-ITERATION
+    /// prompt budgets `prompt_token_budget_hard` / `_soft` (compaction).
+    pub orchestration_token_budget: u64,
+    /// Minimum seconds between two iterations of an ORCHESTRATION thread
+    /// while a dispatched worker is still running (global setting
+    /// `orchestration_iteration_min_interval_secs`): the orchestrator may
+    /// never poll faster than this. Default 3600 (at most one iteration per
+    /// hour); 0 disables the throttle. Same override tiers as
+    /// `orchestration_token_budget`.
+    pub orchestration_iteration_min_interval_secs: u64,
+    /// Comma-separated workflow ids treated as ORCHESTRATION workflows
+    /// (global setting `orchestration_workflows`). Default
+    /// `orchestrator,workstation,mvp,papers-orchestrator`.
+    pub orchestration_workflows: String,
+
     // When to insert prompts as messages (msg_type: "prompt") into the messages table.
     /// - "off": never insert
     /// - "first": insert the first LLM call's prompt only (default)
@@ -400,6 +423,25 @@ impl AgentConfig {
                 .parse()
                 .unwrap_or(0)
                 .min(100),
+            // Orchestration-task budgets (hard cumulative token cap + minimum
+            // interval between orchestrator iterations while a worker runs).
+            // 0 disables each knob. These are ENFORCED (unlike
+            // token_usage_budget, which is telemetry only).
+            orchestration_token_budget: get("orchestration_token_budget", "3000000")
+                .trim()
+                .parse()
+                .unwrap_or(0),
+            orchestration_iteration_min_interval_secs: get(
+                "orchestration_iteration_min_interval_secs",
+                "3600",
+            )
+            .trim()
+            .parse()
+            .unwrap_or(0),
+            orchestration_workflows: get(
+                "orchestration_workflows",
+                crate::agent::orchestration_budget::DEFAULT_ORCHESTRATION_WORKFLOWS,
+            ),
 
             prompt_log_level: get("prompt_log_level", "first"),
 
@@ -534,6 +576,25 @@ impl AgentConfig {
                 .parse()
                 .unwrap_or(0)
                 .min(100),
+            // Orchestration-task budgets (hard cumulative token cap + minimum
+            // interval between orchestrator iterations while a worker runs).
+            // 0 disables each knob. These are ENFORCED (unlike
+            // token_usage_budget, which is telemetry only).
+            orchestration_token_budget: get("orchestration_token_budget", "3000000")
+                .trim()
+                .parse()
+                .unwrap_or(0),
+            orchestration_iteration_min_interval_secs: get(
+                "orchestration_iteration_min_interval_secs",
+                "3600",
+            )
+            .trim()
+            .parse()
+            .unwrap_or(0),
+            orchestration_workflows: get(
+                "orchestration_workflows",
+                crate::agent::orchestration_budget::DEFAULT_ORCHESTRATION_WORKFLOWS,
+            ),
 
             prompt_log_level: get("prompt_log_level", "first"),
 
@@ -620,6 +681,10 @@ mod tests {
             token_budget_soft: 120000,
             token_usage_budget: 0,
             token_usage_telemetry_percent: 0,
+            orchestration_token_budget: 3_000_000,
+            orchestration_iteration_min_interval_secs: 3600,
+            orchestration_workflows:
+                crate::agent::orchestration_budget::DEFAULT_ORCHESTRATION_WORKFLOWS.to_string(),
             prompt_log_level: "first".to_string(),
             tokenizer_encoding: "gpt-4".to_string(),
             tool_bg_secs: 30,
@@ -695,6 +760,9 @@ mod tests {
             token_budget_soft: 0,
             token_usage_budget: 1_000_000,
             token_usage_telemetry_percent: 10,
+            orchestration_token_budget: 3_000_000,
+            orchestration_iteration_min_interval_secs: 3600,
+            orchestration_workflows: String::new(),
             prompt_log_level: String::new(),
             tokenizer_encoding: String::new(),
             tool_bg_secs: 0,

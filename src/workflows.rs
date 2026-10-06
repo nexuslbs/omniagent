@@ -88,6 +88,17 @@ pub struct WorkflowDefaults {
     pub model: Option<String>,
     pub plan_mode: Option<String>,
     pub retries: Option<u32>,
+    /// HARD cumulative token budget for ORCHESTRATION threads
+    /// (`crate::agent::orchestration_budget`): workflow level, overridable per
+    /// role. `None` = this tier declares nothing (fall through to
+    /// task > board > global setting). `Some(0)` = explicitly DISABLED.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<u64>,
+    /// Minimum seconds between two orchestrator iterations while a dispatched
+    /// worker runs: workflow level, overridable per role. `None` = this tier
+    /// declares nothing; `Some(0)` = DISABLED.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iteration_min_interval_secs: Option<u64>,
 }
 
 /// A single role inside a workflow. `template` is the system prompt the role
@@ -361,6 +372,14 @@ pub struct ResolvedWorkflowRole {
     /// the workflow-level one when the role does not define it. `None` means
     /// neither level defines a toolset, so the lower levels apply.
     pub toolset: Option<String>,
+    /// Effective cumulative token budget candidate for orchestration threads
+    /// (role > workflow). `None` = neither level declares one; `Some(0)` =
+    /// explicitly disabled.
+    pub token_budget: Option<u64>,
+    /// Effective orchestrator iteration minimum interval candidate
+    /// (role > workflow). `None` = neither level declares one; `Some(0)` =
+    /// explicitly disabled.
+    pub iteration_min_interval_secs: Option<u64>,
 }
 
 impl ResolvedWorkflowRole {
@@ -412,6 +431,11 @@ impl Workflow {
                 .or_else(|| self.defaults.plan_mode.clone()),
             retries: role.overrides.retries.or(self.defaults.retries),
             toolset: role.toolset.clone().or_else(|| self.toolset.clone()),
+            token_budget: role.overrides.token_budget.or(self.defaults.token_budget),
+            iteration_min_interval_secs: role
+                .overrides
+                .iteration_min_interval_secs
+                .or(self.defaults.iteration_min_interval_secs),
         })
     }
 
@@ -485,6 +509,8 @@ mod tests {
             model: None,
             plan_mode: None,
             retries: None,
+            token_budget: None,
+            iteration_min_interval_secs: None,
         }
     }
 
