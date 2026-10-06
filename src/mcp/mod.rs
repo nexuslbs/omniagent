@@ -3114,4 +3114,65 @@ mod tests {
         assert!(spilled.inline.contains("[full output: "));
         std::fs::remove_dir_all(&root).ok();
     }
+    /// The bridge classification is driven by the tool's OWN registered input
+    /// schema, never by a harness name: a `<plugin>__tool` entry whose schema
+    /// is the two-key envelope is reported by
+    /// [`McpRegistry::bridge_envelope_tools`] and dispatched immediately,
+    /// while any other schema stays on the fast path.
+    #[test]
+    fn bridge_envelope_tools_are_classified_from_their_registered_schema() {
+        // Reuse a real tool and override the descriptor fields that matter
+        // (the handler is never invoked by this test).
+        let mut bridge = poll_task_tool();
+        bridge.name = tool_qualify("workstation", "tool");
+        bridge.server_name = Some("workstation".to_string());
+        bridge.input_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tool": {"type": "string"},
+                "params": {"type": "object", "additionalProperties": true, "default": {}}
+            },
+            "required": ["tool"]
+        });
+
+        let mut plain = poll_task_tool();
+        plain.name = tool_qualify("filesystem", "read");
+        plain.server_name = Some("filesystem".to_string());
+        plain.input_schema = serde_json::json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"]
+        });
+
+        let mut reg = McpRegistry::new();
+        reg.register(bridge);
+        reg.register(plain);
+
+        let bridges = reg.bridge_envelope_tools();
+        assert_eq!(bridges.len(), 1, "exactly the envelope tool is a bridge");
+        assert!(bridges.contains(&tool_qualify("workstation", "tool")));
+        assert!(!bridges.contains(&tool_qualify("filesystem", "read")));
+
+        // Feeding the registry classification into the dispatch policy keeps
+        // the historical immediate backgrounding of the bridge plugins,
+        // without the core naming any harness.
+        let name = tool_qualify("workstation", "tool");
+        assert_eq!(
+            crate::agent::background_dispatch::dispatch_mode_for(
+                &name,
+                reg.declared_dispatch(&name).as_deref(),
+                bridges.contains(&name),
+            ),
+            crate::agent::background_dispatch::DispatchMode::Immediate
+        );
+        let plain_name = tool_qualify("filesystem", "read");
+        assert_eq!(
+            crate::agent::background_dispatch::dispatch_mode_for(
+                &plain_name,
+                reg.declared_dispatch(&plain_name).as_deref(),
+                bridges.contains(&plain_name),
+            ),
+            crate::agent::background_dispatch::DispatchMode::Threshold
+        );
+    }
 }
