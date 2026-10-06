@@ -1412,6 +1412,39 @@ Previous plan:\n{}",
                             cumulative_tokens = cumulative,
                             "orchestration cumulative token cap reached: terminating the loop with provenance"
                         );
+                        // The cap is a TASK-level stop, not just a thread stop:
+                        // park the owning kanban task in the non-dispatchable
+                        // terminal `blocked` column BEFORE ending this thread.
+                        // A capped thread ends without a final answer, so the
+                        // step stays unsatisfied and the dispatcher would create
+                        // the next step thread with a FRESH budget (live dev
+                        // probe 2026-10-06: 4 executor threads in 15s for one
+                        // capped task). See `block_task_at_cap`.
+                        if let Some(task_id) = thread.task_id.as_deref() {
+                            match crate::agent::orchestration_budget::block_task_at_cap(
+                                &cfg.pool,
+                                task_id,
+                            )
+                            .await
+                            {
+                                Ok(0) => info!(
+                                    thread_id = thread.id,
+                                    task_id,
+                                    "orchestration cap: task already terminal/parked, nothing to block"
+                                ),
+                                Ok(n) => warn!(
+                                    thread_id = thread.id,
+                                    task_id,
+                                    rows = n,
+                                    "orchestration cap: task parked in 'blocked' so no step thread is re-dispatched"
+                                ),
+                                Err(e) => warn!(
+                                    thread_id = thread.id,
+                                    task_id,
+                                    "orchestration cap: blocking the task failed (cap stop still applies): {e}"
+                                ),
+                            }
+                        }
                         // Clean stop: the cap notice IS the thread's final
                         // content. `limit_reached` stays false on purpose - it
                         // would make `handle_response` generate a SUMMARY with

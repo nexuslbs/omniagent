@@ -396,6 +396,33 @@ pub fn throttle_notice(min_interval_secs: u64, waited_secs: u64, source: &str) -
     )
 }
 
+/// Park the owning kanban task in the non-dispatchable terminal `blocked`
+/// column after a cumulative-cap stop.
+///
+/// WHY this is part of the cap and not an extra: the cap belongs to the TASK's
+/// spend, but the loop only ends ONE thread. A capped thread ends without a
+/// final answer, so the kanban step stays unsatisfied and the dispatcher
+/// immediately creates the NEXT step thread - which starts with a FRESH
+/// per-thread budget. Live evidence (dev probe, 2026-10-06): one task with
+/// `token_budget = 1` produced 4 executor threads in 15s (656, 657, 660, 663),
+/// each spending ~10k tokens, and a capped 3M orchestration task would have
+/// spent up to 3M per retry. Blocking the task is what actually stops the
+/// spend: `blocked` is a terminal status (`is_terminal_status`), the dispatcher
+/// never scans it and no workflow step may move a task out of it.
+///
+/// Returns the number of rows changed (`0` = the task was already terminal or
+/// parked, e.g. the operator moved it to `done` while the thread ran).
+pub async fn block_task_at_cap(pool: &sqlx::PgPool, task_id: &str) -> Result<u64, sqlx::Error> {
+    let res = sqlx::query(
+        "UPDATE kanban_tasks SET status = 'blocked', updated_at = now() \
+         WHERE id = $1 AND status <> ALL(ARRAY['done', 'released', 'blocked'])",
+    )
+    .bind(task_id)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
 /// Resolved orchestration limits for ONE thread, with the provenance labels
 /// used by the logs and the cap notice.
 #[derive(Debug, Clone, PartialEq, Eq)]
