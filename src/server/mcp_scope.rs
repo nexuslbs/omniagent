@@ -148,6 +148,9 @@ impl ScopeDenial {
     }
 }
 
+// Flat refusal constructor: one scalar per field keeps every call site readable;
+// a params struct would only wrap this single internal helper.
+#[allow(clippy::too_many_arguments)]
 fn denial(
     status: u16,
     code: &'static str,
@@ -327,6 +330,10 @@ pub(crate) async fn resolve_scope(
 }
 
 /// Refuse a tool that is not part of the resolved caller toolset.
+///
+/// The refusal payload is returned by value on purpose: this is not a hot path,
+/// and boxing it would push a `Box` through every call site.
+#[allow(clippy::result_large_err)]
 pub(crate) fn check_tool(scope: &CallerScope, tool: &str) -> Result<(), ScopeDenial> {
     let Some(allowed) = &scope.allowed else {
         return Ok(());
