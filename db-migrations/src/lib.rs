@@ -1232,7 +1232,36 @@ async fn create_vector_support(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await?;
 
-        tracing::info!("[migration] pgvector HNSW index and embedding_vec column ready");
+        // Partial index for the MessageVectorizer pending-embeddings probe
+        // (`SELECT id, content FROM messages WHERE embedding_vec IS NULL
+        // ORDER BY id LIMIT $1`). The HNSW index above indexes only rows that
+        // HAVE a vector, so it cannot serve `IS NULL`: without this index the
+        // probe degrades to a sequential scan + sort whose cost grows with the
+        // whole message table while the pending set stays small (production
+        // 2026-10-07: 1.0-1.6 s typical, 78 s worst observed). A partial index
+        // holds only the still-pending ids, so the ordered probe stops after
+        // `limit` index entries without touching the null-free rest of the
+        // table.
+        //
+        // Startup cost: plain CREATE INDEX, not CONCURRENTLY, matching every
+        // other index in this migration. It indexes the id column only
+        // (8-byte fixed width, no TOAST access), it is built before the HTTP
+        // API binds (no concurrent writers), and the SHARE lock it takes for
+        // the build is harmless at boot. CONCURRENTLY cannot run inside a
+        // transaction block and on failure leaves an INVALID index that needs
+        // a manual DROP, a worse failure mode for a startup migration.
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_messages_embedding_vec_null
+            ON messages (id) WHERE embedding_vec IS NULL;
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        tracing::info!(
+            "[migration] pgvector embedding_vec column, HNSW index and pending-embeddings partial index ready"
+        );
     } else {
         tracing::warn!("[migration] pgvector not available: skipping vector column");
     }
