@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::error::{AppResult, ErrorContext};
+use crate::plugin::default_max_retries;
 use crate::plugins_yaml;
 
 /// Supported MCP transport types.
@@ -63,7 +64,7 @@ pub struct McpServerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
     /// Maximum consecutive failures before circuit breaker opens.
-    #[serde(default = "default_max_retries")]
+    #[serde(default = "crate::plugin::default_max_retries")]
     pub max_retries: u32,
     /// List of allowed tool names from this server ("*" = all).
     #[serde(default = "default_allowed_tools")]
@@ -80,9 +81,6 @@ pub struct McpServerConfig {
     pub pool_size: u32,
 }
 
-fn default_max_retries() -> u32 {
-    3
-}
 fn default_allowed_tools() -> Vec<String> {
     vec!["*".to_string()]
 }

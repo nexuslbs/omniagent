@@ -19,6 +19,14 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Default maximum consecutive failures before a plugin subprocess circuit
+/// breaker opens. Shared by the platform-plugin and external-MCP-server
+/// config defaults (previously two identical copies in
+/// `platform/external/mod.rs` and `mcp/external/config.rs`).
+pub(crate) fn default_max_retries() -> u32 {
+    3
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------

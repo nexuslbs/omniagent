@@ -45,7 +45,7 @@ pub struct PlatformPluginConfig {
     #[serde(default)]
     pub config: HashMap<String, String>,
     /// Maximum consecutive failures before circuit breaker opens.
-    #[serde(default = "default_max_retries")]
+    #[serde(default = "crate::plugin::default_max_retries")]
     pub max_retries: u32,
     /// Working directory for the subprocess (the plugin directory).
     /// Relative entrypoint args (e.g. "platform.py") resolve against this.
@@ -55,9 +55,6 @@ pub struct PlatformPluginConfig {
 
 fn default_enabled() -> bool {
     true
-}
-fn default_max_retries() -> u32 {
-    3
 }
 
 /// Collection of platform plugin configurations.
