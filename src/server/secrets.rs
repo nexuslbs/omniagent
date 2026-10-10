@@ -18,7 +18,7 @@ use sql_forge::sql_forge;
 use std::sync::Arc;
 use tracing::{error, info};
 
-use super::AppState;
+use super::{err_json, fmt_ts, ok_json, AppState};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -53,28 +53,6 @@ pub struct CreateSecretRequest {
 #[derive(Debug, Deserialize)]
 pub struct UpdateSecretRequest {
     pub value: String,
-}
-
-// ---------------------------------------------------------------------------
-// Response helpers
-// ---------------------------------------------------------------------------
-
-fn ok_json<T: Serialize>(data: T) -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({ "success": true, "data": data })),
-    )
-}
-
-fn err_json(status: StatusCode, msg: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (
-        status,
-        Json(serde_json::json!({ "success": false, "error": msg })),
-    )
-}
-
-fn fmt_ts(ts: &chrono::DateTime<chrono::Utc>) -> String {
-    ts.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
 // ---------------------------------------------------------------------------

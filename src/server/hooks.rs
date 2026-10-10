@@ -36,7 +36,7 @@ use std::sync::Arc;
 use tracing::error;
 
 use super::schedule::{ScheduleThread, ScheduleThreadsResponse, ThreadsQueryParams};
-use super::{apply_tri_state_string, deserialize_double_option, err_json, ok_json, AppState};
+use super::{apply_tri_state_string, deserialize_double_option, err_json, ok_json, slug_key, AppState};
 use crate::hooks::default_counter;
 use crate::tasks_yaml::{self, HookDef};
 use sql_forge::sql_forge;
@@ -216,20 +216,6 @@ fn default_true() -> Option<bool> {
     Some(true)
 }
 
-/// Slugify a name into a valid section key (the name IS the key).
-fn generate_id(name: &str) -> String {
-    name.to_lowercase()
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect()
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -360,7 +346,7 @@ async fn create_hook_handler(
         return err_json(StatusCode::BAD_REQUEST, "event is required");
     }
     // The name IS the key: slugify it into the hook id.
-    let id = generate_id(&body.name);
+    let id = slug_key(&body.name);
 
     let mut def = HookDef {
         event,
@@ -469,7 +455,7 @@ async fn update_hook_handler(
     // Single editable name: a name change re-keys the hook and re-points the
     // runtime counter to the new key (the name IS the id).
     let new_key = body.name.as_deref().and_then(|n| {
-        let k = generate_id(n);
+        let k = slug_key(n);
         if !k.is_empty() && k != id {
             Some(k)
         } else {

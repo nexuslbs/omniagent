@@ -19,7 +19,7 @@ use sqlx::FromRow;
 use std::sync::Arc;
 use tracing::error;
 
-use super::AppState;
+use super::{err_json, fmt_ts, ok_json, AppState};
 
 // ---------------------------------------------------------------------------
 // Router
@@ -174,28 +174,6 @@ struct MessageEventRow {
     msg_token_usage: Option<String>,
     workflow: Option<String>,
     workflow_step: Option<String>,
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn ok_json<T: Serialize>(data: T) -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({ "success": true, "data": data })),
-    )
-}
-
-fn err_json(status: StatusCode, msg: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (
-        status,
-        Json(serde_json::json!({ "success": false, "error": msg })),
-    )
-}
-
-fn fmt_ts(ts: &chrono::DateTime<chrono::Utc>) -> String {
-    ts.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
 // ---------------------------------------------------------------------------

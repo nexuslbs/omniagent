@@ -22,7 +22,7 @@ use std::sync::Arc;
 use tokio::fs;
 use tracing::error;
 
-use super::{err_json, ok_json, AppState};
+use super::{err_json, fmt_ts, ok_json, AppState};
 
 // ---------------------------------------------------------------------------
 // Router
@@ -146,10 +146,6 @@ struct SearchMessageRow {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn fmt_ts(ts: &chrono::DateTime<chrono::Utc>) -> String {
-    ts.format("%Y-%m-%dT%H:%M:%SZ").to_string()
-}
 
 /// Parse a JSON string column into a Value, returning None for null/empty/invalid.
 fn parse_token_usage(raw: Option<String>) -> Option<serde_json::Value> {

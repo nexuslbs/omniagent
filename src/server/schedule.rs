@@ -31,7 +31,7 @@ use sqlx::FromRow;
 use std::sync::Arc;
 use tracing::error;
 
-use super::{apply_tri_state_string, deserialize_double_option, err_json, ok_json, AppState};
+use super::{apply_tri_state_string, deserialize_double_option, err_json, fmt_ts, fmt_ts_opt, ok_json, slug_key, AppState};
 use crate::tasks_yaml::{self, ScheduleDef};
 
 // ---------------------------------------------------------------------------
@@ -311,27 +311,6 @@ fn parse_skills(val: Option<String>) -> Vec<String> {
     }
 }
 
-fn fmt_ts(ts: &chrono::DateTime<chrono::Utc>) -> String {
-    ts.format("%Y-%m-%dT%H:%M:%SZ").to_string()
-}
-
-fn fmt_ts_opt(ts: Option<chrono::DateTime<chrono::Utc>>) -> Option<String> {
-    ts.map(|t| fmt_ts(&t))
-}
-
-fn generate_id(name: &str) -> String {
-    name.to_lowercase()
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect()
-}
-
 /// Validate a 5-field cron expression. Returns an error message if invalid.
 fn validate_cron(schedule: &str) -> Option<String> {
     let fields: Vec<&str> = schedule.split_whitespace().collect();
@@ -502,7 +481,7 @@ async fn create_schedule_handler(
         return err_json(StatusCode::BAD_REQUEST, &err);
     }
 
-    let job_id = generate_id(name);
+    let job_id = slug_key(name);
     let mode = body.mode.as_deref().unwrap_or("agentic");
     let action_id = body.action_id.as_deref().map(str::trim).unwrap_or("");
     if mode == "action" && action_id.is_empty() {
@@ -648,7 +627,7 @@ async fn update_schedule_handler(
     // Single editable name: a name change re-keys the schedule and re-points
     // thread + cadence bookkeeping to the new key (the name IS the id).
     let new_key = body.name.as_deref().and_then(|n| {
-        let k = generate_id(n);
+        let k = slug_key(n);
         if !k.is_empty() && k != id {
             Some(k)
         } else {

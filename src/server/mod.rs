@@ -83,7 +83,6 @@ mod git_sync;
 
 // ── Shared response helpers ────────────────────────────────────────────────
 // Used by threads.rs, channels.rs, etc. for consistent JSON response format.
-// Existing modules (messages.rs, secrets.rs) have their own copies.
 
 /// Wrap success data: `{ "success": true, "data": ... }`
 pub(crate) fn ok_json<T: Serialize>(data: T) -> (StatusCode, Json<serde_json::Value>) {
@@ -99,6 +98,30 @@ pub(crate) fn err_json(status: StatusCode, msg: &str) -> (StatusCode, Json<serde
         status,
         Json(serde_json::json!({ "success": false, "error": msg })),
     )
+}
+/// Format a UTC timestamp as RFC3339-style `%Y-%m-%dT%H:%M:%SZ`.
+pub(crate) fn fmt_ts(ts: &chrono::DateTime<chrono::Utc>) -> String {
+    ts.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+/// Format an optional UTC timestamp through [`fmt_ts`].
+pub(crate) fn fmt_ts_opt(ts: Option<chrono::DateTime<chrono::Utc>>) -> Option<String> {
+    ts.map(|t| fmt_ts(&t))
+}
+
+/// Slugify a name into a stable lowercase key (the name IS the key): every
+/// non-alphanumeric char becomes `-` (underscores and hyphens are kept).
+pub(crate) fn slug_key(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 pub mod plugins;
 pub mod plugins_compile;
