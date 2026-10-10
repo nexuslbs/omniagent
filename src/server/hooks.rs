@@ -36,7 +36,9 @@ use std::sync::Arc;
 use tracing::error;
 
 use super::schedule::{ScheduleThread, ScheduleThreadsResponse, ThreadsQueryParams};
-use super::{apply_tri_state_string, deserialize_double_option, err_json, ok_json, slug_key, AppState};
+use super::{
+    apply_tri_state_string, deserialize_double_option, err_json, ok_json, slug_key, AppState,
+};
 use crate::hooks::default_counter;
 use crate::tasks_yaml::{self, HookDef};
 use sql_forge::sql_forge;

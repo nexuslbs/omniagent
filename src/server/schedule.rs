@@ -31,7 +31,10 @@ use sqlx::FromRow;
 use std::sync::Arc;
 use tracing::error;
 
-use super::{apply_tri_state_string, deserialize_double_option, err_json, fmt_ts, fmt_ts_opt, ok_json, slug_key, AppState};
+use super::{
+    apply_tri_state_string, deserialize_double_option, err_json, fmt_ts, fmt_ts_opt, ok_json,
+    slug_key, AppState,
+};
 use crate::tasks_yaml::{self, ScheduleDef};
 
 // ---------------------------------------------------------------------------
