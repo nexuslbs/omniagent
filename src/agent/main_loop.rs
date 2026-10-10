@@ -338,8 +338,6 @@ mod round_result_tests {
     }
 }
 
-
-
 /// Iteration accounting for the plan phase: the number of iteration slots
 /// the plan phase actually consumed. Returns 1 only when a plan was generated
 /// (plan_content.is_some()); 0 when planning was skipped or FAILED.
@@ -2557,10 +2555,9 @@ Previous plan:\n{}",
             // always manageable.
             let mut self_restart_block: Option<String> = None;
             if own_stack_tools.contains(&tool_name) {
-                self_restart_block = crate::agent::self_restart::self_restart_guard_block(
-                    &tc.function.arguments,
-                )
-                .await;
+                self_restart_block =
+                    crate::agent::self_restart::self_restart_guard_block(&tc.function.arguments)
+                        .await;
             }
             let self_restart_block_for_task = self_restart_block.clone();
             let panic_idx = idx;
