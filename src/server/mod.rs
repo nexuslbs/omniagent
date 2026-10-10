@@ -104,11 +104,6 @@ pub(crate) fn fmt_ts(ts: &chrono::DateTime<chrono::Utc>) -> String {
     ts.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
-/// Format an optional UTC timestamp through [`fmt_ts`].
-pub(crate) fn fmt_ts_opt(ts: Option<chrono::DateTime<chrono::Utc>>) -> Option<String> {
-    ts.map(|t| fmt_ts(&t))
-}
-
 /// Slugify a name into a stable lowercase key (the name IS the key): every
 /// non-alphanumeric char becomes `-` (underscores and hyphens are kept).
 pub(crate) fn slug_key(name: &str) -> String {

@@ -32,8 +32,8 @@ use std::sync::Arc;
 use tracing::error;
 
 use super::{
-    apply_tri_state_string, deserialize_double_option, err_json, fmt_ts, fmt_ts_opt, ok_json,
-    slug_key, AppState,
+    apply_tri_state_string, deserialize_double_option, err_json, fmt_ts, ok_json, slug_key,
+    AppState,
 };
 use crate::tasks_yaml::{self, ScheduleDef};
 
