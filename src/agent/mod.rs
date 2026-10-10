@@ -31,6 +31,7 @@ pub(crate) mod prompt_sections;
 pub mod recovery;
 pub(crate) mod response_handler;
 pub(crate) mod response_hygiene;
+pub(crate) mod self_restart;
 pub mod summary_trigger;
 pub mod task_registry;
 pub(crate) mod terminal_summary;
